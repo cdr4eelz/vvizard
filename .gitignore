@@ -1,0 +1,6 @@
+build/
+*.o
+vvizard
+*.ppm
+*.png
+__pycache__/
