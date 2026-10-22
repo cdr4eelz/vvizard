@@ -16,9 +16,8 @@ big-endian MIPS32 binaries (`elf32-tradbigmips`) on Unicorn 2.x, using the hardw
         cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/.local -DUNICORN_ARCH=mips
         cmake --build build -j$(nproc) && cmake --install build
 
-    Then build VVIZARD with `PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig`, and make sure the program loads that library
-    at run time, through an rpath (`-Wl,-rpath,$HOME/.local/lib`) or `LD_LIBRARY_PATH=$HOME/.local/lib`.
-    Otherwise it picks up the system 2.0.1.
+    No exports are needed after that: the Makefile searches `$(HOME)/.local/lib/pkgconfig` first and links with an
+    rpath to `$(HOME)/.local/lib`, so the binary loads 2.1.1 instead of the system 2.0.1.
 - **raylib** (pkg-config module `raylib`). The PixelFeeder display window uses it, and the program links with `-lraylib`.
   It is needed even if you only run with `--no-window`.
   - Debian/Ubuntu: `libraylib-dev` where packaged. Debian 13 may not package it. If it doesn't, build raylib from
@@ -36,8 +35,8 @@ The `Makefile` finds Unicorn and raylib through pkg-config:
 - `BIOS ?=` defaults to `../../software/gios/gios.inst.bin`, so build GIOS first (`make` in `software/gios`).
   Its absolute path is compiled in as `VV_DEFAULT_BIOS`, and `make run` passes `--bios $(BIOS)`.
 - Big-endian is the default CPU mode. Pick one at run time with `--little` or `--big`.
-- For a Unicorn in `~/.local`, export `PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig` before running `make`, and
-  `LD_LIBRARY_PATH=$HOME/.local/lib` before running the program (or add an rpath, as above).
+- A Unicorn in `~/.local` takes priority automatically (PKG_CONFIG_PATH and rpath are set in the Makefile, and
+  `make run` also sets `LD_LIBRARY_PATH`).
 
 ## Usage
     ./vvizard [opts] [isr.elf ...] [prog.elf]      # entry = last ELF's e_entry
