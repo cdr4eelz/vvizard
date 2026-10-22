@@ -9,10 +9,25 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <limits.h>
+#include <time.h>
 #include "memmap.h"
 #include "loader.h"
 #include "display.h"
 #include "gpu.h"
+
+/* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
+ * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
+static char *uart_in;
+static char *decode_escapes(const char *s) {
+    char *o = malloc(strlen(s) + 1), *d = o;
+    for (; *s; s++) {
+        if (*s == '\\' && s[1]) {
+            s++;
+            *d++ = *s == 'r' ? '\r' : *s == 'n' ? '\n' : *s == 't' ? '\t' : *s;
+        } else *d++ = *s;
+    }
+    *d = 0; return o;
+}
 
 #ifndef VV_DEFAULT_BIG_ENDIAN
 #define VV_DEFAULT_BIG_ENDIAN 1
@@ -59,8 +74,10 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     uint32_t v = 0;
     switch (w) {
     case VV_OW_UATX_READY: v = 1; break;        /* host stdout always ready */
-    case VV_OW_UARX_VALID: { struct pollfd p = { 0, POLLIN, 0 }; v = poll(&p, 1, 0) > 0 && (p.revents & POLLIN); break; }
-    case VV_OW_UARX_DATA: { unsigned char c = 0; struct pollfd p = { 0, POLLIN, 0 };
+    case VV_OW_UARX_VALID: if (uart_in && *uart_in) { v = 1; break; }
+        { struct pollfd p = { 0, POLLIN, 0 }; v = poll(&p, 1, 0) > 0 && (p.revents & POLLIN); break; }
+    case VV_OW_UARX_DATA: if (uart_in && *uart_in) { v = (unsigned char)*uart_in++; break; }
+        { unsigned char c = 0; struct pollfd p = { 0, POLLIN, 0 };
         if (poll(&p, 1, 0) > 0 && read(0, &c, 1) == 1) { v = c; } break; }
     case VV_OW_CNT_CYCLE: /* no cycle model: cycles == instructions */
     case VV_OW_CNT_INST:  v = (uint32_t)(insn_count - cnt_base_insn); break;
@@ -146,6 +163,31 @@ static void hook_bios_write(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, in
     fprintf(stderr, "[warn] data write to BIOS 0x%08x size %d val 0x%llx (HW drops this)\n", (uint32_t)a, sz, (long long)v);
 }
 
+/* DDR power-up contents: random by default (real DRAM is not zeroed). splitmix64, seed printed for repeatability. */
+static int      opt_random_ddr = 1;
+static int      ddr_seed_given = 0;
+static uint64_t ddr_seed;
+
+static uint64_t splitmix64(uint64_t *x) {
+    uint64_t z = (*x += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+static int fill_ddr_random(uc_engine *uc, uint32_t base, uint32_t size) {
+    enum { CHUNK = 1u << 20 };
+    static uint64_t buf[CHUNK / 8];
+    uint64_t st = ddr_seed;
+    for (uint32_t off = 0; off < size; off += CHUNK) {
+        uint32_t n = size - off < CHUNK ? size - off : CHUNK;
+        for (uint32_t i = 0; i < (n + 7) / 8; i++) buf[i] = splitmix64(&st);
+        uc_err e = uc_mem_write(uc, base + off, buf, n);
+        if (e) { fprintf(stderr, "random-ddr @0x%08x: %s\n", base + off, uc_strerror(e)); return 1; }
+    }
+    return 0;
+}
+
 static const char *gpr[32] = {"zero","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3","t4","t5","t6","t7",
     "s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
 static void dump_regs(uc_engine *uc) {
@@ -181,6 +223,9 @@ static void usage(const char *p) {
 "  --bios FILE        raw BIOS image loaded at 0x40000000 (default: gios.inst.bin)\n"
 "  --no-bios          don't auto-load a BIOS\n"
 "  --no-window        don't open the PixelFeeder display window\n"
+"  --random-ddr[=SEED] fill DDR with random data at power-up (default on; seed defaults to time)\n"
+"  --no-random-ddr    start DDR zeroed instead\n"
+"  --uart-in STR      feed STR to UART RX before stdin (\\r \\n escapes; GIOS needs \\r)\n"
 "  --dump-frame F.ppm write the selected frame (PF_FRAME) as PPM at exit\n"
 "  --trace-regs       --trace plus GPRs changed by the previous insn (debug)\n"
 "  --hold             keep the window open after the run until it is closed\n"
@@ -198,7 +243,7 @@ int main(int argc, char **argv) {
     static struct option lo[] = {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
         {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},
-        {"no-window",0,0,'W'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"help",0,0,'h'},{0,0,0,0}};
+        {"no-window",0,0,'W'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"help",0,0,'h'},{0,0,0,0}};
     int c;
     while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) switch (c) {
         case 'l': if (nloads < 32) loads[nloads++] = optarg; break;
@@ -216,6 +261,9 @@ int main(int argc, char **argv) {
         case 'b': bios_path = optarg; break;
         case 'N': no_bios = 1; break;
         case 'R': opt_trace = 1; opt_trace_regs = 1; break;
+        case 'r': opt_random_ddr = 1; if (optarg) { ddr_seed = strtoull(optarg, NULL, 0); ddr_seed_given = 1; } break;
+        case 'z': opt_random_ddr = 0; break;
+        case 'U': uart_in = decode_escapes(optarg); break;
         case 'x': if (nexp < 32) expects[nexp++] = optarg; break;
         default: usage(argv[0]); return c == 'h' ? 0 : 2;
     }
@@ -229,6 +277,16 @@ int main(int argc, char **argv) {
         err = r->kind == VV_MMIO ? uc_mmio_map(uc, r->base, r->size, mmio_read, NULL, mmio_write, NULL)
                                  : uc_mem_map(uc, r->base, r->size, UC_PROT_ALL);
         if (err) { fprintf(stderr, "map %s @0x%08x: %s\n", r->name, r->base, uc_strerror(err)); return 1; }
+    }
+    /* Random DDR before any ELF/--load/BIOS goes in, so images overwrite where they land (as on HW). */
+    if (opt_random_ddr) {
+        if (!ddr_seed_given) ddr_seed = (uint64_t)time(NULL);
+        for (size_t i = 0; i < NREG; i++)
+            if (!strcmp(regions[i].name, "DDR")) {
+                fprintf(stderr, "[ddr] random fill %u MiB, seed=%llu (repeat with --random-ddr=%llu)\n",
+                        regions[i].size / VV_MiB, (unsigned long long)ddr_seed, (unsigned long long)ddr_seed);
+                if (fill_ddr_random(uc, regions[i].base, regions[i].size)) return 1;
+            }
     }
     uc_hook h;
     uc_hook_add(uc, &h, UC_HOOK_TLB_FILL, tlb_fill, NULL, 1, 0);
