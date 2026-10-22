@@ -52,3 +52,22 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
 - `alias` (runs at 0xC0000180): stores to 0x12003000 and reads back through 0x32003000, before and after `mtc0 $0,Status`.
 - `frame`: fills x 100..131, y 50..59 of frame 1 with 0x00FF8000, writes 1 to PF_FRAME, then `break`.
 - `gpcmds` + `gplaunch`: load gpcmds at 0x12003000 and gplaunch at 0x40000000, run with `--dump-frame`, check with `tests/check_gp.py`.
+- `test-player` (`make test-player`, ~1.5 s): boots GIOS -> proj6 headless with `--no-random-ddr` and an
+  `--input-script`. proj6 reads player input only in its UART-RX ISR (isr6.s `ISR_UARX`): keys
+  `u i o / j k l / m , .` = up-left, up, up-right / left, centre (no-op), right / down-left, down, down-right;
+  orthogonal = 6 px, diagonal = 4 px per key. Each of 12 segments (idle, up, idle, down, left, right, up-left,
+  idle, up-right, down-left, down-right, `k`) sends the key 3 times, one byte every 2 PF_FRAME writes, then dumps
+  the displayed frame 6 frames later. The player ellipse (colours 0xFF6644/0x4466FF) is located by bbox centre.
+  Passes if every segment's displacement equals 3x the per-key delta within 1 px (idle/`k` => 0,0) and the start
+  position is (400,300). Measured: exact (±18 / ±12 px, idle 0).
+
+## Input script and interrupt injection
+- `--input-script F`: lines `fN|iN key STR` (queue STR on UART RX at the Nth PF_FRAME write / insn N; escapes
+  `\r \n \t \\`, `\s`=space) or `fN|iN dump F.ppm`. Implies `--irq`. RX priority: `--uart-in`, script queue, stdin.
+- `--dump-every N [--dump-prefix P]`: dump the displayed frame on every Nth PF_FRAME write to `P%06d.ppm`.
+- `--irq`: COP0150-style UARX interrupt injection. Unicorn cannot set Cause IP bits or expose Cause/EPC, and its own
+  exception entry (MIPS vector, EXL) differs from COP0150, so vvizard does it by hand in the code hook: when
+  Status bit0 (IE) and bit10 (IM_UARX) are set and RX data is available (and the current insn is not a delay slot),
+  it sets shadow EPC=pc, clears Status.IE and jumps to 0xC0000180. `mfc0 $13/$14` inside the ISR BRAM get the shadow
+  Cause (bit10 = RX valid, level) / EPC; `mtc0 $13/$14` update the shadow. The ISR's `jr $k0; mtc0 Status` return
+  runs natively. Only UARX is injected (no TIMER/RTC/UATX/GPU), so the proj6 clock never ticks.

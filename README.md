@@ -99,7 +99,7 @@ vvizard reproduces this with Unicorn's virtual-TLB mode and a fill hook, which i
 - **Interrupts:** none are injected yet, and the CP0 timer does not run (details in NOTES.md).
 
 ## Tests
-Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`). How to run them and their pass conditions are in NOTES.md.
+Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`). `make test-player` runs `tests/test_player.py` (proj6 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). How to run them and their pass conditions are in NOTES.md.
 
 ## PixelFeeder display (raylib, `src/display.c`)
 - Frame N starts at `0x10000000 + N<<22`. The visible area is 800×600, rows start 4096 bytes apart, and each pixel is a 32-bit big-endian XRGB word.

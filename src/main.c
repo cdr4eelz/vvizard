@@ -68,17 +68,130 @@ static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
 static int trace_left = -1;
 
+/* ---- UART RX sources: --uart-in, then --input-script bytes that are due, then stdin ---- */
+static int stdin_peek = -1, stdin_eof;
+static char script_q[4096]; static size_t sq_head, sq_tail;   /* due script bytes */
+static int rx_avail(void) {
+    if (uart_in && *uart_in) return 1;
+    if (sq_head != sq_tail) return 1;
+    if (stdin_peek < 0 && !stdin_eof) {
+        struct pollfd p = { 0, POLLIN, 0 }; unsigned char c;
+        if (poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP))) {
+            if (read(0, &c, 1) == 1) stdin_peek = c; else stdin_eof = 1; }
+    }
+    return stdin_peek >= 0;
+}
+static int rx_take(void) {
+    if (!rx_avail()) return 0;
+    if (uart_in && *uart_in) return (unsigned char)*uart_in++;
+    if (sq_head != sq_tail) { int c = (unsigned char)script_q[sq_head]; sq_head = (sq_head + 1) % sizeof script_q; return c; }
+    int c = stdin_peek; stdin_peek = -1; return c;
+}
+
+/* ---- --input-script FILE: timed events. Line: WHEN ACTION ARG
+ *   WHEN   fN (Nth PF_FRAME write) or iN (instruction count N)
+ *   ACTION key STR  (queue STR on UART RX; escapes \r \n \t \\ \s=space)
+ *          dump PATH (write the displayed frame as PPM at that point)
+ * '#' starts a comment. Events must be listed in time order per kind. ---- */
+typedef struct { int is_frame; uint64_t when; int is_dump; char *arg; } vv_event;
+static vv_event *events; static int nevents, ev_next_f, ev_next_i;
+static uint64_t pf_writes;               /* number of PF_FRAME writes so far */
+static int opt_irq;                      /* inject UARX interrupts (on with --input-script or --irq) */
+static unsigned dump_every; static const char *dump_prefix = "frame";
+static void run_event(uc_engine *uc, vv_event *e) {
+    if (e->is_dump) vv_disp_dump_ppm(uc, e->arg);
+    else for (char *c = e->arg; *c; c++) {
+        size_t n = (sq_tail + 1) % sizeof script_q;
+        if (n == sq_head) { fprintf(stderr, "[script] RX queue full\n"); break; }
+        script_q[sq_tail] = *c; sq_tail = n;
+    }
+    fprintf(stderr, "[script] %c%llu %s %s (insn %llu, frame %llu)\n", e->is_frame ? 'f' : 'i',
+            (unsigned long long)e->when, e->is_dump ? "dump" : "key", e->is_dump ? e->arg : "", 
+            (unsigned long long)insn_count, (unsigned long long)pf_writes);
+}
+static void run_due_events(uc_engine *uc, int frame_kind) {
+    for (int i = 0; i < nevents; i++) {
+        vv_event *e = &events[i];
+        if (!e->arg || e->is_frame != frame_kind) continue;
+        if (e->when <= (frame_kind ? pf_writes : insn_count)) { run_event(uc, e); free(e->arg); e->arg = NULL; }
+    }
+}
+static int load_script(const char *path) {
+    FILE *f = fopen(path, "r"); if (!f) { perror(path); return -1; }
+    char line[1024]; int ln = 0;
+    while (fgets(line, sizeof line, f)) {
+        ln++; char *h = strchr(line, '#'); if (h) *h = 0;
+        char w[64], act[16], arg[900] = "";
+        int n = sscanf(line, " %63s %15s %899[^\n]", w, act, arg);
+        if (n <= 0) continue;
+        if (n < 2 || (w[0] != 'f' && w[0] != 'i') || (strcmp(act, "key") && strcmp(act, "dump"))) {
+            fprintf(stderr, "%s:%d: bad line\n", path, ln); fclose(f); return -1; }
+        for (char *e = arg + strlen(arg); e > arg && (e[-1] == ' ' || e[-1] == '\r'); ) *--e = 0;
+        events = realloc(events, (nevents + 1) * sizeof *events);
+        vv_event *e = &events[nevents++];
+        e->is_frame = w[0] == 'f'; e->when = strtoull(w + 1, 0, 0); e->is_dump = !strcmp(act, "dump");
+        if (e->is_dump) e->arg = strdup(arg);
+        else { for (char *q = arg; *q; q++) if (q[0] == '\\' && q[1] == 's') { q[0] = ' '; memmove(q + 1, q + 2, strlen(q + 2) + 1); }
+               e->arg = decode_escapes(arg); }
+    }
+    fclose(f); (void)ev_next_f; (void)ev_next_i; return 0;
+}
+
+/* ---- Shadow COP0 Cause/EPC + UARX interrupt injection ----
+ * Unicorn 2.1.1 can't set Cause IP bits or read Cause/EPC from the host (NOTES.md), and its
+ * exception entry would use the MIPS vector + EXL, which COP0150 lacks.  So: when Status.IE
+ * (bit 0) and Status.IM_UARX (bit 10) are set and RX data is available, we emulate the COP0150
+ * entry ourselves: EPC=pc, clear Status.IE, jump to PC_ISR (0xC0000180).  mfc0 $13/$14 results
+ * are patched with the shadow values; mtc0 $13/$14 update the shadow.  The ISR returns with
+ * `jr $k0; mtc0 Status` (no eret), which Unicorn executes natively. */
+static uint32_t sh_cause, sh_epc; static int fix_rt = -1; static uint32_t fix_val;
+static uint32_t last_pc = 0xFFFFFFFFu; static uint64_t irq_count;
+#define VV_IM_UARX 0x400u
+static uint32_t read_insn(uc_engine *uc, uint32_t a) {
+    unsigned char b[4]; if (uc_mem_read(uc, vv_canon(a), b, 4)) return 0;
+    return b[0]<<24|b[1]<<16|b[2]<<8|b[3];
+}
+static int is_branch(uint32_t i) {
+    unsigned op = i >> 26, fn = i & 0x3F;
+    return (op == 0 && (fn == 8 || fn == 9)) || op == 1 || (op >= 2 && op <= 7) || (op >= 20 && op <= 23);
+}
+static void irq_step(uc_engine *uc, uint32_t pc) {
+    if (fix_rt > 0) { uc_reg_write(uc, UC_MIPS_REG_0 + fix_rt, &fix_val); }
+    fix_rt = -1;
+    if ((pc >> 28) == 0xC) {                    /* COP0 shadowing only needed in the ISR BRAM */
+        uint32_t i = read_insn(uc, pc);
+        if ((i >> 26) == 0x10 && (i & 0x7FF) == 0) {
+            unsigned rs = (i >> 21) & 31, rt = (i >> 16) & 31, rd = (i >> 11) & 31;
+            uint32_t v;
+            if (rs == 0 && (rd == 13 || rd == 14)) {      /* mfc0 */
+                fix_rt = rt; fix_val = rd == 14 ? sh_epc : (sh_cause | (rx_avail() ? VV_IM_UARX : 0));
+            } else if (rs == 4 && (rd == 13 || rd == 14)) { /* mtc0 */
+                uc_reg_read(uc, UC_MIPS_REG_0 + rt, &v);
+                if (rd == 13) sh_cause = v & ~VV_IM_UARX; else sh_epc = v;  /* UARX is level (RX valid) */
+            }
+        }
+    }
+    if (rx_avail()) {
+        uint32_t st; uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
+        if ((st & 1) && (st & VV_IM_UARX) && !(last_pc + 4 == pc && is_branch(read_insn(uc, last_pc)))) {
+            sh_epc = pc; st &= ~1u; uc_reg_write(uc, UC_MIPS_REG_CP0_STATUS, &st);
+            uint32_t npc = VV_PC_ISR; irq_count++;
+            last_pc = 0xFFFFFFFFu;
+            uc_reg_write(uc, UC_MIPS_REG_PC, &npc);   /* insn at pc not executed; resumes at ISR */
+            return;
+        }
+    }
+    last_pc = pc;
+}
+
 static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     (void)uc; (void)u; (void)size;
     uint32_t w = (off & 0xFF) & ~3u;            /* addra[5:0] decode: alias every 0x100 */
     uint32_t v = 0;
     switch (w) {
     case VV_OW_UATX_READY: v = 1; break;        /* host stdout always ready */
-    case VV_OW_UARX_VALID: if (uart_in && *uart_in) { v = 1; break; }
-        { struct pollfd p = { 0, POLLIN, 0 }; v = poll(&p, 1, 0) > 0 && (p.revents & POLLIN); break; }
-    case VV_OW_UARX_DATA: if (uart_in && *uart_in) { v = (unsigned char)*uart_in++; break; }
-        { unsigned char c = 0; struct pollfd p = { 0, POLLIN, 0 };
-        if (poll(&p, 1, 0) > 0 && read(0, &c, 1) == 1) { v = c; } break; }
+    case VV_OW_UARX_VALID: v = rx_avail(); break;
+    case VV_OW_UARX_DATA:  v = rx_take(); break;
     case VV_OW_CNT_CYCLE: /* no cycle model: cycles == instructions */
     case VV_OW_CNT_INST:  v = (uint32_t)(insn_count - cnt_base_insn); break;
     case VV_OW_PF_FRAME:  v = 0x10000000u | (((pf_frame >> VV_FSHIFT) & VV_FNMASK) << VV_FSHIFT); break;
@@ -103,7 +216,11 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     switch (w) {
     case VV_OW_UATX_DATA: putchar(v & 0xFF); fflush(stdout); return; /* dina[7:0] */
     case VV_OW_CNT_RESET: cnt_base_insn = insn_count; break;
-    case VV_OW_PF_FRAME:  pf_frame = v; vv_disp_pf_write(uc, v); break;
+    case VV_OW_PF_FRAME:  pf_frame = v; vv_disp_pf_write(uc, v); pf_writes++;
+        if (dump_every && pf_writes % dump_every == 0) { char fn[PATH_MAX];
+            snprintf(fn, sizeof fn, "%s%06llu.ppm", dump_prefix, (unsigned long long)pf_writes); vv_disp_dump_ppm(uc, fn); }
+        if (nevents) run_due_events(uc, 1);
+        break;
     case VV_OW_GP_FRAME:  gp_frame = v; break;
     case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
         { int n = vv_gpu_run(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1);
@@ -127,6 +244,8 @@ static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e,
 static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     (void)size; (void)u;
     insn_count++;
+    if (nevents) run_due_events(uc, 0);
+    if (opt_irq) irq_step(uc, (uint32_t)addr);
     if ((insn_count & 0xFFF) == 0 && vv_disp_tick(uc)) { fprintf(stderr, "[stop] window closed\n"); uc_emu_stop(uc); }
     if (opt_trace && trace_left != 0) {
         uint32_t insn = 0; unsigned char b[4];
@@ -229,8 +348,12 @@ static void usage(const char *p) {
 "  --dump-frame F.ppm write the selected frame (PF_FRAME) as PPM at exit\n"
 "  --trace-regs       --trace plus GPRs changed by the previous insn (debug)\n"
 "  --hold             keep the window open after the run until it is closed\n"
+"  --input-script F  timed events (fN|iN key STR / dump F.ppm); enables --irq\n"
+"  --irq              inject UART-RX interrupts (EPC/Cause shadowed, ISR at 0x%08x)\n"
+"  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
+"  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --expect REG=VAL   exit 0 iff GPR REG equals VAL at stop (repeatable)\n", p, VV_PC_BOOT,
-    VV_DEFAULT_BIG_ENDIAN ? "big" : "little");
+    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR);
 }
 
 int main(int argc, char **argv) {
@@ -242,7 +365,7 @@ int main(int argc, char **argv) {
     max_insns = 1000000;
     static struct option lo[] = {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
-        {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},
+        {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},{"input-script",1,0,'S'},{"irq",0,0,'I'},{"dump-every",1,0,'E'},{"dump-prefix",1,0,'P'},
         {"no-window",0,0,'W'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"help",0,0,'h'},{0,0,0,0}};
     int c;
     while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) switch (c) {
@@ -264,6 +387,10 @@ int main(int argc, char **argv) {
         case 'r': opt_random_ddr = 1; if (optarg) { ddr_seed = strtoull(optarg, NULL, 0); ddr_seed_given = 1; } break;
         case 'z': opt_random_ddr = 0; break;
         case 'U': uart_in = decode_escapes(optarg); break;
+        case 'S': if (load_script(optarg)) return 2; opt_irq = 1; break;
+        case 'I': opt_irq = 1; break;
+        case 'E': dump_every = strtoul(optarg, 0, 0); break;
+        case 'P': dump_prefix = optarg; break;
         case 'x': if (nexp < 32) expects[nexp++] = optarg; break;
         default: usage(argv[0]); return c == 'h' ? 0 : 2;
     }
@@ -344,6 +471,8 @@ int main(int argc, char **argv) {
     if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0 && max_insns && insn_count >= max_insns) err = UC_ERR_OK;
     if (!err && max_insns && insn_count >= max_insns) fprintf(stderr, "[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
     if (err) fprintf(stderr, "[stop] uc_emu_start: %s\n", uc_strerror(err));
+    if (opt_irq) fprintf(stderr, "[irq] UARX interrupts injected: %llu, PF_FRAME writes: %llu\n",
+                         (unsigned long long)irq_count, (unsigned long long)pf_writes);
     dump_regs(uc);
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);

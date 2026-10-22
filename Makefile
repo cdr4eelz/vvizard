@@ -38,7 +38,7 @@ BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM
 AUTORUN ?= jal 60000000\r
 ARGS ?= --random-ddr --max-insns 0
 
-.PHONY: all clean fresh run
+.PHONY: all clean fresh run test-player
 
 all: $(TARGET)
 
@@ -56,6 +56,9 @@ $(BUILD_DIR):
 
 run: $(TARGET)
 	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') $(ARGS) $(BIN)
+
+test-player: $(TARGET)
+	python3 tests/test_player.py
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
