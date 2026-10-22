@@ -1,24 +1,50 @@
-# VVIZARD — a minimal Unicorn-based emulator for the CS150 MIPS150 system
+# VVIZARD (GitHub: cdr4eelz/vvizard) — a minimal Unicorn-based emulator for the CS150 MIPS150 system
 
 This is a fresh project. It does not use any code from `tool/vizard`. It runs the project's
 big-endian MIPS32 binaries (`elf32-tradbigmips`) on Unicorn 2.x, using the hardware memory map.
 
 ## Dependencies
-Debian 13: `sudo apt-get install -y libunicorn-dev` (Unicorn **2.1.1**). This provides
-`/usr/include/unicorn/unicorn.h` and the pkg-config module `unicorn`.
+- **gcc, make, pkg-config.**
+- **Unicorn 2.1.1 or newer** (pkg-config module `unicorn`). VVIZARD needs the virtual-TLB API
+  (`uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL)`, `uc_tlb_entry`, `UC_HOOK_TLB_FILL`), which first appeared in 2.1.
+  - Debian 13: `sudo apt-get install -y libunicorn-dev` (2.1.1).
+  - Ubuntu 24.04: `libunicorn-dev` is **2.0.1, too old** (build fails on `uc_tlb_entry`). Build 2.1.1 into `~/.local` instead
+    (needs CMake 3.x or newer; the Xilinx-bundled cmake 3.3.2 is too old):
 
-## Build (no Makefile yet — still to be decided)
-    mkdir -p build
-    CF="-std=gnu99 -Wall -Wextra -O0 -g3 -DVV_DEFAULT_BIG_ENDIAN=1 $(pkg-config --cflags unicorn)"
-    gcc $CF -c src/main.c   -o build/main.o
-    gcc $CF -c src/loader.c -o build/loader.o
-    gcc -o vvizard build/main.o build/loader.o $(pkg-config --libs unicorn)
-To make little-endian the default, use `-DVV_DEFAULT_BIG_ENDIAN=0`. You can also pick at run time with `--little` or `--big`.
+        curl -LO https://github.com/unicorn-engine/unicorn/archive/refs/tags/2.1.1.tar.gz
+        tar xzf 2.1.1.tar.gz && cd unicorn-2.1.1
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/.local -DUNICORN_ARCH=mips
+        cmake --build build -j$(nproc) && cmake --install build
+
+    Then build VVIZARD with `PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig`, and make sure the program loads that library
+    at run time, through an rpath (`-Wl,-rpath,$HOME/.local/lib`) or `LD_LIBRARY_PATH=$HOME/.local/lib`.
+    Otherwise it picks up the system 2.0.1.
+- **raylib** (pkg-config module `raylib`). The PixelFeeder display window uses it, and the program links with `-lraylib`.
+  It is needed even if you only run with `--no-window`.
+  - Debian/Ubuntu: `libraylib-dev` where packaged. Debian 13 may not package it. If it doesn't, build raylib from
+    source (https://github.com/raysan5/raylib) or use a third-party package. This machine has `libraylib6-dev` 6.2.0.
+  - Check with `pkg-config --modversion unicorn raylib`.
+
+## Build
+The `Makefile` finds Unicorn and raylib through pkg-config:
+
+    make            # build ./vvizard (objects in build/)
+    make fresh      # clean + rebuild
+    make clean
+    make run BIN="path/isr.elf path/prog.elf" ARGS="--no-window --max-insns 200000"
+
+- `BIOS ?=` defaults to `../../software/gios/gios.inst.bin`, so build GIOS first (`make` in `software/gios`).
+  Its absolute path is compiled in as `VV_DEFAULT_BIOS`, and `make run` passes `--bios $(BIOS)`.
+- Big-endian is the default CPU mode. Pick one at run time with `--little` or `--big`.
+- For a Unicorn in `~/.local`, export `PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig` before running `make`, and
+  `LD_LIBRARY_PATH=$HOME/.local/lib` before running the program (or add an rpath, as above).
 
 ## Usage
     ./vvizard [opts] [isr.elf ...] [prog.elf]      # entry = last ELF's e_entry
-      --load FILE@ADDR  raw binary   --entry ADDR   --sp ADDR (0x50004000)
-      --max-insns N (1e6)  --until ADDR  --trace[=N]  --quiet-mmio  --expect REG=VAL
+      --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (0x50004000)
+      --max-insns N (1e6, 0=unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio
+      --little | --big   --bios FILE   --no-bios   --no-window   --dump-frame F.ppm   --hold
+      --expect REG=VAL
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
 
