@@ -67,25 +67,57 @@ static void do_rect(uc_engine *uc, int xa, int ya, int xb, int yb, uint32_t edge
         else edge_row(uc, y, xa, xb, edge, fill);
     }
 }
-/* Scanline ellipse centered (xc,yc), radii a (x) and b (y): for each row offset dy the
- * half-width is the largest w with w^2*b^2 + dy^2*a^2 <= a^2*b^2; edge at +-w, fill between. */
-static void do_elip(uc_engine *uc, int xc, int yc, int a, int b, uint32_t edge, uint32_t fill) {
-    if (a == 0 || b == 0) { do_line(uc, xc - a, yc - b, xc + a, yc + b, edge); return; }
-    int64_t A2 = (int64_t)a * a, B2 = (int64_t)b * b, AB = A2 * B2;
-    int w = a, prev_w = 0;
-    for (int dy = 0; dy <= b; dy++) {
-        int64_t lim = AB - (int64_t)dy * dy * A2;
-        while (w > 0 && (int64_t)w * w * B2 > lim) w--;
-        /* Close gaps on steep sides: draw edge spans between this and previous half-width. */
-        int outer = dy == 0 ? w : prev_w;
-        for (int s = -1; s <= 1; s += 2) {
-            int y = yc + s * dy;
-            if (s == 1 && dy == 0) continue;
-            edge_row(uc, y, xc - w, xc + w, edge, fill);
-            if (outer > w + 1) { span(uc, y, xc - outer + 1, xc - w, edge); span(uc, y, xc + w, xc + outer - 1, edge); }
-            if (dy == b && w > 0) span(uc, y, xc - w, xc + w, edge);   /* flat top/bottom cap */
-        }
-        prev_w = w;
+/* ScanLineRunner-equivalent run writer for ellipse spans: 10-bit wrapped row/cols, start/finish
+ * swapped if reversed (ScanLineRunner.v:84), edge colour at both ends, fill strictly between only
+ * if fill[31:24] != 0 (ScanLineRunner.v:118-147). No clipping: off-screen rows/cols (<1024) land in
+ * frame DRAM just like hardware (1024 rows x 4096 B = 4 MiB frame region). */
+static void slr_run(uc_engine *uc, uint32_t y, uint32_t l, uint32_t r, uint32_t edge, uint32_t fill) {
+    static uint8_t buf[1024 * 4];
+    y &= 1023; l &= 1023; r &= 1023;
+    if (l > r) { uint32_t t = l; l = r; r = t; }
+    int dofill = (fill & 0xFF000000u) != 0;
+    for (uint32_t x = l; x <= r; x++) {
+        uint32_t c = (x == l || x == r) ? edge : fill;
+        uint8_t *p = buf + 4 * (x - l);
+        p[0] = c >> 24; p[1] = c >> 16; p[2] = c >> 8; p[3] = c;
+    }
+    uint32_t row = fbase + y * VV_ROW_PITCH;
+    if (dofill || r - l < 2) {
+        uc_mem_write(uc, vv_canon(row + l * 4), buf, (size_t)(r - l + 1) * 4);
+    } else {
+        uc_mem_write(uc, vv_canon(row + l * 4), buf, 4);
+        uc_mem_write(uc, vv_canon(row + r * 4), buf + 4 * (r - l), 4);
+    }
+}
+static void elip_rows(uc_engine *uc, uint32_t xc, uint32_t yc, uint32_t x, uint32_t y, uint32_t e, uint32_t f) {
+    slr_run(uc, yc - y, xc - x, xc + x, e, f);   /* SLa1/SLb1: yT */
+    slr_run(uc, yc + y, xc - x, xc + x, e, f);   /* SLa2/SLb2: yB */
+}
+/* Direct port of ElipseEngine.v midpoint algorithm (reference C at ElipseEngine.v:316-357),
+ * 32-bit arithmetic as in the RTL, loop guard ElipseEngine.v:259. x,y are 10-bit registers. */
+static void do_elip(uc_engine *uc, uint32_t xc, uint32_t yc, uint32_t a, uint32_t b, uint32_t edge, uint32_t fill) {
+    uint32_t x = 0, y = b;
+    uint32_t AA = a * a, BB = b * b, AABB = AA * BB;
+    uint32_t AAy = AA * b, BBx = 0, BB2xp3 = (BB << 1) + BB;
+    int32_t stopper = (int32_t)((AA >> 1) + BB);
+    int32_t dd = (int32_t)(BB + (AA >> 2) - AAy);
+    for (;;) {                                   /* Phase A */
+        elip_rows(uc, xc, yc, x, y, edge, fill);
+        int32_t dd_next = dd; uint32_t y_next = y, AAy_next = AAy;
+        if (dd >= 0) { dd_next = (int32_t)((uint32_t)dd + (AA << 1) - (AAy << 1)); y_next = (y - 1) & 1023; AAy_next = AAy - AA; }
+        if (!(y > 0 && x <= a && (AAy - BBx) > (uint32_t)stopper)) break;
+        dd = (int32_t)((uint32_t)dd_next + BB2xp3);
+        y = y_next; AAy = AAy_next; x = (x + 1) & 1023; BBx += BB; BB2xp3 += BB << 1;
+    }
+    uint32_t BB2xp2 = BB2xp3 - BB;               /* Phase B */
+    uint32_t ym1 = (y - 1) & 1023;
+    dd = (int32_t)(BB * (x * x + x) + (BB >> 2) + AA * (ym1 * ym1) - AABB);
+    while (y > 0) {
+        uint32_t add = 0;
+        if (dd < 0) { add = BB2xp2; x = (x + 1) & 1023; BB2xp2 += BB << 1; }
+        dd = (int32_t)((uint32_t)dd + add + (AA << 1) + AA - (AAy << 1));
+        y--; AAy -= AA;
+        elip_rows(uc, xc, yc, x, y, edge, fill);
     }
 }
 

@@ -10,9 +10,10 @@ probes = [  # (x, y, expected rgb, what)
     (150, 120, (0, 255, 0), "RECT fill (fill[31:24]!=0)"), (99, 120, (0, 0, 0x22), "RECT outside"),
     (300, 120, (255, 255, 255), "RECT2 edge"), (320, 120, (0, 0, 0x22), "RECT2 transparent interior"),
     (0, 0, (255, 255, 0), "LINE start"), (799, 599, (255, 255, 0), "LINE end"), (400, 300, (255, 255, 0), "LINE mid"),
-    (450, 400, (0, 255, 255), "ELIP left edge"), (550, 400, (0, 255, 255), "ELIP right edge"),
-    (500, 370, (0, 255, 255), "ELIP top"), (500, 430, (0, 255, 255), "ELIP bottom"),
-    (520, 410, (255, 0, 255), "ELIP fill"), (449, 400, (0, 0, 0x22), "ELIP outside"),
+    (449, 400, (0, 255, 255), "ELIP left edge (RTL midpoint: x=a+1 at y=0)"), (551, 400, (0, 255, 255), "ELIP right edge"),
+    (491, 370, (0, 255, 255), "ELIP top-row left end"), (509, 430, (0, 255, 255), "ELIP bottom-row right end"),
+    (500, 370, (255, 0, 255), "ELIP top row interior = fill (last SLR run wins)"),
+    (520, 410, (255, 0, 255), "ELIP fill"), (448, 400, (0, 0, 0x22), "ELIP outside"),
 ]
 bad = 0
 for x, y, want, what in probes:

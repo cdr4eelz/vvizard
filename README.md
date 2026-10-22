@@ -102,5 +102,5 @@ A write to GP_CODE (0x80000058) runs the GPU on the big-endian command list at t
 | 4 RECT | 4 | P0, P1 = corners: edge colour on the border, fill colour inside, then XRGB32 fill colour |
 - A point word is X = bits 25:16 and Y = bits 9:0. The XVAR/YVAR fields are ignored.
 - The interior is filled only when bits 31:24 of the fill colour are non-zero (ScanLineRunner.v:127).
-- Everything is clipped to 800×600.
+- LINE/RECT/FILL are clipped to 800×600. ELIP is a port of ElipseEngine.v (midpoint, 32-bit math, one ScanLineRunner run per row per step); its spans wrap at 10 bits (no clipping), so off-screen rows/cols land in frame DRAM as on hardware.
 - Test: load `tests/gpcmds.hex` at 0x12003000 and `tests/gplaunch.hex` at 0x40000000, run with `--dump-frame`, then check the result with `tests/check_gp.py`.
