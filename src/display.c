@@ -32,11 +32,29 @@ static void grab(uc_engine *uc) {
         }
     }
 }
+/* ---- window keyboard -> UART RX queue ---- */
+int vv_disp_keys_enabled = 1;
+static unsigned char kq[256]; static unsigned kq_h, kq_t;
+static void kq_put(int c) { unsigned n = (kq_t + 1) % sizeof kq; if (n != kq_h) { kq[kq_t] = (unsigned char)c; kq_t = n; } }
+static void collect_keys(void) {
+    if (!have_window || !vv_disp_keys_enabled) return;
+    int c;
+    while ((c = GetCharPressed()) > 0) if (c < 0x80) kq_put(c);   /* printable ASCII only */
+    while ((c = GetKeyPressed()) > 0) switch (c) {
+        case KEY_ENTER: case KEY_KP_ENTER: kq_put('\r'); break;
+        case KEY_BACKSPACE: kq_put(0x08); break;
+        case KEY_TAB: kq_put('\t'); break;
+        case KEY_ESCAPE: kq_put(0x1b); break;
+        default: break; }
+}
+int vv_disp_key_avail(void) { return kq_h != kq_t; }
+int vv_disp_key_take(void) { if (kq_h == kq_t) return -1; int c = kq[kq_h]; kq_h = (kq_h + 1) % sizeof kq; return c; }
 static void draw(uc_engine *uc) {
     if (!have_window) return;
     grab(uc);
     UpdateTexture(tex, rgba);
     BeginDrawing(); ClearBackground(BLACK); DrawTexture(tex, 0, 0, WHITE); EndDrawing();
+    collect_keys();                         /* EndDrawing polled; queues reset next poll */
     last_draw = now();
 }
 int vv_disp_init(int want_window) {
@@ -46,6 +64,7 @@ int vv_disp_init(int want_window) {
     if (!IsWindowReady()) { fprintf(stderr, "[disp] cannot open window; continuing headless\n"); return -1; }
     Image img = { rgba, VV_SCREEN_W, VV_SCREEN_H, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     tex = LoadTextureFromImage(img);
+    SetExitKey(KEY_NULL);                   /* Esc goes to UART, not window close */
     have_window = 1; last_draw = 0;
     return 0;
 }
@@ -57,7 +76,8 @@ void vv_disp_pf_write(uc_engine *uc, uint32_t v) {
 uint32_t vv_disp_frame(void) { return cur_frame; }
 int vv_disp_tick(uc_engine *uc) {
     if (!have_window) return 0;
-    if (now() - last_draw >= 1.0 / 60) draw(uc);
+    if (now() - last_draw >= 1.0 / 60) draw(uc);      /* EndDrawing polls events + collects */
+    else { PollInputEvents(); collect_keys(); }
     return WindowShouldClose();
 }
 int vv_disp_dump_ppm(uc_engine *uc, const char *path) {

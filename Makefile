@@ -36,7 +36,7 @@ ISR_BIN  ?= $(SW)/proj_app6/isr6.bin
 BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM_APP)@0x60000000 --entry 0x40000000
 # Auto-type the jump to the IMEM app at the GIOS prompt (GIOS ends tokens on space/CR).
 AUTORUN ?= jal 60000000\r
-ARGS ?= --random-ddr --max-insns 0
+ARGS ?= --random-ddr --irq --max-insns 0
 
 .PHONY: all clean fresh run test-player
 

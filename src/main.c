@@ -74,6 +74,7 @@ static char script_q[4096]; static size_t sq_head, sq_tail;   /* due script byte
 static int rx_avail(void) {
     if (uart_in && *uart_in) return 1;
     if (sq_head != sq_tail) return 1;
+    if (vv_disp_key_avail()) return 1;
     if (stdin_peek < 0 && !stdin_eof) {
         struct pollfd p = { 0, POLLIN, 0 }; unsigned char c;
         if (poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP))) {
@@ -85,6 +86,7 @@ static int rx_take(void) {
     if (!rx_avail()) return 0;
     if (uart_in && *uart_in) return (unsigned char)*uart_in++;
     if (sq_head != sq_tail) { int c = (unsigned char)script_q[sq_head]; sq_head = (sq_head + 1) % sizeof script_q; return c; }
+    if (vv_disp_key_avail()) return vv_disp_key_take();
     int c = stdin_peek; stdin_peek = -1; return c;
 }
 
@@ -342,6 +344,7 @@ static void usage(const char *p) {
 "  --bios FILE        raw BIOS image loaded at 0x40000000 (default: gios.inst.bin)\n"
 "  --no-bios          don't auto-load a BIOS\n"
 "  --no-window        don't open the PixelFeeder display window\n"
+"  --no-window-keys   don't feed window keystrokes to UART RX (stdin still works)\n"
 "  --random-ddr[=SEED] fill DDR with random data at power-up (default on; seed defaults to time)\n"
 "  --no-random-ddr    start DDR zeroed instead\n"
 "  --uart-in STR      feed STR to UART RX before stdin (\\r \\n escapes; GIOS needs \\r)\n"
@@ -366,7 +369,7 @@ int main(int argc, char **argv) {
     static struct option lo[] = {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
         {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},{"input-script",1,0,'S'},{"irq",0,0,'I'},{"dump-every",1,0,'E'},{"dump-prefix",1,0,'P'},
-        {"no-window",0,0,'W'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"help",0,0,'h'},{0,0,0,0}};
+        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"help",0,0,'h'},{0,0,0,0}};
     int c;
     while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) switch (c) {
         case 'l': if (nloads < 32) loads[nloads++] = optarg; break;
@@ -379,6 +382,7 @@ int main(int argc, char **argv) {
         case 'B': big = 1; break;
         case 'q': opt_quiet_mmio = 1; break;
         case 'W': want_window = 0; break;
+        case 'K': vv_disp_keys_enabled = 0; break;
         case 'D': dump_path = optarg; break;
         case 'H': hold = 1; break;
         case 'b': bios_path = optarg; break;

@@ -13,4 +13,7 @@ uint32_t vv_disp_frame(void);                  /* current frame# */
 int  vv_disp_tick(uc_engine *uc);              /* periodic ~60Hz; returns 1 if window closed */
 int  vv_disp_dump_ppm(uc_engine *uc, const char *path);
 void vv_disp_close(void);
+extern int vv_disp_keys_enabled;               /* window keys -> UART RX (default on) */
+int  vv_disp_key_avail(void);
+int  vv_disp_key_take(void);                   /* -1 if none */
 #endif

@@ -63,7 +63,7 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
 
 ## Input script and interrupt injection
 - `--input-script F`: lines `fN|iN key STR` (queue STR on UART RX at the Nth PF_FRAME write / insn N; escapes
-  `\r \n \t \\`, `\s`=space) or `fN|iN dump F.ppm`. Implies `--irq`. RX priority: `--uart-in`, script queue, stdin.
+  `\r \n \t \\`, `\s`=space) or `fN|iN dump F.ppm`. Implies `--irq`. RX priority: `--uart-in`, script queue, window keys, stdin.
 - `--dump-every N [--dump-prefix P]`: dump the displayed frame on every Nth PF_FRAME write to `P%06d.ppm`.
 - `--irq`: COP0150-style UARX interrupt injection. Unicorn cannot set Cause IP bits or expose Cause/EPC, and its own
   exception entry (MIPS vector, EXL) differs from COP0150, so vvizard does it by hand in the code hook: when
@@ -71,3 +71,8 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
   it sets shadow EPC=pc, clears Status.IE and jumps to 0xC0000180. `mfc0 $13/$14` inside the ISR BRAM get the shadow
   Cause (bit10 = RX valid, level) / EPC; `mtc0 $13/$14` update the shadow. The ISR's `jr $k0; mtc0 Status` return
   runs natively. Only UARX is injected (no TIMER/RTC/UATX/GPU), so the proj6 clock never ticks.
+
+- Window keys (display.c): every 4096-insn tick calls PollInputEvents (or EndDrawing on redraw) then drains
+  GetCharPressed/GetKeyPressed into a 256-byte queue feeding UART RX; SetExitKey(KEY_NULL) so Esc is sent as 0x1b.
+  `make run` now passes `--irq` by default; GIOS boot + `jal` autorun unaffected (GIOS polls with IE off; 0 irqs).
+  Verified under Xvfb :77 + xdotool: 5x `l` -> 5 irqs, player (400,300)->(430,300) in --dump-frame.

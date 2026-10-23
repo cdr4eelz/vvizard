@@ -48,9 +48,13 @@ All images are loaded as raw bytes (`--load FILE@ADDR`), not by ELF sections:
 | `ISR_BIN` | `software/proj_app6/isr6.bin` | 0xC0000000 (ISR BRAM) |
 | `AUTORUN` | `jal 60000000\r` | typed at the GIOS prompt via `--uart-in` |
 
-`ARGS` defaults to `--random-ddr --max-insns 0` (no instruction limit, window on). Override any of these on the
+`ARGS` defaults to `--random-ddr --irq --max-insns 0` (no instruction limit, window on, UART-RX interrupts on so proj6 sees keys). Override any of these on the
 command line, e.g. `make run ARGS="--no-window --max-insns 200000"`, `make run AUTORUN=` (stay at the GIOS prompt),
 or `make run IMEM_APP=../../software/bench/bench.inst.bin`. `BIN=` replaces all the `--load`/`--entry` arguments.
+
+**Keyboard:** with the window focused, typed keys go to UART RX: printable ASCII as-is, Enter -> `\r`, Backspace -> 0x08,
+Tab -> `\t`, Esc -> 0x1b (Esc no longer closes the window; use the close button). Terminal stdin still works too.
+proj6: `u i o / j k l / m , .` move, space pauses, `d`/`e` clock. `--no-window-keys` disables window capture.
 
 **Note:** `bench` and `draw` are linked to run at DDR 0x10000000 (`LDSTYLE := inject_cache`). Their raw bytes can be
 placed in the scratchpads, but they won't run correctly from there unless relinked. proj6 (0x60000000) and isr6
@@ -61,7 +65,7 @@ uses as its shared memory (the stack is at the top of D-scratch).
     ./vvizard [opts] [isr.elf ...] [prog.elf]      # entry = last ELF's e_entry
       --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (0x50004000)
       --max-insns N (1e6, 0=unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio
-      --little | --big   --bios FILE   --no-bios   --no-window   --dump-frame F.ppm   --hold
+      --little | --big   --bios FILE   --no-bios   --no-window   --no-window-keys   --dump-frame F.ppm   --hold
       --random-ddr[=SEED]   --no-random-ddr   --uart-in STR   --expect REG=VAL
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
@@ -92,7 +96,7 @@ vvizard reproduces this with Unicorn's virtual-TLB mode and a fill hook, which i
 
 ## MMIO model
 - **UART:** TX_READY always reads 1. A write to TX_DATA (offset 0x08, any byte lane) sends byte [7:0] to stdout.
-- **UART RX:** RX_VALID and RX_DATA serve any `--uart-in` bytes first, then poll stdin without blocking.
+- **UART RX:** RX_VALID and RX_DATA serve any `--uart-in` bytes first, then due `--input-script` bytes, then window keystrokes, then poll stdin without blocking.
 - **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. There is no cycle model.
 - **GPU (stub):** PF_FRAME, GP_FRAME and GP_CODE writes are recorded, and a GP_CODE write logs a GPU "launch". PF_FRAME reads return `{4'h1, frame#, 22'b0}`. GP_STATE reads return 0, meaning idle.
 - **Other offsets:** logged as MISS-READ or MISS-WRITE.
