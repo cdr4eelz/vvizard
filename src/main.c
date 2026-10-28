@@ -169,7 +169,9 @@ static void irq_step(uc_engine *uc, uint32_t pc) {
                 fix_rt = rt; fix_val = rd == 14 ? sh_epc : (sh_cause | (rx_avail() ? VV_IM_UARX : 0));
             } else if (rs == 4 && (rd == 13 || rd == 14)) { /* mtc0 */
                 uc_reg_read(uc, UC_MIPS_REG_0 + rt, &v);
-                if (rd == 13) sh_cause = v & ~VV_IM_UARX; else sh_epc = v;  /* UARX is level (RX valid) */
+                if (rd == 13)   /* COP0150: IP bits 15:10 only clear (next_ip & wd); others written as-is */
+                    sh_cause = (v & ~0xFC00u) | (sh_cause & v & 0xFC00u & ~VV_IM_UARX);  /* UARX is level */
+                else sh_epc = v;
             }
         }
     }
