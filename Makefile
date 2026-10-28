@@ -29,9 +29,9 @@ SW   := $(abspath ../../software)
 # Raw-byte images (no ELF parsing). GIOS is the BIOS at 0x40000000 (BIOS var above).
 # IMEM_APP -> I-scratch 0x60000000 (bench alternative: IMEM_APP=$(SW)/bench/bench.inst.bin)
 # DMEM_APP -> D-scratch 0x50000000;  ISR_BIN -> ISR BRAM 0xC0000000
-IMEM_APP ?= $(SW)/proj_app6/proj6.inst.bin
+IMEM_APP ?= $(SW)/proj_app7/proj7.inst.bin
 DMEM_APP ?= $(SW)/draw/draw.inst.bin
-ISR_BIN  ?= $(SW)/proj_app6/isr6.bin
+ISR_BIN  ?= $(SW)/proj_app7/isr7.bin
 # Default: boot GIOS (AUTORUN types "jal 60000000" at its prompt), random DDR, no limit, window on.
 BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM_APP)@0x60000000 --entry 0x40000000
 # Auto-type the jump to the IMEM app at the GIOS prompt (GIOS ends tokens on space/CR).
