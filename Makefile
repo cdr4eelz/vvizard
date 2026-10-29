@@ -37,8 +37,11 @@ BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM
 # Auto-type the jump to the IMEM app at the GIOS prompt (GIOS ends tokens on space/CR).
 AUTORUN ?= jal 60000000\r
 ARGS ?= --random-ddr --irq --max-insns 0
+# Stop with a diagnostic when the guest relies on a MIPS150-vs-MIPS difference (see README "Hardware quirks").
+# QUIRKS= disables it; e.g. QUIRKS=--halt-on-quirk=all,-load-use or QUIRKS=--warn-on-quirk.
+QUIRKS ?= --halt-on-quirk
 
-.PHONY: all clean fresh run test-player
+.PHONY: all clean fresh run test-player test-quirks
 
 all: $(TARGET)
 
@@ -55,10 +58,13 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 run: $(TARGET)
-	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') $(ARGS) $(BIN)
+	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') $(QUIRKS) $(ARGS) $(BIN)
 
 test-player: $(TARGET)
 	python3 tests/test_player.py
+
+test-quirks: $(TARGET)
+	python3 tests/test_quirks.py
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

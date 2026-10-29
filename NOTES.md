@@ -76,3 +76,31 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
   GetCharPressed/GetKeyPressed into a 256-byte queue feeding UART RX; SetExitKey(KEY_NULL) so Esc is sent as 0x1b.
   `make run` now passes `--irq` by default; GIOS boot + `jal` autorun unaffected (GIOS polls with IE off; 0 irqs).
   Verified under Xvfb :77 + xdotool: 5x `l` -> 5 irqs, player (400,300)->(430,300) in --dump-frame.
+
+## Hardware-quirk detection (`--halt-on-quirk` / `--warn-on-quirk`, `src/quirk.c`)
+- Hooks: no new Unicorn hooks. The existing `UC_HOOK_CODE` calls `vv_quirk_post()` (checks the PREVIOUS
+  instruction's result: `lb`/`lh` rt with bit 7/15 set), then `irq_step()`, then `vv_quirk_pre()` (reads and
+  decodes the instruction about to run; GPRs are read only for loads/stores, add/addi/sub). If `irq_step()`
+  redirected to the ISR, the pending load state is dropped instead (that instruction did not run).
+  Instruction fetches the hardware would see as 0 (undecoded nibble or MMIO) are caught in `tlb_fill`
+  (ignored after a CPU exception or the max-insns stop, when Unicorn heads for its own vector).
+- Halting: `uc_emu_stop()` from the code hook stops before the flagged instruction executes (checked: `jalr t1`
+  leaves t1 unchanged). `hook_intr`/`hook_unmapped` stay quiet after a quirk halt. Exit status 4.
+- `load-use` uses "next executed instruction", so a load in a branch delay slot is checked against the
+  branch target, like the pipeline. Registers read per instruction: see `reads()` in quirk.c.
+- Speed (20M insns GIOS+proj7, headless, -O0): off 7.1 s, warn 8.2 s, halt 8.8 s.
+- `--warn-on-quirk` dedupes on (category, PC) in a 4096-entry table and keeps Unicorn semantics, so a
+  flagged BIOS store still sticks (as without the option) and an unaligned/unmapped access still faults.
+
+### Findings on current GIOS / proj7 / isr7 (Oct 28 2026)
+- Headless, `--warn-on-quirk`: 20M insns idle; 60M insns with ~1180 scripted keys (moves, long runs off every
+  screen edge, space, d/e, junk keys); 70M insns with ~25 GIOS commands (lw/lbu/lhu/sw/sb/sh/dump/gs/result/
+  color/fill/line/rect/elip/pf/sf/back/copy/unknown) then proj7 + keys; `test_player` with `--halt-on-quirk`.
+- (lb-sign check since removed: the Verilog will be fixed to sign-extend.) Only trip in program code was: **`lb-sign` in isr7.s `_uarx_player_move`** at 0xC0000404 (`lh SMO_player_x`,
+  isr7.s:323) and 0xC0000414 (`lh SMO_player_y`, isr7.s:328), when the player x/y goes negative (moved past the
+  left/top edge). Benign for the ISR itself: it only does `addu` + `sh`, and the low 16 bits are identical.
+- User-driven only: GIOS `lw 70000000` -> `unmapped` at 0x40000200 (gios.c:71 BC_LOAD); `lw 50000001` ->
+  `unaligned` at the same PC; `sw X 40000100` -> `bios-store` at 0x40000284 (gios.c:89 BC_STORE).
+- Static scan of the dumps: every `jalr` in gios/proj7 has rd=$31 (0x40001f04 `jalr zero,zero` and the
+  mfhi/mthi/mflo/addi hits at 0x40001fdc+ are data words); gios's 12 `lb` read string bytes, so they trip only on
+  bytes >= 0x80; no add/sub, mult/div, syscall, lwl/lwr in code.

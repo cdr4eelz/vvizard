@@ -51,6 +51,8 @@ All images are loaded as raw bytes (`--load FILE@ADDR`), not by ELF sections:
 `ARGS` defaults to `--random-ddr --irq --max-insns 0` (no instruction limit, window on, UART-RX interrupts on so proj7 sees keys). Override any of these on the
 command line, e.g. `make run ARGS="--no-window --max-insns 200000"`, `make run AUTORUN=` (stay at the GIOS prompt),
 or `make run IMEM_APP=../../software/bench/bench.inst.bin`. `BIN=` replaces all the `--load`/`--entry` arguments.
+`QUIRKS` defaults to `--halt-on-quirk` (see [Hardware quirks](#hardware-quirks---halt-on-quirk)); `make run QUIRKS=` turns it off,
+`make run QUIRKS=--halt-on-quirk=all,-load-use` skips a category, `make run QUIRKS=--warn-on-quirk` logs without stopping.
 
 **Keyboard:** with the window focused, typed keys go to UART RX: printable ASCII as-is, Enter -> `\r`, Backspace -> 0x08,
 Tab -> `\t`, Esc -> 0x1b (Esc no longer closes the window; use the close button). Terminal stdin still works too.
@@ -67,6 +69,7 @@ uses as its shared memory (the stack is at the top of D-scratch).
       --max-insns N (1e6, 0=unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio
       --little | --big   --bios FILE   --no-bios   --no-window   --no-window-keys   --dump-frame F.ppm   --hold
       --random-ddr[=SEED]   --no-random-ddr   --uart-in STR   --expect REG=VAL
+      --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
 
@@ -80,6 +83,33 @@ random data where they land, and frame buffers start out as noise until somethin
 `--uart-in STR` feeds STR to UART RX before anything from stdin (escapes `\r`, `\n`, `\t`, `\\`).
 **Gotcha:** GIOS ends a token only on a space or a carriage return, never a line feed, so commands need `\r`
 (e.g. `--uart-in 'jal 60000000\r'`). Piping `echo jal 60000000` into stdin will hang at the prompt for the same reason.
+
+## Hardware quirks: `--halt-on-quirk`
+`--halt-on-quirk[=LIST]` stops the run when the guest does something whose result differs between the real
+MIPS150 Verilog CPU (`hardware/src`) and standard MIPS (what Unicorn executes). It prints the PC, the instruction
+word and its disassembly, the quirk name, what the hardware would do, and a register dump, then exits with
+status **4**. Checks stop *before* the flagged instruction runs. `lb`/`lh` sign extension is not flagged (the Verilog is being fixed to sign-extend like standard MIPS).
+`--warn-on-quirk[=LIST]` does the same detection but logs each (quirk, PC) once and keeps running (Unicorn
+semantics). Both print a `[quirk] summary` of dynamic hit counts at exit. Without either option nothing changes.
+
+LIST is comma-separated: `all` (the default), category names, and `-name` to exclude
+(`--halt-on-quirk=all,-load-use`; a list that starts with `-name` starts from `all`).
+| category | flags | hardware behaviour |
+|---|---|---|
+| `jalr-rd` | `jalr` with rd != `$31` | always links to `$31` |
+| `unmapped` | load/store to an undecoded nibble; fetch from an undecoded nibble or MMIO | reads/fetches 0, drops writes |
+| `bios-store` | any store into 0x4xxxxxxx | dropped (BIOS is data-read-only) |
+| `unaligned` | `lw`/`sw` not 4-aligned, `lh`/`lhu`/`sh` not 2-aligned | loads 0 / drops the store, no AdEL/AdES |
+| `lwlr` | `lwl`/`lwr`/`swl`/`swr` | rt <- 0 / store nothing |
+| `overflow` | `add`/`addi`/`sub` signed overflow | wraps (no Ov trap) |
+| `hilo` | `mult[u]`/`div[u]`/`mfhi`/`mflo`/`mthi`/`mtlo` | no HI/LO: `mf*` write 0, the rest do nothing |
+| `syscall` | `syscall` (`break` is not flagged: vvizard uses it as a clean halt) | NOP |
+| `uart-lane` | `sb`/`sh` to UART TX (0x80000008) that does not cover byte lane +3 (`sb` at +0xB is fine) | transmits 0x00 |
+| `load-use` | the instruction executed right after a load reads that load's rt | no interlock: reads the OLD value |
+
+Memory checks use the same table as everything else (`src/memmap.h`, `vv_canon()`). Cost: one branch per instruction
+when off; when on, one 4-byte instruction read and decode per instruction (about 15-20% slower), so `make run` stays
+interactive. Details and findings in NOTES.md. `make test-quirks` runs `tests/test_quirks.py`.
 
 ## Memory map (`src/memmap.h` is the single table)
 The hardware decodes only `ADDR[31:28]`.
@@ -103,7 +133,7 @@ vvizard reproduces this with Unicorn's virtual-TLB mode and a fill hook, which i
 - **Interrupts:** none are injected yet, and the CP0 timer does not run (details in NOTES.md).
 
 ## Tests
-Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). How to run them and their pass conditions are in NOTES.md.
+Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). `make test-quirks` runs `tests/test_quirks.py` (one tiny program per `--halt-on-quirk` category, plus clean counterparts). How to run them and their pass conditions are in NOTES.md.
 
 ## PixelFeeder display (raylib, `src/display.c`)
 - Frame N starts at `0x10000000 + N<<22`. The visible area is 800×600, rows start 4096 bytes apart, and each pixel is a 32-bit big-endian XRGB word.

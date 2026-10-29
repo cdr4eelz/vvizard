@@ -14,6 +14,7 @@
 #include "loader.h"
 #include "display.h"
 #include "gpu.h"
+#include "quirk.h"
 
 /* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
  * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
@@ -236,9 +237,13 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     if (!opt_quiet_mmio) fprintf(stderr, "[mmio] W off=0x%03x size=%u <- 0x%08x\n", (unsigned)off, size, v);
 }
 
+static int stop_reason_intr = -1;
 static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *u) {
     (void)uc; (void)t; (void)u;
     uint32_t pa = vv_canon((uint32_t)va);
+    if (vv_quirk_mask && t == UC_MEM_FETCH && stop_reason_intr < 0 && /* not Unicorn's own exception vector */
+        !(max_insns && insn_count >= max_insns) && (pa == 0xFFFFFFFFu || (pa >> 28) == 0x8))
+        vv_quirk_fetch(uc, (uint32_t)va, pa == 0xFFFFFFFFu ? "undecoded" : "MMIO");
     if (pa == 0xFFFFFFFFu) return false;
     e->paddr = pa & ~0xFFFull;                   /* page granularity; offset kept by Unicorn */
     e->perms = region_for((uint32_t)va)->prot;
@@ -249,7 +254,15 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     (void)size; (void)u;
     insn_count++;
     if (nevents) run_due_events(uc, 0);
-    if (opt_irq) irq_step(uc, (uint32_t)addr);
+    if (vv_quirk_mask) {                     /* --halt-on-quirk / --warn-on-quirk */
+        if (vv_quirk_halted) { uc_emu_stop(uc); return; }
+        vv_quirk_post(uc, (uint32_t)addr);   /* result of the previous insn (lb/lh sign) */
+        uint64_t irqs = irq_count;
+        if (opt_irq) irq_step(uc, (uint32_t)addr);
+        if (irqs != irq_count) vv_quirk_cancel();   /* redirected to the ISR: insn at addr not run */
+        else if (!vv_quirk_halted) vv_quirk_pre(uc, (uint32_t)addr);
+        if (vv_quirk_halted) return;
+    } else if (opt_irq) irq_step(uc, (uint32_t)addr);
     if ((insn_count & 0xFFF) == 0 && vv_disp_tick(uc)) { fprintf(stderr, "[stop] window closed\n"); uc_emu_stop(uc); }
     if (opt_trace && trace_left != 0) {
         uint32_t insn = 0; unsigned char b[4];
@@ -263,10 +276,10 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
         if (trace_left > 0) trace_left--;
     }
 }
-static int stop_reason_intr = -1;
 static void hook_intr(uc_engine *uc, uint32_t intno, void *u) {
     (void)u; uint32_t pc; uc_reg_read(uc, UC_MIPS_REG_PC, &pc);
     stop_reason_intr = intno;
+    if (vv_quirk_halted) { uc_emu_stop(uc); return; }   /* already reported by --halt-on-quirk */
     /* QEMU-MIPS EXCP_* numbering: 8=EXT_INTERRUPT 12=AdEL 13=AdES 14=TLBF 17=SYSCALL 18=BREAK 20=RI
      * (pc reported here is not reliable inside the hook; Unicorn may show 0). */
     const char *nm = intno == 18 ? "BREAK" : intno == 17 ? "SYSCALL" : intno == 8 ? "EXT_INTERRUPT" :
@@ -276,6 +289,7 @@ static void hook_intr(uc_engine *uc, uint32_t intno, void *u) {
 }
 static bool hook_unmapped(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int64_t v, void *u) {
     (void)uc; (void)u;
+    if (vv_quirk_halted) return false;
     fprintf(stderr, "[fault] unmapped %s at 0x%08x size %d val 0x%llx\n",
             t == UC_MEM_FETCH_UNMAPPED ? "fetch" : t == UC_MEM_WRITE_UNMAPPED ? "write" : "read",
             (uint32_t)a, sz, (long long)v);
@@ -326,6 +340,8 @@ static void dump_regs(uc_engine *uc) {
     uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &v); fprintf(stderr, "c0_status=%08x  ", v);
     fprintf(stderr, "\n"); /* Unicorn 2.1 exposes no Cause/EPC/Count reg ids */
 }
+void vv_dump_regs(uc_engine *uc) { dump_regs(uc); }
+uint64_t vv_insns(void) { return insn_count; }
 static int reg_index(const char *n) {
     if (n[0] == '$') n++;
     for (int i = 0; i < 32; i++) if (!strcmp(n, gpr[i])) return i;
@@ -357,8 +373,14 @@ static void usage(const char *p) {
 "  --irq              inject UART-RX interrupts (EPC/Cause shadowed, ISR at 0x%08x)\n"
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
-"  --expect REG=VAL   exit 0 iff GPR REG equals VAL at stop (repeatable)\n", p, VV_PC_BOOT,
-    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR);
+"  --expect REG=VAL   exit 0 iff GPR REG equals VAL at stop (repeatable)\n"
+"  --halt-on-quirk[=LIST] stop (exit 4) with PC, insn, quirk name and registers when the guest\n"
+"                     does something the MIPS150 hardware does differently from standard MIPS.\n"
+"                     LIST: comma list of categories, 'all' (default), '-name' excludes\n"
+"                     (a leading '-name' starts from all). Categories:\n"
+"                     %s\n"
+"  --warn-on-quirk[=LIST] same detection, but log each (quirk, pc) once and keep running\n", p, VV_PC_BOOT,
+    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, vv_quirk_names());
 }
 
 int main(int argc, char **argv) {
@@ -371,7 +393,7 @@ int main(int argc, char **argv) {
     static struct option lo[] = {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
         {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},{"input-script",1,0,'S'},{"irq",0,0,'I'},{"dump-every",1,0,'E'},{"dump-prefix",1,0,'P'},
-        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"help",0,0,'h'},{0,0,0,0}};
+        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"help",0,0,'h'},{0,0,0,0}};
     int c;
     while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) switch (c) {
         case 'l': if (nloads < 32) loads[nloads++] = optarg; break;
@@ -398,6 +420,7 @@ int main(int argc, char **argv) {
         case 'E': dump_every = strtoul(optarg, 0, 0); break;
         case 'P': dump_prefix = optarg; break;
         case 'x': if (nexp < 32) expects[nexp++] = optarg; break;
+        case 'Q': case 'w': if (vv_quirk_parse(optarg)) return 2; vv_quirk_warn = c == 'w'; break;
         default: usage(argv[0]); return c == 'h' ? 0 : 2;
     }
     uc_engine *uc; uc_err err;
@@ -467,11 +490,13 @@ int main(int argc, char **argv) {
         *at = 0; if (vv_load_raw(uc, s, strtoul(at + 1, 0, 0))) return 1; free(s);
     }
     uc_reg_write(uc, UC_MIPS_REG_SP, &sp);
+    if (vv_quirk_mask) fprintf(stderr, "[quirk] %s on quirks (mask 0x%x)\n", vv_quirk_warn ? "warn" : "halt", vv_quirk_mask);
     vv_disp_init(want_window);
     fprintf(stderr, "[run] %s-endian entry=0x%08x sp=0x%08x max-insns=%llu\n", big ? "big" : "little",
             entry, sp, (unsigned long long)max_insns);
     err = uc_emu_start(uc, entry, have_stop ? stop_addr : 0xFFFFFFFFull, 0, max_insns);
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
+    if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
     /* Unicorn 2.1.1 MIPS reports UC_ERR_EXCEPTION when the uc_emu_start count limit hits
      * (no hook_intr fired); treat that as the normal max-insns stop. */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0 && max_insns && insn_count >= max_insns) err = UC_ERR_OK;
@@ -479,11 +504,12 @@ int main(int argc, char **argv) {
     if (err) fprintf(stderr, "[stop] uc_emu_start: %s\n", uc_strerror(err));
     if (opt_irq) fprintf(stderr, "[irq] UARX interrupts injected: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
-    dump_regs(uc);
+    if (vv_quirk_mask) vv_quirk_summary();
+    if (!vv_quirk_halted) dump_regs(uc);
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);
     vv_disp_close();
-    int rc = err ? 1 : 0;
+    int rc = err ? 1 : vv_quirk_halted ? 4 : 0;
     for (int i = 0; i < nexp; i++) {
         char *s = strdup(expects[i]), *eq = strchr(s, '=');
         int r = eq ? (*eq = 0, reg_index(s)) : -1;
