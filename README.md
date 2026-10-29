@@ -30,7 +30,7 @@ The `Makefile` finds Unicorn and raylib through pkg-config:
     make            # build ./vvizard (objects in build/)
     make fresh      # clean + rebuild
     make clean
-    make run        # boot GIOS and auto-start proj6 (see "make run defaults")
+    make run        # boot GIOS and auto-start proj7 (see "make run defaults")
 
 - `BIOS ?=` defaults to `../../software/gios/gios.inst.bin`, so build GIOS first (`make` in `software/gios`), then
   `software/proj_app6`. Its absolute path is compiled in as `VV_DEFAULT_BIOS`.
@@ -43,22 +43,22 @@ All images are loaded as raw bytes (`--load FILE@ADDR`), not by ELF sections:
 | variable | default | loaded at |
 |---|---|---|
 | `BIOS` | `software/gios/gios.inst.bin` | 0x40000000 (BIOS; the run starts here) |
-| `IMEM_APP` | `software/proj_app6/proj6.inst.bin` | 0x60000000 (I-scratch) |
+| `IMEM_APP` | `software/proj_app7/proj7.inst.bin` | 0x60000000 (I-scratch) |
 | `DMEM_APP` | `software/draw/draw.inst.bin` | 0x50000000 (D-scratch) |
-| `ISR_BIN` | `software/proj_app6/isr6.bin` | 0xC0000000 (ISR BRAM) |
+| `ISR_BIN` | `software/proj_app7/isr7.bin` | 0xC0000000 (ISR BRAM) |
 | `AUTORUN` | `jal 60000000\r` | typed at the GIOS prompt via `--uart-in` |
 
-`ARGS` defaults to `--random-ddr --irq --max-insns 0` (no instruction limit, window on, UART-RX interrupts on so proj6 sees keys). Override any of these on the
+`ARGS` defaults to `--random-ddr --irq --max-insns 0` (no instruction limit, window on, UART-RX interrupts on so proj7 sees keys). Override any of these on the
 command line, e.g. `make run ARGS="--no-window --max-insns 200000"`, `make run AUTORUN=` (stay at the GIOS prompt),
 or `make run IMEM_APP=../../software/bench/bench.inst.bin`. `BIN=` replaces all the `--load`/`--entry` arguments.
 
 **Keyboard:** with the window focused, typed keys go to UART RX: printable ASCII as-is, Enter -> `\r`, Backspace -> 0x08,
 Tab -> `\t`, Esc -> 0x1b (Esc no longer closes the window; use the close button). Terminal stdin still works too.
-proj6: `u i o / j k l / m , .` move, space pauses, `d`/`e` clock. `--no-window-keys` disables window capture.
+proj7: `u i o / j k l / m , .` move, space pauses, `d`/`e` clock. `--no-window-keys` disables window capture.
 
 **Note:** `bench` and `draw` are linked to run at DDR 0x10000000 (`LDSTYLE := inject_cache`). Their raw bytes can be
-placed in the scratchpads, but they won't run correctly from there unless relinked. proj6 (0x60000000) and isr6
-(0xC0000000) are linked for where they're loaded. Also, `DMEM_APP` overwrites the start of D-scratch, which proj6
+placed in the scratchpads, but they won't run correctly from there unless relinked. proj7 (0x60000000) and isr7
+(0xC0000000) are linked for where they're loaded. Also, `DMEM_APP` overwrites the start of D-scratch, which proj7
 uses as its shared memory (the stack is at the top of D-scratch).
 
 ## Usage
@@ -103,7 +103,7 @@ vvizard reproduces this with Unicorn's virtual-TLB mode and a fill hook, which i
 - **Interrupts:** none are injected yet, and the CP0 timer does not run (details in NOTES.md).
 
 ## Tests
-Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`). `make test-player` runs `tests/test_player.py` (proj6 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). How to run them and their pass conditions are in NOTES.md.
+Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). How to run them and their pass conditions are in NOTES.md.
 
 ## PixelFeeder display (raylib, `src/display.c`)
 - Frame N starts at `0x10000000 + N<<22`. The visible area is 800×600, rows start 4096 bytes apart, and each pixel is a 32-bit big-endian XRGB word.
@@ -115,7 +115,7 @@ Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaun
   - Closing the window stops emulation.
 
 ## Default BIOS (gios)
-proj_app* programs are linked against **gios**: `FIXED_ELF ?= ../gios/gios.elf` in `software/proj_app6/Makefile:5`. With bios150v3 loaded instead, proj6 jumps to address 0 because the two BIOS images put different functions at the same addresses.
+proj_app* programs are linked against **gios**: `FIXED_ELF ?= ../gios/gios.elf` in `software/proj_app7/Makefile:5`. With bios150v3 loaded instead, proj7 jumps to address 0 because the two BIOS images put different functions at the same addresses.
 - By default vvizard loads `VV_DEFAULT_BIOS` raw at 0x40000000. The Makefile sets it from `BIOS ?= $(abspath ../../software/gios/gios.inst.bin)`. If the macro is not defined, the path `<exe dir>/../../software/gios/gios.inst.bin` is used.
 - The default BIOS is skipped when any `--load FILE@0x4xxxxxxx` is given. `--bios FILE` overrides the default, and `--no-bios` disables it.
 - If the default file is missing, you get a warning and the run continues.

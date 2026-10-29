@@ -52,8 +52,8 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
 - `alias` (runs at 0xC0000180): stores to 0x12003000 and reads back through 0x32003000, before and after `mtc0 $0,Status`.
 - `frame`: fills x 100..131, y 50..59 of frame 1 with 0x00FF8000, writes 1 to PF_FRAME, then `break`.
 - `gpcmds` + `gplaunch`: load gpcmds at 0x12003000 and gplaunch at 0x40000000, run with `--dump-frame`, check with `tests/check_gp.py`.
-- `test-player` (`make test-player`, ~1.5 s): boots GIOS -> proj6 headless with `--no-random-ddr` and an
-  `--input-script`. proj6 reads player input only in its UART-RX ISR (isr6.s `ISR_UARX`): keys
+- `test-player` (`make test-player`, ~1.5 s): boots GIOS -> proj7 headless with `--no-random-ddr` and an
+  `--input-script`. proj7 reads player input only in its UART-RX ISR (isr7.s `ISR_UARX`): keys
   `u i o / j k l / m , .` = up-left, up, up-right / left, centre (no-op), right / down-left, down, down-right;
   orthogonal = 6 px, diagonal = 4 px per key. Each of 12 segments (idle, up, idle, down, left, right, up-left,
   idle, up-right, down-left, down-right, `k`) sends the key 3 times, one byte every 2 PF_FRAME writes, then dumps
@@ -70,7 +70,7 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
   Status bit0 (IE) and bit10 (IM_UARX) are set and RX data is available (and the current insn is not a delay slot),
   it sets shadow EPC=pc, clears Status.IE and jumps to 0xC0000180. `mfc0 $13/$14` inside the ISR BRAM get the shadow
   Cause (bit10 = RX valid, level) / EPC; `mtc0 $13/$14` update the shadow. The ISR's `jr $k0; mtc0 Status` return
-  runs natively. Only UARX is injected (no TIMER/RTC/UATX/GPU), so the proj6 clock never ticks.
+  runs natively. Only UARX is injected (no TIMER/RTC/UATX/GPU), so the proj7 clock never ticks.
 
 - Window keys (display.c): every 4096-insn tick calls PollInputEvents (or EndDrawing on redraw) then drains
   GetCharPressed/GetKeyPressed into a 256-byte queue feeding UART RX; SetExitKey(KEY_NULL) so Esc is sent as 0x1b.

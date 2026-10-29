@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""proj6 player-control integration test.
+"""proj7 player-control integration test.
 
-proj6 moves the player from its UART-RX ISR (isr6.s): keys u i o / j k l / m , .
+proj7 moves the player from its UART-RX ISR (isr7.s): keys u i o / j k l / m , .
 (3x3 keypad; 'k' = centre = no move).  Orthogonal keys move 6 px, diagonals 4 px.
-We boot GIOS -> proj6 headless with --input-script: each segment 'presses' one key
+We boot GIOS -> proj7 headless with --input-script: each segment 'presses' one key
 PRESSES times, one byte every GAP frames, then dumps the displayed frame SETTLE frames
 later.  The player ellipse (outline 0xFF6644, fill 0x4466FF) is located by bbox centre
 and each segment's displacement is compared with the expected (dx, dy).
@@ -70,8 +70,8 @@ def main():
            "--bios", f"{SW}/gios/gios.inst.bin", "--uart-in", "jal 60000000\\r",
            "--input-script", script, "--max-insns", str(max_insns),
            "--load", f"{SW}/draw/draw.inst.bin@0x50000000",
-           "--load", f"{SW}/proj_app6/isr6.bin@0xC0000000",
-           "--load", f"{SW}/proj_app6/proj6.inst.bin@0x60000000", "--entry", "0x40000000"]
+           "--load", f"{SW}/proj_app7/isr7.bin@0xC0000000",
+           "--load", f"{SW}/proj_app7/proj7.inst.bin@0x60000000", "--entry", "0x40000000"]
     t0 = time.time()
     r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.PIPE, text=True, env=dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib")))
