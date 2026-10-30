@@ -55,6 +55,8 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
   `--expect a0=0x56709234 --expect a1=0x2b38491a --expect s0=0xe28b8493 --expect s1=0xdeadbeef --expect s2=0xef76df74 --expect s3=0x3bddb7dd --expect s4=0x1 --expect s5=0xab --expect s6=0xab000000 --expect s7=0x0 --expect t3=0xdeadbeef --expect t5=0x46dd8d7a`.
   These values were checked against the RTL: an Icarus testbench drove cpu/MemMapIO.v with the same MMIO access in the same cycle (cycle = instruction number, state(0) = reset value) and read the same 12 values.
 - `gpcmds` + `gplaunch`: load gpcmds at 0x12003000 and gplaunch at 0x40000000, run with `--dump-frame`, check with `tests/check_gp.py`.
+- `hwprobe` (source `tests/hwprobe.s`, at 0x60000000, `--no-bios --no-random-ddr`): passes with `--expect s5=0 --expect s3=45` (default quirks).
+- `make test-hex` runs all of the above (`tests/test_hex.py`); `make test` = test-hex + test-quirks + test-player.
 - `test-player` (`make test-player`, ~1.5 s): boots GIOS -> proj7 headless with `--no-random-ddr` and an
   `--input-script`. proj7 reads player input only in its UART-RX ISR (isr7.s `ISR_UARX`): keys
   `u i o / j k l / m , .` = up-left, up, up-right / left, centre (no-op), right / down-left, down, down-right;
@@ -80,26 +82,56 @@ Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",s
   `make run` now passes `--irq` by default; GIOS boot + `jal` autorun unaffected (GIOS polls with IE off; 0 irqs).
   Verified under Xvfb :77 + xdotool: 5x `l` -> 5 irqs, player (400,300)->(430,300) in --dump-frame.
 
-## Hardware-quirk detection (`--halt-on-quirk` / `--warn-on-quirk`, `src/quirk.c`)
-- Hooks: no new Unicorn hooks. The existing `UC_HOOK_CODE` calls `vv_quirk_post()` (checks the PREVIOUS
-  instruction's result: `lb`/`lh` rt with bit 7/15 set), then `irq_step()`, then `vv_quirk_pre()` (reads and
-  decodes the instruction about to run; GPRs are read only for loads/stores, add/addi/sub). If `irq_step()`
-  redirected to the ISR, the pending load state is dropped instead (that instruction did not run).
-  Instruction fetches the hardware would see as 0 (undecoded nibble or MMIO) are caught in `tlb_fill`
-  (ignored after a CPU exception or the max-insns stop, when Unicorn heads for its own vector).
-- Halting: `uc_emu_stop()` from the code hook stops before the flagged instruction executes (checked: `jalr t1`
-  leaves t1 unchanged). `hook_intr`/`hook_unmapped` stay quiet after a quirk halt. Exit status 4.
-- `load-use` uses "next executed instruction", so a load in a branch delay slot is checked against the
-  branch target, like the pipeline. Registers read per instruction: see `reads()` in quirk.c.
-- Speed (20M insns GIOS+proj7, headless, -O0): off 7.1 s, warn 8.2 s, halt 8.8 s.
-- `--warn-on-quirk` dedupes on (category, PC) in a 4096-entry table and keeps Unicorn semantics, so a
-  flagged BIOS store still sticks (as without the option) and an unaligned/unmapped access still faults.
+## Hardware quirks: emulation and detection (`src/quirk.c`, `src/quirk.h`)
+The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.md). This section covers the implementation.
+- **Table.** `VV_QUIRK_TABLE` in quirk.h lists each quirk with its name, its default, and the hardware behaviour
+  with RTL file:line. `vv_quirk_emul` is the set being emulated and `vv_quirk_detect` is the set
+  `--halt-on-quirk`/`--warn-on-quirk` report on. Order of resolution: defaults, then `VVIZARD_QUIRKS`, then
+  `--quirks`/`--no-quirks`. The detection LIST is relative to the emulated set.
+- **Hooks.** There are no new Unicorn hooks. The existing `UC_HOOK_CODE` calls three functions in turn:
+  - `vv_quirk_post()` finishes the PREVIOUS instruction. It restores or sets registers, restores HI/LO, puts back
+    a RAM word overwritten by a dropped store, re-zeroes the VOID page, and runs the `lb-sign` check. It also takes
+    a pending emulated branch.
+  - `irq_step()`.
+  - `vv_quirk_pre()` decodes the instruction about to run, reports quirks and sets up the emulation.
+
+  If `irq_step()` redirected to the ISR, the pending state is dropped instead. The hooks are active whenever any
+  quirk is emulated or detected.
+- **Emulation techniques** (pre/post pairs):
+  - **Result fix-up:** `hilo`, `overflow` (operands are zeroed while the instruction runs, so it can't trap, then
+    restored, and the wrapped result is written), `rotr`, the `movz` class, `cop0` mfc0, `jalr-rd` and `lb-sign`.
+  - **Skip** (PC := pc+4 from the code hook) for instructions the hardware treats as nops. This isn't possible in a
+    delay slot, so those are reported as "NOT emulated".
+  - **Base-register redirect.** For an unaligned access or the `lwl` family, rs is set so the effective address is
+    `VV_VOID_VA` (0xF0000800, aligned), and rs is restored afterwards. On MMIO, `vv_mmio_side_read()` reproduces
+    the read the hardware does (an RX_DATA pop).
+  - **VOID page.** A 4 KiB zero page at PA 0xF0000000. `tlb_fill` maps undecoded VAs to it (data accesses under
+    `unmapped`; fetches, including MMIO fetches, under `unmapped-fetch`; the VOID_VA page under
+    `unaligned`/`lwlr`). It is re-zeroed after every store into it.
+  - **Dropped stores** to BIOS, or to 0x2 from outside the BIOS: the 4 bytes at the word are saved in pre and
+    written back in post.
+  - **Load-use.** The instruction after a load gets the OLD rt (rt as it was before the load) while it runs, then
+    the loaded value is restored, unless the instruction writes rt itself. Its result then wins, as in the
+    pipeline. The register swap happens first, so address and overflow calculations see the old value too.
+  - **Reserved REGIMM branches the hardware takes** (`tgei` when rs<0, for example): skip, link if rt[4], and
+    after the delay slot runs, set PC to the target (`vv_quirk_post` returns 1 and the hook returns, with no
+    instruction counted).
+  - **`mmio-lane`** lives in `mmio_write()`: the sub-word data is lane-placed before the register switch. The
+    PRNG reseed placement is unchanged.
+  - **COP0150 model** (`vv_cop0_read`/`vv_cop0_write` in main.c): shadow Status, Compare, Count, Cause and EPC.
+    `irq_step` uses the shadow Status for IE/IM when `cop0` is on, and keeps its old ISR-only mfc0/mtc0 shadowing
+    when `cop0` is off. Count is one tick per instruction (no stall model).
+- **Not emulated:** see [QUIRKS.md](QUIRKS.md#differences-that-are-not-emulated) for the hardware differences vvizard does not reproduce.
+- **Halting:** `uc_emu_stop()` from the code hook stops before the flagged instruction runs. Exit status 4.
+- **Speed** (GIOS+proj7, headless, 20M instructions, -O0): `--no-quirks` 4.4 s, default 5.8 s, default plus
+  `--halt-on-quirk` 5.8 s.
+- **Probe:** `tests/hwprobe.s` (45 checks, verified on the RTL; see [QUIRKS.md](QUIRKS.md#coreharness-deadbeef) for the #39 CoreHarness note) passes with the defaults (`make test-hex`). With `--no-quirks` it stops at the first unaligned `lw` (AdEL).
 
 ### Findings on current GIOS / proj7 / isr7 (Oct 28 2026)
 - Headless, `--warn-on-quirk`: 20M insns idle; 60M insns with ~1180 scripted keys (moves, long runs off every
   screen edge, space, d/e, junk keys); 70M insns with ~25 GIOS commands (lw/lbu/lhu/sw/sb/sh/dump/gs/result/
   color/fill/line/rect/elip/pf/sf/back/copy/unknown) then proj7 + keys; `test_player` with `--halt-on-quirk`.
-- (lb-sign check since removed: the Verilog will be fixed to sign-extend.) Only trip in program code was: **`lb-sign` in isr7.s `_uarx_player_move`** at 0xC0000404 (`lh SMO_player_x`,
+- (Run with the pre-fcdda7f hardware; lb/lh now sign-extend, so `lb-sign` is off by default.) Only trip in program code was: **`lb-sign` in isr7.s `_uarx_player_move`** at 0xC0000404 (`lh SMO_player_x`,
   isr7.s:323) and 0xC0000414 (`lh SMO_player_y`, isr7.s:328), when the player x/y goes negative (moved past the
   left/top edge). Benign for the ISR itself: it only does `addu` + `sh`, and the low 16 bits are identical.
 - User-driven only: GIOS `lw 70000000` -> `unmapped` at 0x40000200 (gios.c:71 BC_LOAD); `lw 50000001` ->
