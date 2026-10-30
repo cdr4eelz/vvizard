@@ -37,11 +37,17 @@ BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM
 # Auto-type the jump to the IMEM app at the GIOS prompt (GIOS ends tokens on space/CR).
 AUTORUN ?= jal 60000000\r
 ARGS ?= --random-ddr --irq --max-insns 0
-# Stop with a diagnostic when the guest relies on a MIPS150-vs-MIPS difference (see README "Hardware quirks").
-# QUIRKS= disables it; e.g. QUIRKS=--halt-on-quirk=all,-load-use or QUIRKS=--warn-on-quirk.
+# MIPS150 hardware quirks to EMULATE (README "Hardware quirks"; ./vvizard --list-quirks).
+# 'default' = the current hardware (fixed bugs jalr-rd/lb-sign off, bal-untaken on).
+# e.g. HW_QUIRKS=none (standard MIPS32), HW_QUIRKS=-load-use, HW_QUIRKS=+jalr-rd,+lb-sign (old HW).
+# The VVIZARD_QUIRKS environment variable is applied first; HW_QUIRKS overrides it.
+HW_QUIRKS ?= default
+# Stop with a diagnostic when the guest hits one of the emulated quirks.
+# QUIRKS= disables it; e.g. QUIRKS=--halt-on-quirk=-load-use, QUIRKS=--halt-on-quirk=all
+# (also non-emulated ones) or QUIRKS=--warn-on-quirk.
 QUIRKS ?= --halt-on-quirk
 
-.PHONY: all clean fresh run test-player test-quirks
+.PHONY: all clean fresh run test test-hex test-player test-quirks
 
 all: $(TARGET)
 
@@ -58,13 +64,19 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 run: $(TARGET)
-	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') $(QUIRKS) $(ARGS) $(BIN)
+	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') --quirks=$(HW_QUIRKS) $(QUIRKS) $(ARGS) $(BIN)
 
 test-player: $(TARGET)
 	python3 tests/test_player.py
 
 test-quirks: $(TARGET)
 	python3 tests/test_quirks.py
+
+test-hex: $(TARGET)
+	python3 tests/test_hex.py
+
+# All tests (hex programs + hwprobe, quirk detection/emulation, proj7 player via GIOS)
+test: test-hex test-quirks test-player
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

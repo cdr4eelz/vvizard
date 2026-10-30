@@ -152,17 +152,45 @@ static uint32_t sh_cause, sh_epc; static int fix_rt = -1; static uint32_t fix_va
 static uint32_t last_pc = 0xFFFFFFFFu; static uint64_t irq_count;
 #define VV_IM_UARX 0x400u
 static uint32_t read_insn(uc_engine *uc, uint32_t a) {
-    unsigned char b[4]; if (uc_mem_read(uc, vv_canon(a), b, 4)) return 0;
+    unsigned char b[4]; uint32_t c = vv_canon(a);
+    if (c == 0xFFFFFFFFu || (c >> 28) == 0x8 || uc_mem_read(uc, c, b, 4)) return 0;   /* no MMIO side effects */
     return b[0]<<24|b[1]<<16|b[2]<<8|b[3];
 }
 static int is_branch(uint32_t i) {
     unsigned op = i >> 26, fn = i & 0x3F;
     return (op == 0 && (fn == 8 || fn == 9)) || op == 1 || (op >= 2 && op <= 7) || (op >= 20 && op <= 23);
 }
+/* COP0150 register model for the cop0 quirk (COP0150.v): Count runs (one tick per instruction
+ * here), Compare resets to 0xFFFF and a write clears the timer IP bit (Cause[15]), Status is a
+ * plain 32-bit register reset to 0, EPC is written only by interrupt entry, everything else reads 0. */
+static uint32_t sh_status, sh_compare = 0xFFFFu, cnt0_val; static uint64_t cnt0_insn;
+uint32_t vv_cop0_read(unsigned rd) {
+    switch (rd) {
+    case 9:  return cnt0_val + (uint32_t)(insn_count - cnt0_insn);
+    case 11: return sh_compare;
+    case 12: return sh_status;
+    case 13: return sh_cause | (rx_avail() ? VV_IM_UARX : 0);
+    case 14: return sh_epc;
+    default: return 0;
+    }
+}
+void vv_cop0_write(unsigned rd, uint32_t v) {
+    switch (rd) {
+    case 9:  cnt0_val = v; cnt0_insn = insn_count + 1; break;
+    case 11: sh_compare = v; sh_cause &= ~0x8000u; break;
+    case 12: sh_status = v; break;
+    case 13: sh_cause = (v & ~0xFC00u) | (sh_cause & v & 0xFC00u & ~VV_IM_UARX); break;
+    default: break;                              /* EPC (14) and the rest: ignored by COP0150 */
+    }
+}
+void vv_mmio_side_read(uint32_t canon) {         /* a HW read of UARX_DATA pops the RX FIFO */
+    if ((canon & 0xFCu) == VV_OW_UARX_DATA) (void)rx_take();
+}
 static void irq_step(uc_engine *uc, uint32_t pc) {
+    int cop0 = vv_quirk_on(VV_Q_COP0);
     if (fix_rt > 0) { uc_reg_write(uc, UC_MIPS_REG_0 + fix_rt, &fix_val); }
     fix_rt = -1;
-    if ((pc >> 28) == 0xC) {                    /* COP0 shadowing only needed in the ISR BRAM */
+    if (!cop0 && (pc >> 28) == 0xC) {                    /* COP0 shadowing only needed in the ISR BRAM */
         uint32_t i = read_insn(uc, pc);
         if ((i >> 26) == 0x10 && (i & 0x7FF) == 0) {
             unsigned rs = (i >> 21) & 31, rt = (i >> 16) & 31, rd = (i >> 11) & 31;
@@ -179,8 +207,10 @@ static void irq_step(uc_engine *uc, uint32_t pc) {
     }
     if (rx_avail()) {
         uint32_t st; uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
+        if (cop0) st = sh_status;
         if ((st & 1) && (st & VV_IM_UARX) && !(last_pc + 4 == pc && is_branch(read_insn(uc, last_pc)))) {
             sh_epc = pc; st &= ~1u; uc_reg_write(uc, UC_MIPS_REG_CP0_STATUS, &st);
+            if (cop0) sh_status = st;
             uint32_t npc = VV_PC_ISR; irq_count++;
             last_pc = 0xFFFFFFFFu;
             uc_reg_write(uc, UC_MIPS_REG_PC, &npc);   /* insn at pc not executed; resumes at ISR */
@@ -220,6 +250,10 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
 static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val, void *u) {
     (void)u;
     uint32_t w = (off & 0xFF) & ~3u, v = (uint32_t)val;
+    /* mmio-lane quirk: ByteAccess4 places sb/sh data in its big-endian byte lane (zeros elsewhere)
+     * and MemMapIO uses the whole dina, e.g. sb to UATX_DATA+0 transmits 0x00. */
+    int lane_hw = size < 4 && vv_quirk_on(VV_Q_MMIO_LANE);
+    if (lane_hw) { unsigned lane = off & 3; v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
     switch (w) {
     case VV_OW_UATX_DATA: putchar(v & 0xFF); fflush(stdout); return; /* dina[7:0] */
     case VV_OW_CNT_RESET: cnt_base_insn = insn_count; break;
@@ -231,7 +265,7 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     case VV_OW_GP_FRAME:  gp_frame = v; break;
     case VV_OW_RANDOM32:  /* any byte mask reseeds with the full dina: ByteAccess4 puts the sb/sh
                            * data in its big-endian lane and zeros the rest (seed 0 -> 1 in RTL) */
-        if (size < 4) { unsigned lane = off & 3;
+        if (size < 4 && !lane_hw) { unsigned lane = off & 3;   /* (already placed when lane_hw) */
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
         vv_prng_write(insn_count, v); break;
     case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
@@ -248,10 +282,27 @@ static int stop_reason_intr = -1;
 static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *u) {
     (void)uc; (void)t; (void)u;
     uint32_t pa = vv_canon((uint32_t)va);
-    if (vv_quirk_mask && t == UC_MEM_FETCH && stop_reason_intr < 0 && /* not Unicorn's own exception vector */
-        !(max_insns && insn_count >= max_insns) && (pa == 0xFFFFFFFFu || (pa >> 28) == 0x8))
-        vv_quirk_fetch(uc, (uint32_t)va, pa == 0xFFFFFFFFu ? "undecoded" : "MMIO");
-    if (pa == 0xFFFFFFFFu) return false;
+    int fetch = t == UC_MEM_FETCH, hole = pa == 0xFFFFFFFFu;
+    if (fetch && (hole || (pa >> 28) == 0x8)) {   /* HW fetches DEAD_IMEM = 0 (MemBank.v:132) */
+        if ((vv_quirk_active() >> VV_Q_UNMAPPED_FETCH & 1) && stop_reason_intr < 0 && /* not Unicorn's own exception vector */
+            !(max_insns && insn_count >= max_insns))
+            vv_quirk_fetch(uc, (uint32_t)va, hole ? "undecoded" : "MMIO");
+        if (vv_quirk_on(VV_Q_UNMAPPED_FETCH)) {    /* execute nops from the VOID page */
+            e->paddr = VV_VOID_PA;
+            e->perms = UC_PROT_EXEC | (hole ? UC_PROT_READ | (vv_quirk_on(VV_Q_UNMAPPED) ? UC_PROT_WRITE : 0) : 0);
+            return true;
+        }
+    }
+    if (hole) {                                  /* undecoded data access: HW reads 0, drops stores */
+        int redir = ((uint32_t)va & ~0xFFFu) == (VV_VOID_VA & ~0xFFFu) &&
+                    (vv_quirk_on(VV_Q_UNALIGNED) || vv_quirk_on(VV_Q_LWLR));
+        if (!fetch && (redir || vv_quirk_on(VV_Q_UNMAPPED))) {
+            e->paddr = VV_VOID_PA;
+            e->perms = UC_PROT_READ | UC_PROT_WRITE | (vv_quirk_on(VV_Q_UNMAPPED_FETCH) ? UC_PROT_EXEC : 0);
+            return true;
+        }
+        return false;
+    }
     e->paddr = pa & ~0xFFFull;                   /* page granularity; offset kept by Unicorn */
     e->perms = region_for((uint32_t)va)->prot;
     return true;
@@ -261,9 +312,9 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     (void)size; (void)u;
     insn_count++;
     if (nevents) run_due_events(uc, 0);
-    if (vv_quirk_mask) {                     /* --halt-on-quirk / --warn-on-quirk */
+    if (vv_quirk_active()) {                 /* emulated quirks and/or --halt-on-quirk / --warn-on-quirk */
         if (vv_quirk_halted) { uc_emu_stop(uc); return; }
-        vv_quirk_post(uc, (uint32_t)addr);   /* result of the previous insn (lb/lh sign) */
+        if (vv_quirk_post(uc, (uint32_t)addr)) { insn_count--; return; }   /* fix up the previous insn; emulated branch */
         uint64_t irqs = irq_count;
         if (opt_irq) irq_step(uc, (uint32_t)addr);
         if (irqs != irq_count) vv_quirk_cancel();   /* redirected to the ISR: insn at addr not run */
@@ -273,7 +324,8 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     if ((insn_count & 0xFFF) == 0 && vv_disp_tick(uc)) { fprintf(stderr, "[stop] window closed\n"); uc_emu_stop(uc); }
     if (opt_trace && trace_left != 0) {
         uint32_t insn = 0; unsigned char b[4];
-        if (!uc_mem_read(uc, vv_canon((uint32_t)addr), b, 4)) insn = b[0]<<24|b[1]<<16|b[2]<<8|b[3];
+        uint32_t ca = vv_canon((uint32_t)addr);
+        if (ca != 0xFFFFFFFFu && (ca >> 28) != 0x8 && !uc_mem_read(uc, ca, b, 4)) insn = b[0]<<24|b[1]<<16|b[2]<<8|b[3];
         fprintf(stderr, "[trace] %8llu pc=0x%08x insn=%08x", (unsigned long long)insn_count, (uint32_t)addr, insn);
         if (opt_trace_regs) { /* GPRs changed by the PREVIOUS instruction (debug aid) */
             for (int i = 1; i < 32; i++) { uint32_t v; uc_reg_read(uc, UC_MIPS_REG_0 + i, &v);
@@ -304,7 +356,8 @@ static bool hook_unmapped(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int6
 }
 static void hook_bios_write(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int64_t v, void *u) {
     (void)uc; (void)t; (void)u;
-    fprintf(stderr, "[warn] data write to BIOS 0x%08x size %d val 0x%llx (HW drops this)\n", (uint32_t)a, sz, (long long)v);
+    fprintf(stderr, "[warn] data write to BIOS 0x%08x size %d val 0x%llx (HW drops this; %s)\n", (uint32_t)a, sz, (long long)v,
+            vv_quirk_on(VV_Q_BIOS_STORE) ? "dropped: bios-store quirk on" : "kept: bios-store quirk off");
 }
 
 /* DDR power-up contents: random by default (real DRAM is not zeroed). splitmix64, seed printed for repeatability. */
@@ -381,11 +434,15 @@ static void usage(const char *p) {
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --expect REG=VAL   exit 0 iff GPR REG equals VAL at stop (repeatable)\n"
-"  --halt-on-quirk[=LIST] stop (exit 4) with PC, insn, quirk name and registers when the guest\n"
-"                     does something the MIPS150 hardware does differently from standard MIPS.\n"
-"                     LIST: comma list of categories, 'all' (default), '-name' excludes\n"
-"                     (a leading '-name' starts from all). Categories:\n"
+"  --quirks=LIST      MIPS150 hardware quirks to EMULATE (default 'default' = the current hardware;\n"
+"                     env VVIZARD_QUIRKS is applied first). LIST: comma list of default, none, all,\n"
+"                     NAME, -NAME, +NAME; a leading -NAME/+NAME edits the set so far. Names:\n"
 "                     %s\n"
+"  --no-quirks        standard MIPS32 (same as --quirks=none)\n"
+"  --list-quirks      print the quirks, their defaults and hardware behaviour, then exit\n"
+"  --halt-on-quirk[=LIST] stop (exit 4) with PC, insn, quirk name and registers when the guest hits\n"
+"                     a quirk. LIST as for --quirks; default and a leading -NAME/+NAME start from\n"
+"                     the emulated set ('all' also reports quirks that are not emulated)\n"
 "  --warn-on-quirk[=LIST] same detection, but log each (quirk, pc) once and keep running\n", p, VV_PC_BOOT,
     VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, vv_quirk_names());
 }
@@ -400,8 +457,11 @@ int main(int argc, char **argv) {
     static struct option lo[] = {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
         {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},{"input-script",1,0,'S'},{"irq",0,0,'I'},{"dump-every",1,0,'E'},{"dump-prefix",1,0,'P'},
-        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"help",0,0,'h'},{0,0,0,0}};
+        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"quirks",1,0,'J'},{"no-quirks",0,0,'O'},{"list-quirks",0,0,'Y'},{"help",0,0,'h'},{0,0,0,0}};
     int c;
+    uint32_t emul = vv_quirk_default();
+    const char *qenv = getenv("VVIZARD_QUIRKS"), *qcli = NULL, *qdet = NULL; int qdet_on = 0;
+    if (qenv && vv_quirk_parse(qenv, emul, &emul)) { fprintf(stderr, "bad VVIZARD_QUIRKS\n"); return 2; }
     while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) switch (c) {
         case 'l': if (nloads < 32) loads[nloads++] = optarg; break;
         case 'e': entry = strtoul(optarg, 0, 0); have_entry = 1; break;
@@ -427,8 +487,19 @@ int main(int argc, char **argv) {
         case 'E': dump_every = strtoul(optarg, 0, 0); break;
         case 'P': dump_prefix = optarg; break;
         case 'x': if (nexp < 32) expects[nexp++] = optarg; break;
-        case 'Q': case 'w': if (vv_quirk_parse(optarg)) return 2; vv_quirk_warn = c == 'w'; break;
+        case 'Q': case 'w': qdet_on = 1; qdet = optarg; vv_quirk_warn = c == 'w'; break;
+        case 'J': qcli = optarg; break;
+        case 'O': qcli = "none"; break;
+        case 'Y': vv_quirk_list(stdout); return 0;
         default: usage(argv[0]); return c == 'h' ? 0 : 2;
+    }
+    if (qcli && vv_quirk_parse(qcli, emul, &emul)) return 2;
+    vv_quirk_emul = emul;
+    if (qdet_on) {                               /* bare / leading -NAME: relative to the emulated set */
+        uint32_t d = emul;
+        if (qdet && *qdet && vv_quirk_parse(qdet, emul, &d)) return 2;
+        if (qdet && !strcmp(qdet, "default")) d = emul;
+        vv_quirk_detect = d;
     }
     uc_engine *uc; uc_err err;
     if ((err = uc_open(UC_ARCH_MIPS, UC_MODE_MIPS32 | (big ? UC_MODE_BIG_ENDIAN : UC_MODE_LITTLE_ENDIAN), &uc))) {
@@ -441,6 +512,8 @@ int main(int argc, char **argv) {
                                  : uc_mem_map(uc, r->base, r->size, UC_PROT_ALL);
         if (err) { fprintf(stderr, "map %s @0x%08x: %s\n", r->name, r->base, uc_strerror(err)); return 1; }
     }
+    /* VOID page (quirks unmapped/unmapped-fetch/unaligned/lwlr): reads 0, stores are undone */
+    if ((err = uc_mem_map(uc, VV_VOID_PA, 0x1000, UC_PROT_ALL))) { fprintf(stderr, "map VOID: %s\n", uc_strerror(err)); return 1; }
     /* Random DDR before any ELF/--load/BIOS goes in, so images overwrite where they land (as on HW). */
     if (opt_random_ddr) {
         if (!ddr_seed_given) ddr_seed = (uint64_t)time(NULL);
@@ -497,7 +570,8 @@ int main(int argc, char **argv) {
         *at = 0; if (vv_load_raw(uc, s, strtoul(at + 1, 0, 0))) return 1; free(s);
     }
     uc_reg_write(uc, UC_MIPS_REG_SP, &sp);
-    if (vv_quirk_mask) fprintf(stderr, "[quirk] %s on quirks (mask 0x%x)\n", vv_quirk_warn ? "warn" : "halt", vv_quirk_mask);
+    fprintf(stderr, "[quirk] emulating: %s\n", vv_quirk_set_str(vv_quirk_emul));
+    if (vv_quirk_detect) fprintf(stderr, "[quirk] %s on: %s\n", vv_quirk_warn ? "warn" : "halt", vv_quirk_set_str(vv_quirk_detect));
     vv_disp_init(want_window);
     fprintf(stderr, "[run] %s-endian entry=0x%08x sp=0x%08x max-insns=%llu\n", big ? "big" : "little",
             entry, sp, (unsigned long long)max_insns);
@@ -511,7 +585,7 @@ int main(int argc, char **argv) {
     if (err) fprintf(stderr, "[stop] uc_emu_start: %s\n", uc_strerror(err));
     if (opt_irq) fprintf(stderr, "[irq] UARX interrupts injected: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
-    if (vv_quirk_mask) vv_quirk_summary();
+    if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);
