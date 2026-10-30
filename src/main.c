@@ -15,6 +15,7 @@
 #include "display.h"
 #include "gpu.h"
 #include "quirk.h"
+#include "prng.h"
 
 /* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
  * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
@@ -205,6 +206,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
                            * Stub GPU finishes instantly => all engines ready. */
         v = (vv_disp_frame() & 0x3F) << 24
           | (((gp_frame >> 28) ? (gp_frame >> VV_FSHIFT) : gp_frame) & 0x3F) << 16 | 0x1F; break;
+    case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
     default:
         if (!opt_quiet_mmio) fprintf(stderr, "[mmio] MISS-READ off=0x%03x\n", (unsigned)off);
     }
@@ -227,6 +229,11 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
         if (nevents) run_due_events(uc, 1);
         break;
     case VV_OW_GP_FRAME:  gp_frame = v; break;
+    case VV_OW_RANDOM32:  /* any byte mask reseeds with the full dina: ByteAccess4 puts the sb/sh
+                           * data in its big-endian lane and zeros the rest (seed 0 -> 1 in RTL) */
+        if (size < 4) { unsigned lane = off & 3;
+            v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
+        vv_prng_write(insn_count, v); break;
     case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
         { int n = vv_gpu_run(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1);
           if (!opt_quiet_mmio) fprintf(stderr, "[gpu] launch #%u code@0x%08x frame=0x%08x -> %d cmds\n", gp_launches, gp_code, gp_frame, n); }

@@ -56,6 +56,7 @@ typedef struct {
 #define VV_OW_GP_FRAME    0x0054u
 #define VV_OW_GP_GCODE    0x0058u
 #define VV_OW_GP_STATE    0x005Cu
+#define VV_OW_RANDOM32    0x0080u   /* PRNG32LFSR: read value / write seed (src/prng.c) */
 #define VV_SM_BASE_ADDR   0x50000000u   /* shared6.h: plain RAM in D-scratch */
 #define VV_GPTEMP         0x12003000u   /* graphics.h GP command buffer (DDR) */
 #define VV_FRAME0         0x10000000u   /* frame N at 0x10000000 + N<<FSHIFT */

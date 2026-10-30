@@ -128,12 +128,13 @@ vvizard reproduces this with Unicorn's virtual-TLB mode and a fill hook, which i
 - **UART:** TX_READY always reads 1. A write to TX_DATA (offset 0x08, any byte lane) sends byte [7:0] to stdout.
 - **UART RX:** RX_VALID and RX_DATA serve any `--uart-in` bytes first, then due `--input-script` bytes, then window keystrokes, then poll stdin without blocking.
 - **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. There is no cycle model.
+- **PRNG (0x80000080, `src/prng.c`):** PRNG32LFSR.v, a 32-bit Galois LFSR (mask 0x80200003, reset value 0xACE12468) that steps every clock, not per read. A read in cycle c returns state(c-1) (MemMapIO registers `prng_out` once more before `douta`). Any store (any byte lane, also via the 0x100 aliases) reseeds with the full lane-placed store data, and a seed of 0 becomes 1. The first read in the cycle right after a store returns the old value; from the next cycle on reads return the seed, then the seed advanced one step per cycle. Back-to-back reads return consecutive LFSR states. Cycles are counted as instructions (no stall or cache model), so seeded sequences match hardware only while the CPU does not stall, and the unseeded sequence after reset is not aligned with hardware. CNT_RESET does not reset the PRNG.
 - **GPU (stub):** PF_FRAME, GP_FRAME and GP_CODE writes are recorded, and a GP_CODE write logs a GPU "launch". PF_FRAME reads return `{4'h1, frame#, 22'b0}`. GP_STATE reads return 0, meaning idle.
 - **Other offsets:** logged as MISS-READ or MISS-WRITE.
 - **Interrupts:** none are injected yet, and the CP0 timer does not run (details in NOTES.md).
 
 ## Tests
-Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). `make test-quirks` runs `tests/test_quirks.py` (one tiny program per `--halt-on-quirk` category, plus clean counterparts). How to run them and their pass conditions are in NOTES.md.
+Hex test programs live in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). `make test-quirks` runs `tests/test_quirks.py` (one tiny program per `--halt-on-quirk` category, plus clean counterparts). How to run them and their pass conditions are in NOTES.md.
 
 ## PixelFeeder display (raylib, `src/display.c`)
 - Frame N starts at `0x10000000 + N<<22`. The visible area is 800×600, rows start 4096 bytes apart, and each pixel is a 32-bit big-endian XRGB word.
