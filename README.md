@@ -197,11 +197,12 @@ MIPS]`, and keeps running. Both print a `[quirk] summary` of hit counts at exit.
 `--quiet-quirk` silences them, and `--halt-on-quirk` also stops on them. **`--halt-on-quirk` is on by default**;
 `--warn-on-quirk` keeps running, `--no-halt-on-quirk` turns detection of emulated quirks off.
 
-**Cost.** With all quirks off and no detection, the extra cost is one branch per instruction. Otherwise each
-instruction costs one 4-byte read and a decode: about 30% slower at -O0 (GIOS+proj7, 20M instructions: 4.4 s
-with `--no-quirks`, 5.8 s by default). GIOS, proj7 and isr7 of Oct 28 hit no quirks in that run (a later isr7 hits
-`load-use`, NOTES.md "Finding: isr7 load-use"). See QUIRKS.md for the
-evidence and NOTES.md for the emulation design.
+**Cost.** Emulated quirks and the decode-based detectors (undef-reg, dcache-stale) cost a 4-byte read from guest
+RAM and a decode per instruction; tx-busy, rx-overrun, irq-storm and unmapped-fetch are detected in the device
+model and cost (almost) nothing per instruction. GIOS+proj7 at -O3 on the Debian 13 box: about 22M instr/s with
+the defaults, 35M with only the UART/irq-storm detectors, 38M with nothing emulated or detected (NOTES.md
+"Performance"). GIOS, proj7 and isr7 of Oct 28 hit no quirks (a later isr7 hits `load-use`, NOTES.md "Finding:
+isr7 load-use"). See QUIRKS.md for the evidence and NOTES.md for the emulation design.
 
 ## Memory map (`src/memmap.h` is the single table)
 The hardware decodes only `ADDR[31:28]`.

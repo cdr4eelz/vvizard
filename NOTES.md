@@ -30,6 +30,16 @@ MMIO uses `uc_mmio_map` over the 16 KiB map. Its callbacks take `off & 0x3FFC` (
 reach the registers, 0x100-0x17C the LCD buffer (`src/lcd.c`), anything else is a miss.
 The loader writes through `vv_canon()`, so you can also load at alias addresses.
 
+**Guest RAM is host memory.** Each RAM region (DDR, BIOS, D-/I-scratch, ISR BRAM) is an `mmap` (anonymous,
+private: page aligned and zeroed, also on macOS) mapped with `uc_mem_map_ptr`; MMIO stays `uc_mmio_map` and the VOID
+page `uc_mem_map`. `vv_nib[16]` (memmap.h, built from the two tables by `init_nib()`) is the nibble decode with the
+host pointer of each RAM region, so `vv_canon()` is a table lookup and `vv_ram(canon, n)` / `vv_ram_be32()` read
+guest RAM without `uc_mem_read` (NULL / not ok exactly where `uc_mem_read` would fail or reach MMIO). The bytes
+are in guest order; the readers assemble big-endian words as before. Host *writes* (loader, GPU, dropped-store
+restore, VOID re-zero) still go through `uc_mem_write`, which also invalidates translated code in the range; a plain
+store into the buffer would not. Readers: quirk fetch/decode, `irq_step`, `--trace`, `dcache-stale`, the D-cache
+snoop on GPU writes, GPU command fetch, the window/PPM frame grab, random DDR fill (generated in place).
+
 
 ## Unicorn CP0 vs. the COP0150 hardware 
 These Unicorn 2.1.1 behaviors were confirmed with a probe program:
@@ -47,7 +57,7 @@ Status is Unicorn's and only mfc0/mtc0 of Cause/EPC inside the ISR BRAM are patc
 ## PixelFeeder details
 - A PF_FRAME write (0x80000050) selects the frame using `FRAME_BITS` (`gpcommands.vh:39`): a frame number, or an address with the frame number in bits 27:22. It only sets `frame_next` (PixelFeeder.v:248). The fetch head copies it into `framebits` when it finishes fetching a frame (:271-274) and `irq_frame` follows one cycle later (:247). One frame is 1040x666 pixel clocks at 40 MHz = 17.316 ms = 865800 CPU cycles at 50 MHz (`VV_PF_PERIOD`; `--pf-period`). vvizard puts the frame ends at k x 865800 cycles from reset; the real phase is not modelled. PF_FRAME reads give `{4'h1, framebits_r, 22'b0}` (MemMapIO.v:162), the displayed frame. `--legacy-io` or `--pf-period 0`: immediate, as before.
 - `--dump-frame`, script `dump` events and `--dump-every` dump the displayed frame; script `fN` still counts PF_FRAME writes (with proj7's `pf_wait`, one per displayed frame).
-- The window is redrawn whenever the displayed frame changes and about every 1/60 s of host time, checked every 4096 instructions.
+- The window is redrawn whenever the displayed frame changes and about every 1/60 s of host time, checked every 4096 instructions. Between draws, input is polled at most every 2 ms of host time (`POLL_PERIOD`).
 - Pixels are read in plain address order. Real hardware may mirror each group of 4 pixels (`PixelFeeder.v:10,127`); the user chose not to emulate that.
 
 ## GPU details
@@ -142,7 +152,7 @@ Makefile build leaves out (`--no-pad-sections`).
 - `--legacy-io` restores the old model: RX bytes served on demand with Cause bit 10 = "RX data available" (a level),
   TX always ready, PF_FRAME immediate, no other interrupt sources.
 
-- Window keys (display.c): every 4096-insn tick calls PollInputEvents (or EndDrawing on redraw) then drains
+- Window keys (display.c): the 4096-insn tick calls PollInputEvents (at most every 2 ms; or EndDrawing on redraw) then drains
   GetCharPressed/GetKeyPressed into a 256-byte queue feeding UART RX; SetExitKey(KEY_NULL) so Esc is sent as 0x1b.
   GIOS boot + `jal` autorun unaffected (GIOS polls with IE off; 0 irqs).
   Verified under Xvfb :77 + xdotool: 5x `l` -> 5 irqs, player (400,300)->(430,300) in --dump-frame.
@@ -160,8 +170,18 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
   - `irq_step()`.
   - `vv_quirk_pre()` decodes the instruction about to run, reports quirks and sets up the emulation.
 
-  If `irq_step()` redirected to the ISR, the pending state is dropped instead. The hooks are active whenever any
-  quirk is emulated or detected.
+  If `irq_step()` redirected to the ISR, the pending state is dropped instead. post/pre run only when some quirk
+  needs the decode (`vv_quirk_needs_decode()`, quirk.h, fixed for the run as `vv_quirk_decode`): any emulated quirk
+  except the four below, or any detected one except tx-busy and rx-overrun (UART model, hw.c), irq-storm (Status.IE
+  edge in `irq_step`) and unmapped-fetch (`tlb_fill`); the emulation bits of those four and of undef-reg do
+  nothing per instruction. undef-reg, dcache-stale, load-use and mmio-lane (whose hits pre() counts; its emulation
+  is in `mmio_write`) need it. Without decode, `vv_quirk_pre_lite()` keeps the two other things pre() did for
+  them: the `eret` irq-storm check (it reads the instruction only inside an ISR) and the last-PC note in
+  unmapped-fetch reports. One visible difference: the summary counts hits of a silenced (`--quiet-quirk`)
+  undef-reg / dcache-stale only when the decode runs anyway (it always did before).
+- **irq_step fast path.** With no Cause IP bit latched and no ISR active, no interrupt can be requested and the
+  IE-edge check has nothing to do, so Status is not read (`vv_hw_irq_possible()`, hw.h; `--legacy-io` always
+  takes the full path). pre() reads GPRs only when the decoded instruction needs them (rt only for loads).
 - **Emulation techniques** (pre/post pairs):
   - **Result fix-up:** `hilo`, `overflow` (operands are zeroed while the instruction runs, so it can't trap, then
     restored, and the wrapped result is written), `rotr`, the `movz` class, `cop0` mfc0, `jalr-rd` and `lb-sign`.
@@ -188,8 +208,9 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
     when `cop0` is off. Count is one tick per instruction (no stall model).
 - **Not emulated:** see [QUIRKS.md](QUIRKS.md#differences-that-are-not-emulated) for the hardware differences vvizard does not reproduce.
 - **Halting:** `uc_emu_stop()` from the code hook stops before the flagged instruction runs. Exit status 4.
-- **Speed** (GIOS+proj7, headless, 20M instructions, -O0): `--no-quirks` 4.4 s, default 5.8 s, default plus
-  `--halt-on-quirk` 5.8 s.
+- **Speed:** see "Performance" below (Oct 31 2026, -O3: 22M instr/s with the default quirks on Debian 13, 38M
+  with nothing emulated or detected). Old figure (GIOS+proj7, headless, 20M instructions, -O0): `--no-quirks`
+  4.4 s, default 5.8 s.
 - **Probe:** `tests/hwprobe.s` (45 checks, verified on the RTL; see [QUIRKS.md](QUIRKS.md#coreharness-deadbeef) for the #39 CoreHarness note) passes with the defaults (`make test-hex`). With `--no-quirks` it stops at the first unaligned `lw` (AdEL).
 
 ### Findings on current GIOS / proj7 / isr7 (Oct 28 2026)
@@ -239,7 +260,8 @@ Measured on the Debian 13 box, `-O3`, Xvfb `DISPLAY=:77` (Mesa llvmpipe), proj7 
 | `--no-window`, new code | 4.44 / 4.51 / 4.65 s | | |
 
 - The window costs ~1 s of 5.6 s (~18%). The strip is ~0.45 ms of each ~2.6 ms redraw, ~0.1 s per run (~2%), within
-  run-to-run noise on wall time; the rest is `grab()` (600 `uc_mem_read`s of a 3200-byte row + byte swizzle),
+  run-to-run noise on wall time; the rest is `grab()` (600 `uc_mem_read`s of a 3200-byte row + byte swizzle; since
+  the host-buffer change it reads DDR directly),
   `UpdateTexture` of the 1.9 MB frame and the GL draw/swap.  `user` > `wall` in windowed runs because llvmpipe
   renders on its own threads.
 - When it's drawn: `draw()` runs from `vv_disp_tick()` (every 4096 instructions it checks the clock and redraws if
@@ -252,3 +274,38 @@ Measured on the Debian 13 box, `-O3`, Xvfb `DISPLAY=:77` (Mesa llvmpipe), proj7 
   0 and `EndDrawing()` doesn't wait; emulation is never blocked on vsync (on Xvfb). ~52 draws/s here (60 Hz cap plus
   frame switches). Not measured on macOS: if its GL driver forces vsync on the swap anyway, each draw could block up
   to 16.7 ms and the uncapped redraw on every PF frame switch could matter much more there.
+
+## Performance: code hook and guest memory (Oct 31 2026)
+proj7 via GIOS (`--bios gios --uart-in 'jal 60000000\r' --random-ddr=1 --load draw/isr7/proj7`, `--max-insns
+50000000`, `--irq --quiet-mmio`), -O3, best of 5 wall times incl. startup, M instr/s. Before = 7eda450, after =
+the "Faster code hook" commit. "tx/rx/storm only" = `--quirks=none --no-halt-on-quirk
+--quiet-quirk=dcache-stale,undef-reg`; "nothing" also silences tx-busy,rx-overrun,irq-storm.
+
+| machine | flags | before | after |
+|---|---|---|---|
+| Debian 13 box (`taskset -c 2`) | `--quirks=default --warn-on-quirk` | 11.7 | 22.3 |
+| | tx/rx/storm only | 11.2 | 34.9 |
+| | nothing | 32.0 | 38.3 |
+| | window (Xvfb, llvmpipe), `--quirks=default --warn-on-quirk` | 9.3 | 17.2 |
+| UBU24 (`taskset -c 2`, local disk) | `--quirks=default --warn-on-quirk` | 6.7 | 11.9 |
+| | defaults (`--irq --quiet-mmio` only; halt on, this isr7 hits nothing) | 6.7 | 11.9 |
+| | tx/rx/storm only | 6.5 | 18.6 |
+| | nothing | 18.7 | 20.3 |
+
+Where it came from (perf on the Debian box, default flags, before): `vv_quirk_pre` 14%, Unicorn's memory read path
+(`uc_mem_read` -> `find_memory_mapping`, `flatview_translate`, ...) 12-15% (one 4-byte fetch per instruction),
+`helper_uc_tracecode` 6%, `vv_quirk_post` 4%, `uc_reg_read` ~3% (pre read rt on every instruction), `vv_canon` 2.5%
+(alias + region loops), `irq_step` 2% (Status read, request test); and any active detector, even the UART ones,
+turned the decode on. Changes: the decode split and `vv_quirk_pre_lite` (above), RAM as host buffers (above), rt read
+only for loads, the `irq_step` fast path, `--max-insns` counted in `hook_code` (identical stop point: it counts hook
+calls as Unicorn's count limit did, whose own count hook was a second per-instruction callback), window input
+polled by host time. After, with the default quirks, the profile is the decode itself (`vv_quirk_pre`/`post`,
+`reads`/`writes`), `hook_code`, `vv_hw_tick` and Unicorn's per-instruction hook call; GPR reads are ~4%.
+
+Checked unchanged (stdout, stderr, exit code, frame dumps byte for byte): every vvizard call of `make test`
+(174) run with both binaries, also with `--quirks=none`, `--quirks=none --quiet-quirk=undef-reg,dcache-stale`,
+`--legacy-io`, `--quirks=-cop0 --warn-on-quirk=all`, `--no-irq` appended; 18 proj7 flag sets of 20M instructions
+(halt / warn / all, quirks none / default / -cop0 / +jalr-rd,+lb-sign, legacy-io, no-irq, trace-regs, mmio-log,
+input script with key presses and `--dump-every`), a 150M-instruction scripted run and a windowed `--screenshot`.
+The only difference found is the documented summary count of a silenced undef-reg / dcache-stale when nothing
+else needs the decode.
