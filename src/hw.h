@@ -38,7 +38,7 @@ enum { VV_FRAME_CLOCK_EMULATED = 0, VV_FRAME_CLOCK_WALL = 1 };
 extern int      vv_legacy_io;     /* --legacy-io */
 extern uint64_t vv_uart_rx_gap;   /* --uart-rx-gap: idle cycles the host leaves between RX bytes */
 extern uint64_t vv_pf_period;     /* --pf-period: cycles per scanned frame (0 = PF_FRAME acts at once) */
-extern int      vv_frame_clock;   /* --frame-clock: VV_FRAME_CLOCK_EMULATED (default) or _WALL */
+extern int      vv_frame_clock;   /* --frame-clock: VV_FRAME_CLOCK_WALL (default) or _EMULATED */
 uint64_t vv_mono_ns(void);        /* host CLOCK_MONOTONIC in ns */
 uint64_t vv_pf_frames(void);      /* frame events (PixelFeeder frame ends) so far */
 extern uint32_t vv_cur_pc;        /* PC of the instruction being executed (for reports) */

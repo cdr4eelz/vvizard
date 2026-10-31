@@ -10,7 +10,7 @@
 int      vv_legacy_io;
 uint64_t vv_uart_rx_gap = VV_UART_RX_FRAME;
 uint64_t vv_pf_period   = VV_PF_PERIOD;
-int      vv_frame_clock = VV_FRAME_CLOCK_EMULATED;
+int      vv_frame_clock = VV_FRAME_CLOCK_WALL;
 uint32_t vv_cur_pc;
 
 static uint64_t now_c;                     /* cycle of the last vv_hw_tick */

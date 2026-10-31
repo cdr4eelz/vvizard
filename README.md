@@ -311,16 +311,16 @@ programs run without GIOS.
                        PF_FRAME switches at once, no TX/GPU/PF/timer/RTC interrupts
     --uart-rx-gap N    idle cycles the host leaves between RX bytes (default 4340, one byte time; 0 = back to back)
     --pf-period N      cycles per scan frame (default 828960; 0 = PF_FRAME writes take effect at once, no bit 13)
-    --frame-clock=MODE emulated (default): a frame ends every --pf-period cycles; wall: every 16.5792 ms of
-                       host monotonic time (60.317 frames per wall second)
+    --frame-clock=MODE wall (default): a frame ends every 16.5792 ms of host monotonic time (60.317 frames
+                       per wall second); emulated: every --pf-period cycles (deterministic; the tests use it)
     --no-irq           don't take interrupts (the Cause bits still latch)
 
 **Frame clock.** The hardware scans VESA 800x600@60: 1056x628 pixel clocks at 40 MHz = 663168 clocks = 16.5792 ms
 (60.317 Hz), which is 828960 cycles of the 50 MHz CPU (`VV_PF_PERIOD`, `src/hw.h`). Until Oct 31 2026 the default
 was 865800 (1040x666 at 40 MHz, as the DVI instance in `ml505top.v:184-185` is written; `--pf-period 865800` gives
-the old timing). By default (`--frame-clock=emulated`) frame ends come every 828960 instructions, so every run is
+the old timing). With `--frame-clock=emulated` frame ends come every 828960 instructions, so every run is
 repeatable and the guest gets the hardware's work per frame, but at vvizard's speed (10-20M instructions/s against
-50M) that is only ~20 frames per wall second and games look slow. `--frame-clock=wall` instead ends a frame (PF_FRAME
+50M) that is only ~20 frames per wall second and games look slow. The default, `--frame-clock=wall` (since Oct 31 2026, the user's choice), instead ends a frame (PF_FRAME
 switch, Cause bit 13, window redraw) each time host `CLOCK_MONOTONIC` passes the next 16.5792 ms deadline, checked
 every 1024 instructions (~0.05-0.1 ms). Deadlines missed while the host stalls are skipped, not caught up, so frames
 never burst; the `[frame]` line counts them. The guest then gets ~instr/s / 60 instructions per frame (~290k on the
