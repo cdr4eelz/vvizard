@@ -32,6 +32,9 @@ The old name `uart-lane` is accepted for `mmio-lane`.
 - `make run` passes `QUIRKS ?= --halt-on-quirk`.
 - If an enabled quirk can't be reproduced at a given site, vvizard prints `[quirk] NAME ... NOT emulated (why)`
   once per PC and uses the standard result.
+- The five [guest-bug detectors](#guest-bug-detectors) (`dcache-stale`, `tx-busy`, `rx-overrun`, `irq-storm`,
+  `undef-reg`) are different: they always warn (tagged `[guest bug]`) unless `--quiet-quirk=LIST` silences them,
+  and `--halt-on-quirk` stops on them like any emulated quirk.
 
 **Evidence and tests:**
 - **hwprobe #N** is check number N (counting from 0, in program order) in `tests/hwprobe.s`. It was run on the RTL
@@ -62,6 +65,14 @@ The old name `uart-lane` is accepted for `mmio-lane`.
 | [`mmio-lane`](#mmio-lane) | on | current hardware | RTL reading |
 | [`jalr-rd`](#jalr-rd) | **off** | fixed in cs150 fcdda7f | hwprobe #43 (fixed behaviour) |
 | [`lb-sign`](#lb-sign) | **off** | fixed in cs150 fcdda7f | hwprobe #41-42 (fixed behaviour) |
+| [`dcache-stale`](#dcache-stale) | on, warns | guest bug on current hardware | RTL reading; test_hw `dcache_stale` |
+| [`tx-busy`](#tx-busy) | on, warns | guest bug on current hardware | RTL reading; test_hw `tx_busy` |
+| [`rx-overrun`](#rx-overrun) | on, warns | guest bug on current hardware | RTL reading; test_hw `uart_rx_hold`, `rx_overrun` |
+| [`irq-storm`](#irq-storm) | on, warns | guest bug on current hardware | RTL reading; test_hw `irq_storm` |
+| [`undef-reg`](#undef-reg) | on, warns | guest bug on current hardware | RTL reading; test_hw `reset_regs`, `undef_reg` |
+
+The [GP_STATE layout](#gp-status-rtl-bug) is an RTL bug of another kind: vvizard models the *intended* layout and
+this file gives the one-line Verilog fix.
 
 **Default rule:** a quirk is on if the current hardware still behaves that way. The two bugs fixed in fcdda7f are
 off but kept so that older bitstreams can be reproduced. `bal-untaken` is a real RTL bug, but the user rated it
@@ -271,20 +282,121 @@ obscure and postponed the fix, so it stays on until the RTL changes.
   testbench.
 - **Tests:** test_quirks det `lb_neg`, `lh_neg`, `lb_pos` and emu `lb_sign`.
 
+## Guest-bug detectors
+These are bugs in guest software that the hardware lets through silently. vvizard reproduces the hardware result
+(the device model is `src/hw.c`, see README "Hardware timing and interrupts") and reports the site. Each warns once
+per (category, PC); `rx-overrun` warns once per run, since it happens between instructions. The `[hw]` line at exit
+has the totals. `--legacy-io` turns off the timing they depend on (all but `undef-reg` and `dcache-stale`).
+
+### dcache-stale
+- **Hardware** (`base_mem/Cache.v`, `base_mem/cache.vh`; `cpu/MemBank.v`): data accesses through nibbles 0x1 and 0x3 go through a
+  direct-mapped D-cache of 256 lines x 32 bytes (offset `ADDR[4:2]`, index `ADDR[12:5]`, tag `ADDR[27:13]`). It is
+  write-through without write-allocate, fills a line on a read miss, and is never flushed or snooped. The GPU writes
+  DDR directly, so a CPU load from a line it cached before the GPU wrote it returns the old data. (The PixelFeeder
+  only reads DDR, so it cannot cause this.)
+- **vvizard** (`src/dcache.c`): tracks the cache tags; GPU writes (`src/gpu.c`) to a cached line mark the words
+  stale and save the old DDR words. A load of a stale word whose cached value differs from DDR is reported, and with
+  the quirk on (default) returns the cached value. A CPU store to the word refreshes it (write-through).
+  `--quirks=-dcache-stale` returns DDR. Byte and halfword loads extract from the cached word.
+- **Fix in the guest:** read GPU output through an uncached alias, or touch a different line with the same index
+  (8 KiB apart) to evict the line before reading.
+
+### tx-busy
+- **Hardware** (`cpu/MemMapIO.v:101` "Loses a byte if Tx_Valid && !Tx_Ready"; `base_io/UATransmit.v`): after an
+  accepted byte, DataInReady stays low for 11 symbol edges of 434 cycles (115200 baud at 50 MHz) = 4773 cycles. A
+  TX_DATA store in that time is dropped.
+- **vvizard:** the byte is not printed, the store is reported, and `[hw]` counts it under `lost`.
+- **Fix in the guest:** poll TX_READY (0x80000000) before every store, or send from the TX interrupt (Cause bit 11).
+
+### rx-overrun
+- **Hardware** (`base_io/UAReceive.v:103-107`, `UARTRVA.v`): one holding register. A byte that lands while the last
+  one is unread overwrites it. RX valid is also low while the next byte is being shifted in, and an RX_DATA read
+  during a reception returns the partly shifted register (vvizard models this too).
+- **vvizard:** reported when the overwrite happens, at the PC then running. `--uart-in` bytes wait to be read (so
+  auto-typing never overruns); script, window and stdin bytes don't. `--uart-rx-gap 0` sends them back to back.
+
+### irq-storm
+- **Hardware** (`cpu/COP0150.v`): Cause IP bits latch until software clears them, and `intr_request = IE & |(IM &
+  IP)`. An ISR that turns IE back on (`mtc0 Status`; `eret` is a nop on the MIPS150) while the bit that caused the
+  interrupt is still set and still enabled is entered again two instructions later (the interrupted code crawls
+  forward two instructions per ISR run).
+- **vvizard:** at ISR entry it records the enabled pending bits; clearing them (Cause write, or a Compare write for
+  bit 15) removes them. If any are left, set and enabled when IE goes back to 1, or at an `eret` inside the ISR, the
+  return is reported (once per entry). The re-entry itself is emulated.
+- **Fix in the guest:** clear the handled bit with `mtc0 Cause` (write 0 to it; IP bits can only be cleared), write
+  Compare for the timer, or mask it in Status.IM before returning.
+
+### undef-reg
+- **Hardware** (`innerds/RegFile.v:38-41`): distributed RAM with no reset port. After FPGA configuration the
+  registers are 0; after a reset they keep whatever the last program left. GIOS's `_start_bios` sets `$sp` and zeroes
+  most registers itself; code that relies on a register it never wrote works only by luck.
+- **vvizard:** registers start at 0 (and `$sp` is no longer preset to 0x50004000; `--sp ADDR` presets it). The first
+  read of each GPR not written since reset is reported (each register once). `xor/subu/sub rd, rs, rs` (zeroing
+  idioms) don't count as reads, and a store's data register counts only when stored. The value read is 0.
+
+## gp-status RTL bug
+`hardware/src/gpu/GPU.v:96-99` (cs150 ISE branch fcdda7f; the same on `lcd-text` 4e7252c):
+
+    assign gp_status = {
+        gp_fault, 1'b0, gp_rframe[5:0],
+        4'b000, rect_ready, elip_ready, line_ready, fill_ready, gp_ready
+    };
+
+`4'b000` is a 4-bit literal (three digits written, but sized 4), so the concatenation is 1+1+6+4+5 = **17 bits**
+driving the 16-bit `gp_status` output. Verilog drops the top bit: `gp_fault` is lost and every field above the
+engines moves up by one, so the frame lands in bits 14:9 and bit 8 is always 0. Software reads the intended layout:
+`software/common/graphics.h` `gstate_s` (`gp_fault` 15, 0, `gp_procframe` 13:8, three zero bits, rect 4, elip 3,
+line 2, fill 1, ready 0), gios.c `BC_GSTAT`, and `testbench/GPUTestbench.v:24-27` (`gp_status[15]`,
+`gp_status[13:8]`). Checked with iverilog: for fault=1, frame 5 the current expression gives 0x0A15 (no fault,
+`[13:8]` = 10), the fixed one 0x8515.
+
+The fix (not applied; cs150 is read-only from vvizard):
+
+```diff
+--- a/hardware/src/gpu/GPU.v
++++ b/hardware/src/gpu/GPU.v
+@@ -93,9 +93,11 @@
+         end
+     end
+ 
++    // 16 bits, as software reads it (graphics.h gstate_s, gios.c BC_GSTAT, GPUTestbench.v):
++    // {fault[15], 0[14], frame[13:8], 0[7:5], rect[4], elip[3], line[2], fill[1], ready[0]}
+     assign gp_status = {
+         gp_fault, 1'b0, gp_rframe[5:0],
+-        4'b000, rect_ready, elip_ready, line_ready, fill_ready, gp_ready
++        3'b000, rect_ready, elip_ready, line_ready, fill_ready, gp_ready
+     };
+     assign irq_gp_done = gp_done_1shot_1cycle_sync_posedge;
+ 
+```
+
+Only `GPU.v` changes (on both branches). Every consumer already treats `gp_status` as 16 bits in the intended
+layout: `cpu/MemMapIO.v:140` (`gpu_status_r <= {pf_status, gp_status}`), `cpu/MemBank.v`, `MIPS150.v`,
+`Memory150.v`, `ml505top.v`, `cpu/CPUDumpMemMap.v`, `cpu/CPUDumpMemUART.v` (pass-through), and the testbench stubs
+(16-bit constants). After the fix, software that reads the GP frame or fault from GP_STATE gets the right values.
+vvizard always models the fixed layout (`src/hw.c` `vv_gp_status_word`), so on today's bitstream the frame and fault
+bits read differently from vvizard until the fix is in.
+
 ## Differences that are not emulated
 These are found by RTL reading. vvizard keeps its standard or simplified behaviour.
 - **Stale load via 0x2** (`cpu/MemBank.v:130`): reported under `ddr2`, but not reproduced.
 - **Split write-through caches:** the I-cache doesn't see D-path writes, so self-modifying code or freshly copied
   code can run stale instructions on hardware. vvizard has one coherent memory.
 - **CNT_CYCLE** (`cpu/MemMapIO.v`) counts every clock, including stalls. vvizard returns the instruction count for
-  both CNT_CYCLE and CNT_INST, and COP0 Count also counts instructions.
-- **Timer and RTC interrupts** (`cpu/COP0150.v:35`: Count == Compare; and Count == 0xFFFFFFFF) are never raised.
-  `--irq` injects only UART RX. The GPU-done interrupt (IB_GPU=12) is not raised either.
-- **Interrupt deferral:** `cpu/CPUMIPS.v:114` defers an interrupt on couldBranch, mtc0, WAS_Branch and WAS_ISR.
-  vvizard defers only in branch delay slots.
+  both CNT_CYCLE and CNT_INST, and COP0 Count also counts instructions. All device timing (UART, PixelFeeder,
+  timer) uses this one-cycle-per-instruction clock, so it runs early wherever the hardware stalls.
+- **GPU busy time:** a launch completes at once (all engines ready, Cause bit 12 at the launch).
+- **PixelFeeder frame phase:** frame ends are at multiples of 865800 cycles from reset; the real phase depends on
+  the DVI timing and DDR arbitration.
+- **Interrupt deferral:** `cpu/CPUMIPS.v:114` (DO_ISR) replaces the fetch after the instruction in F, unless that
+  instruction could branch or is an `mtc0`, or the previous cycle took a branch (WAS_Branch: the instruction is the
+  target), or an entry just happened (WAS_ISR), or the pipeline stalls. vvizard applies the same rules to the last
+  instructions it ran (test_hw `irq_defer`); only stalls don't exist. Results: after `jr $k0; mtc0 Status` the
+  target and the instruction after it run before the next entry, and `1: b 1b; nop` can never be interrupted.
 - **Mask-0 MMIO store** (`cpu/MemMapIO.v:65-66`): `isRead = ena && ~|wea`, so any MMIO access with an empty byte
   mask is a read and pops RX_DATA. vvizard does this only for the redirected `unaligned`/`lwlr` cases.
-- **RX_DATA read when not valid** returns junk (`cpu/MemMapIO.v:101`), and undefined MMIO offsets read `32'dx`
+- **RX_DATA read when not valid** returns the last byte, or the partly shifted register during a reception (both
+  modelled; `cpu/MemMapIO.v:101`), and undefined MMIO offsets read `32'dx`
   (`cpu/MemMapIO.v`, `MUX_DOUTA` default; also every offset outside 0x000-0x0FC and the LCD window 0x100-0x17C of
   the 16 KiB map). vvizard returns 0 and logs a MISS-READ. This is MMIO decode, not the `unmapped` quirk (which is
   for undecoded nibbles): stores there are dropped and reads give 0 whatever the quirk set.

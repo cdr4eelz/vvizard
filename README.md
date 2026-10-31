@@ -48,7 +48,7 @@ All images are loaded as raw bytes (`--load FILE@ADDR`), not by ELF sections:
 | `ISR_BIN` | `software/proj_app7/isr7.bin` | 0xC0000000 (ISR BRAM) |
 | `AUTORUN` | `jal 60000000\r` | typed at the GIOS prompt via `--uart-in` |
 
-`ARGS` defaults to `--random-ddr --irq --max-insns 0` (no instruction limit, window on, UART-RX interrupts on so proj7 sees keys). Override any of these on the
+`ARGS` defaults to `--random-ddr --irq --max-insns 0` (no instruction limit, window on; interrupts are on by default now, `--irq` is kept for old command lines). Override any of these on the
 command line, e.g. `make run ARGS="--no-window --max-insns 200000"`, `make run AUTORUN=` (stay at the GIOS prompt),
 or `make run IMEM_APP=../../software/bench/bench.inst.bin`. `BIN=` replaces all the `--load`/`--entry` arguments.
 `QUIRKS` defaults to `--halt-on-quirk` (see [Hardware quirks](#hardware-quirks---halt-on-quirk)); `make run QUIRKS=` turns it off,
@@ -65,12 +65,13 @@ uses as its shared memory (the stack is at the top of D-scratch).
 
 ## Usage
     ./vvizard [opts] [isr.elf ...] [prog.elf]      # entry = last ELF's e_entry
-      --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (0x50004000)
+      --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (default: not preset)
       --max-insns N (1e6, 0=unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio
       --little | --big   --bios FILE   --no-bios   --no-window   --no-window-keys   --dump-frame F.ppm   --hold
       --dump-lcd   --screenshot F.png
       --random-ddr[=SEED]   --no-random-ddr   --uart-in STR   --expect REG=VAL
       --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]
+      --quiet-quirk=LIST   --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
 
@@ -81,7 +82,10 @@ Repeat a run with `--random-ddr=SEED`, or start with zeroed DDR using `--no-rand
 random data where they land, and frame buffers start out as noise until something draws into them.
 
 ### Typing into the UART: `--uart-in`
-`--uart-in STR` feeds STR to UART RX before anything from stdin (escapes `\r`, `\n`, `\t`, `\\`).
+`--uart-in STR` feeds STR to UART RX before anything from stdin (escapes `\r`, `\n`, `\t`, `\\`). Each byte takes
+the real 115200-baud frame time (4340 cycles), and the next `--uart-in` byte is only sent after the guest has read the
+previous one plus `--uart-rx-gap` idle cycles, like someone typing at the prompt, so auto-typing never overruns RX.
+Script keys, window keys and stdin are not held back (see [Hardware timing](#hardware-timing-and-interrupts)).
 **Gotcha:** GIOS ends a token only on a space or a carriage return, never a line feed, so commands need `\r`
 (e.g. `--uart-in 'jal 60000000\r'`). Piping `echo jal 60000000` into stdin will hang at the prompt for the same reason.
 
@@ -114,7 +118,8 @@ its disassembly, the quirk name, the hardware behaviour and a register dump, the
 stops *before* the instruction runs. With no LIST, it covers the quirks being emulated. A LIST starting with
 `-NAME` removes from that set, and `all` also reports quirks that aren't emulated (for example, `jalr` with rd
 != `$31`). `--warn-on-quirk[=LIST]` logs each (quirk, PC) once, tagged `[emulated]` or `[not emulated: standard
-MIPS]`, and keeps running. Both print a `[quirk] summary` of hit counts at exit. `make run` passes
+MIPS]`, and keeps running. Both print a `[quirk] summary` of hit counts at exit. The guest-bug detectors (below) always warn unless
+`--quiet-quirk` silences them, and `--halt-on-quirk` also stops on them. `make run` passes
 `QUIRKS=--halt-on-quirk` by default.
 
 **Cost.** With all quirks off and no detection, the extra cost is one branch per instruction. Otherwise each
@@ -148,25 +153,75 @@ The registers no longer repeat every 0x100: 0x80000108 is LCD char 2, not UART T
 are not the PRNG. `ADDR[27:14]` is still not decoded, so the whole 16 KiB map repeats (0x80004008 is UART TX data).
 This is plain address decode, not a quirk: the `unmapped` quirk covers undecoded nibbles only, and MMIO misses read 0
 and drop stores in every quirk setting.
-- **UART:** TX_READY always reads 1. A write to TX_DATA (offset 0x08) sends byte [7:0] of the written word to stdout. With `mmio-lane` (the default), that's the lane-placed word, so only `sw` and `sb` at +0xB send the byte.
-- **UART RX:** RX_VALID and RX_DATA serve any `--uart-in` bytes first, then due `--input-script` bytes, then window keystrokes, then poll stdin without blocking.
+- **UART TX:** a write to TX_DATA (offset 0x08) sends byte [7:0] of the written word to stdout. With `mmio-lane` (the default), that's the lane-placed word, so only `sw` and `sb` at +0xB send the byte. TX_READY reads 0 for 4773 cycles after an accepted byte (start + 8 data + stop at 115200 baud, 50 MHz), and a TX_DATA write while it is 0 is **lost**, as in MemMapIO.v (the `tx-busy` guest bug). When it goes back to 1, Cause bit 11 latches.
+- **UART RX:** host bytes come from `--uart-in` first, then due `--input-script` bytes, then window keystrokes, then stdin (polled without blocking). Each byte lands 4340 cycles after its start bit, in a single holding register: RX_VALID is 1 while a byte is held (and 0 while the next one is being shifted in), an RX_DATA read returns it and clears RX_VALID, and a byte that lands before the last one was read overwrites it (the `rx-overrun` guest bug). Each landed byte latches Cause bit 10.
 - **LCD (0x80000100-0x8000017C, `src/lcd.c`):** LCDText2x16.v's 32-character buffer behind `LCDText2x16_MemPort`. Character i (0-15 line 1, 16-31 line 2, left to right) is at `0x80000100 + 4*i` and takes `dina[7:0]` of any store (any byte mask). With `mmio-lane` (the default), that's the lane-placed word, so `sw` and `sb` at +3 (`sh` at +2) write the byte, and `sb` at +0..+2 (`sh` at +0) writes 0x00, as in hardware. Without the quirk the char is the stored value's low byte. Reads return 0 and have no side effects. Reset contents are LCDText2x16's `INIT_TEXT` default, 32 spaces. `--dump-lcd` prints the buffer (text and hex) at exit, and the window shows it in the status strip.
-- **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. There is no cycle model.
+- **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. Time in vvizard is one cycle per instruction (no stall or cache timing).
 - **PRNG (0x80000080, `src/prng.c`):** PRNG32LFSR.v, a 32-bit Galois LFSR (mask 0x80200003, reset value 0xACE12468) that steps every clock, not per read. A read in cycle c returns state(c-1) (MemMapIO registers `prng_out` once more before `douta`). Any store (any byte lane, also via the 16 KiB alias 0x80004080; 0x80000180 is no longer an alias) reseeds with the full lane-placed store data, and a seed of 0 becomes 1. The first read in the cycle right after a store returns the old value; from the next cycle on reads return the seed, then the seed advanced one step per cycle. Back-to-back reads return consecutive LFSR states. Cycles are counted as instructions (no stall or cache model), so seeded sequences match hardware only while the CPU does not stall, and the unseeded sequence after reset is not aligned with hardware. CNT_RESET does not reset the PRNG.
-- **GPU (stub):** PF_FRAME, GP_FRAME and GP_CODE writes are recorded, and a GP_CODE write logs a GPU "launch". PF_FRAME reads return `{4'h1, frame#, 22'b0}`. GP_STATE reads return 0, meaning idle.
+- **PixelFeeder:** a PF_FRAME write only queues the frame. It is displayed from the end of the current scan frame (every 865800 cycles: 1040x666 pixels at 40 MHz), when Cause bit 13 latches. PF_FRAME reads return `{4'h1, frame#, 22'b0}` of the frame being displayed, not the last one written, so software that waits for its frame (proj7 `pf_wait`) now really waits.
+- **GPU:** a GP_CODE write runs the command list at once (`src/gpu.c`; no GPU busy time) and latches Cause bit 12. GP_STATE reads return `{pf_status, gp_status}` in the `graphics.h` `gstate_s` layout: displayed frame in bits 29:24, `gp_fault` in bit 15 (set by a bad opcode, cleared by the next launch), the launched frame in bits 13:8, and all five engines ready (bits 4:0). That is the intended layout; GPU.v as written drops the fault bit and puts the frame in bits 14:9, an RTL bug (see QUIRKS.md "gp-status RTL bug").
 - **Other offsets:** logged as MISS-READ or MISS-WRITE (reads 0, stores dropped).
-- **Interrupts:** `--irq` injects only UART-RX interrupts. The COP0 timer (Count == Compare) and RTC interrupts are not raised, although `mfc0 Count` counts instructions with the `cop0` quirk (details in NOTES.md).
+- **Interrupts:** see the next section.
+
+## Hardware timing and interrupts
+`src/hw.c` models the I/O devices against time (one cycle per instruction) from the RTL on the cs150 ISE branch:
+| source | Cause bit | when |
+|---|---|---|
+| UART RX | 10 | a received byte lands (rising edge of RX valid) |
+| UART TX | 11 | TX_READY goes back to 1 after a byte |
+| GPU | 12 | a GP_CODE launch completes (at once in vvizard) |
+| PixelFeeder | 13 | end of each scan frame (865800 cycles) |
+| RTC | 14 | Count == 0xFFFFFFFF |
+| timer | 15 | Count == Compare (Compare is 0xFFFF at reset, so this fires once ~65536 cycles in) |
+
+As in COP0150.v, a Cause bit stays set until software clears it with `mtc0 Cause` (`mtc0` can only clear these bits),
+writing Compare clears bit 15, and the bits latch whatever Status.IM says. Interrupts are taken by default (`--no-irq`
+turns that off): when Status.IE is set and `Status.IM & Cause.IP` is non-zero, vvizard sets EPC to the next PC, clears
+IE and jumps to the ISR at 0xC0000180. As in CPUMIPS.v, it waits while the instruction just run was an `mtc0` or a
+branch, or was a taken branch's target, so after the cs150 ISR return (`jr $k0; mtc0 Status`) two instructions of the
+interrupted code always run before the next entry, and a loop like `1: b 1b; nop` is never interrupted. The ISR returns the cs150
+way (`jr $k0` with `mtc0 Status` in the delay slot; `eret` is a no-op on the MIPS150).
+
+Registers start at 0 and are not preset (RegFile.v has no reset): GIOS sets `$sp` itself. `--sp ADDR` presets `$sp` for
+programs run without GIOS.
+
+    --legacy-io        the old untimed model: TX always ready, RX bytes on demand with a level-style UARX interrupt,
+                       PF_FRAME switches at once, no TX/GPU/PF/timer/RTC interrupts
+    --uart-rx-gap N    idle cycles the host leaves between RX bytes (default 4340, one byte time; 0 = back to back)
+    --pf-period N      cycles per scan frame (default 865800; 0 = PF_FRAME writes take effect at once, no bit 13)
+    --no-irq           don't take interrupts (the Cause bits still latch)
+
+The `[hw]` line at exit counts UART bytes sent, lost, received and overrun, frames scanned, the Cause bits latched per
+source, and interrupt storms. Not modelled: GPU busy time, cache and stall timing (so the PixelFeeder frame phase and
+any cycle counts are approximate), I-cache staleness.
+
+## Guest-bug detectors
+Beyond the CPU quirks, vvizard flags five guest software bugs. They **warn by default** (one line per site, tagged
+`[guest bug]`), stop with `--halt-on-quirk`, and are silenced with `--quiet-quirk=NAME,...`:
+| name | the guest... | on hardware |
+|---|---|---|
+| `tx-busy` | writes UART TX_DATA while TX_READY is 0 | the byte is lost |
+| `rx-overrun` | leaves an RX byte unread until the next one lands | the old byte is overwritten |
+| `irq-storm` | returns from the ISR (IE back on, or `eret`) with the Cause bit that caused the interrupt still set and enabled | the ISR is entered again two instructions later, over and over |
+| `undef-reg` | reads a GPR never written since reset (including `$sp` without `--sp`) | 0 after configuration, leftovers after a reset |
+| `dcache-stale` | loads through the D-cache from a line the GPU has since written in DDR | the load returns the old cached data |
+
+`dcache-stale` follows Cache.v: direct-mapped, 256 lines of 32 bytes, write-through without write-allocate, filled on
+a read miss, never flushed or snooped. By default vvizard also returns the stale data, as the hardware does
+(`--quirks=-dcache-stale` returns DDR). Details per detector are in [QUIRKS.md](QUIRKS.md#guest-bug-detectors).
 
 ## Tests
-`make test` runs `check-hex`, `test-hex`, `test-quirks` and `test-player`. `make test-hex` runs `tests/test_hex.py`
-(loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe and the hardware-timing / bug-detector
-programs). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
+`make test` runs `check-hex`, `test-hex`, `test-hw`, `test-quirks` and `test-player`. `make test-hex` runs `tests/test_hex.py`
+(loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-hw` runs `tests/test_hw.py`:
+`tests/hw/*.s` checks UART TX timing, the RX edge and holding register, the PixelFeeder frame latch, the timer and
+interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, and makes every guest-bug detector warn,
+halt (exit 4) and go quiet. `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
 `--input-script` UART keys and UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`: one tiny program per
 quirk for detection, with clean counterparts, each quirk on and off against the standard MIPS result, and the CLI and
 environment interface. How to run them and their pass conditions are in NOTES.md.
 
-**Test programs are built from assembly.** Every test's machine code is a `.s` file: `tests/*.s` (the programs above)
-and `tests/quirk/det_*.s` / `emu_*.s` (the quirk snippets). `make tests` (a dependency of the test targets) assembles
+**Test programs are built from assembly.** Every test's machine code is a `.s` file: `tests/*.s` (the programs above),
+`tests/hw/*.s` (the hardware tests, macros in `tests/hw/hw.inc`) and `tests/quirk/det_*.s` / `emu_*.s` (the quirk snippets). `make tests` (a dependency of the test targets) assembles
 them with the MIPS GNU toolchain found on the PATH (`mips-linux-gnu-*`, else `mips64-linux-gnu-*`, or `make M_PRE=...`)
 into `build/tests/NAME.bin` (raw big-endian `.text`) and `NAME.hex` (one word per line). The settings follow cs150
 `software/makefile.in` (`ASOPTS`) and `makefile.isr`: `-EB -mabi=32 -non_shared -mno-shared -G0 -mno-pdr --no-break
