@@ -1,5 +1,7 @@
 # lcd.s - 2x16 LCD MMIO (0x80000100 + 4*i) and the narrowed MMIO decode (make test-hex "lcd").
-# Assemble: see NOTES.md (lcd.hex is the big-endian .text of this file).
+# Built by the vvizard Makefile (make tests) into build/tests/lcd.bin; tests/lcd.hex is the fallback copy.
+# vv-load: 0x40000000
+# vv-isa: -mips1
         .set noreorder
         .set noat
         .text

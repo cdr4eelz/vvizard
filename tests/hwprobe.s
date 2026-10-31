@@ -1,11 +1,12 @@
 # hwprobe.s - MIPS150-vs-MIPS32 probe, the evidence behind vvizard's default quirk set.
+# vv-load: 0x60000000
+# vv-isa: -mips32r2
 # Every HCHECK expects the value the RTL produces (run on the sim-icarus rig: CPU_prog_tb +
 # CoreHarness, 45 checks, all match except #39 where CoreHarness returns 0xDEADBEEF for an
 # unmapped load while MemBank returns 0).  In vvizard (tests/test_hex.py):
 #   vvizard --no-bios --no-random-ddr --load hwprobe.bin@0x60000000 --entry 0x60000000 \
 #           --expect s5=0 --expect s3=45          # default quirks = current hardware
-# Build: mips-linux-gnu-as -EB -mips32r2 -I../../../hardware/sim-icarus/tb/data hwprobe.s -o p.o
-#        mips-linux-gnu-objcopy -O binary -j .text p.o p.bin; xxd -p -c4 p.bin > hwprobe.hex
+# Build: make tests (vvizard Makefile: build/tests/hwprobe.bin / .hex; see README "Tests").
 # HW-vs-MIPS probe. Each CHECK expects the MIPS150 (RTL) value. $s5 counts mismatches
 # (for vvizard: --expect s5=0), $s4 = index of first mismatch + 1.
 .set noreorder

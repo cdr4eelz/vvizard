@@ -51,7 +51,13 @@ These Unicorn 2.1.1 behaviors were confirmed with a probe program:
 - The XVAR/YVAR fields of point words are ignored.
 
 ## Test pass conditions
-Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",split))'`.
+Programs are built from `tests/*.s` into `build/tests/*.bin` (`make tests`; README "Tests"); the committed
+`tests/*.hex` are the no-toolchain fallback (convert by hand with `perl -ne 'print pack("H*",join("",split))'`).
+When the build moved into the Makefile (commit "Build test programs from assembly"), loop, uart, alias, frame,
+gplaunch and the 41 quirk snippets (previously hex only) were disassembled into `.s` and re-assembled byte-identical;
+gpcmds became `.word` data; hwprobe, lcd and prng re-assembled identical except that the old hand-made hex carried
+the assembler's 16-byte section padding at the end (2, 1 and 1 zero words after the last instruction), which the
+Makefile build leaves out (`--no-pad-sections`).
 - `loop` (at 0x40000000): passes if t0=30 and t2=0x11e.
 - `uart`: writes "H" to 0x80000008, "i" to 0x80000108 and "\n" as a byte store to 0x8000000B. 0x80000108 used to be a UART alias; now it is LCD char 2. Passes if stdout is exactly `H\n`, LCD char 2 is `i` (`--dump-lcd`) and t2 (the TX_READY read) is 1.
 - `lcd` (source `tests/lcd.s`, at 0x40000000, run with the default quirks and with `--quirks=-mmio-lane`): `sw` to chars 0, 1, 15, 16 and 31 (one with junk in bits 31:8), `sb` at +3 and +0, `sh` at +2 and +0, a store through the 16 KiB alias 0x80004100, a store to 0x80000108 (old UART alias), stores to 0x80000180 and 0x80000208 (dropped), and `\n` to 0x80004008 (16 KiB UART alias). Reads 0x80000100/104 (0), TX_READY at 0x80000000 and 0x80004000 (1), 0x80000100 (0, not TX_READY) and 0x80000184 (0). Passes if stdout is exactly `\n`, the registers match, and `--dump-lcd` shows line 1 `QiU`, 0x00, `X`, 0x00, 9 spaces, `L` (with `mmio-lane`; `QiUXXX` without) and line 2 `a`, 14 spaces, `z`.

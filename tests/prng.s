@@ -1,3 +1,6 @@
+# prng.s - PRNG32LFSR MMIO probe (make test-hex "prng"); built by the vvizard Makefile.
+# vv-load: 0x40000000
+# vv-isa: -mips1
         .set noreorder
         .set noat
         .text

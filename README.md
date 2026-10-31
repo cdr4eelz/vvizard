@@ -158,7 +158,28 @@ and drop stores in every quirk setting.
 - **Interrupts:** `--irq` injects only UART-RX interrupts. The COP0 timer (Count == Compare) and RTC interrupts are not raised, although `mfc0 Count` counts instructions with the `cop0` quirk (details in NOTES.md).
 
 ## Tests
-`make test` runs all three suites. `make test-hex` runs `tests/test_hex.py`, which checks the hex programs in `tests/*.hex` (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`. It runs one tiny program per quirk for detection, with clean counterparts. It runs each quirk on and off and checks the hardware result against the standard MIPS result. It also checks the CLI and environment interface. How to run them and their pass conditions are in NOTES.md.
+`make test` runs `check-hex`, `test-hex`, `test-quirks` and `test-player`. `make test-hex` runs `tests/test_hex.py`
+(loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe and the hardware-timing / bug-detector
+programs). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
+`--input-script` UART keys and UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`: one tiny program per
+quirk for detection, with clean counterparts, each quirk on and off against the standard MIPS result, and the CLI and
+environment interface. How to run them and their pass conditions are in NOTES.md.
+
+**Test programs are built from assembly.** Every test's machine code is a `.s` file: `tests/*.s` (the programs above)
+and `tests/quirk/det_*.s` / `emu_*.s` (the quirk snippets). `make tests` (a dependency of the test targets) assembles
+them with the MIPS GNU toolchain found on the PATH (`mips-linux-gnu-*`, else `mips64-linux-gnu-*`, or `make M_PRE=...`)
+into `build/tests/NAME.bin` (raw big-endian `.text`) and `NAME.hex` (one word per line). The settings follow cs150
+`software/makefile.in` (`ASOPTS`) and `makefile.isr`: `-EB -mabi=32 -non_shared -mno-shared -G0 -mno-pdr --no-break
+--no-trap`, static link with `-T tests/test.ld` (`.text` only, no build-id), `objcopy -O binary -j .text`. Each `.s`
+names its link/load address and ISA in its header (`# vv-load: 0x60000000`, `# vv-isa: -mips32r2`; the programs use
+`-mips1` like cs150 except hwprobe and the quirk snippets, which need MIPS32r2 encodings). `tests/check.inc` holds the
+CHECK/BEGIN_CHECKS/END_CHECKS/LA_CODE macros used by hwprobe (the same instruction sequences as the cs150 Icarus
+`check.inc`, so vvizard no longer needs the cs150 tree to build them).
+
+The committed `tests/**/NAME.hex` files are a fallback for machines without the toolchain: `tests/vvprog.py` uses
+`build/tests/NAME.bin` when it exists and is newer than the `.s`, else converts the `.hex`. `make check-hex` verifies
+the built programs are byte-identical to the committed hex (part of `make test`; skipped without a toolchain) and
+`make refresh-hex` copies the built hex over the fallbacks after an intentional change.
 
 ## PixelFeeder display (raylib, `src/display.c`)
 The window is titled `vvizard`. It shows the selected frame unscaled at the top (800×600) and a 76-pixel status strip

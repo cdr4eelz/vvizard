@@ -3,6 +3,7 @@
 conditions", plus tests/hwprobe (MIPS150 behaviour probe, must pass with the default quirks).
 Each test runs with the default quirk set (= current hardware) and --halt-on-quirk off."""
 import os, subprocess, sys, tempfile
+from vvprog import prog
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VV = os.path.join(os.path.dirname(HERE), "vvizard")
@@ -13,8 +14,7 @@ BASE = ["--no-window", "--quiet-mmio", "--no-random-ddr", "--no-bios"]
 
 
 def binfile(name):
-    words = "".join(open(os.path.join(HERE, name + ".hex")).read().split())
-    p = os.path.join(TMP, name + ".bin"); open(p, "wb").write(bytes.fromhex(words)); return p
+    return prog(name)[0]
 
 
 def vv(*args):

@@ -1,0 +1,13 @@
+# quirk detection: uart_ok (clean: must not trip any quirk)
+# vv-load: 0x40000000
+# vv-isa: -mips32r2
+.set noreorder
+.set noat
+.text
+.global _start
+_start:
+    lui $t0,0x8000                           # 40000000: 3c088000
+    addiu $t1,$zero,65                       # 40000004: 24090041
+    sb $t1,11($t0)                           # 40000008: a109000b
+    sw $t1,8($t0)                            # 4000000c: ad090008
+    break                                    # 40000010: 0000000d

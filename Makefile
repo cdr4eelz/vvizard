@@ -47,9 +47,66 @@ HW_QUIRKS ?= default
 # (also non-emulated ones) or QUIRKS=--warn-on-quirk.
 QUIRKS ?= --halt-on-quirk
 
-.PHONY: all clean fresh run test test-hex test-player test-quirks
+.PHONY: all clean fresh run test test-hex test-player test-quirks tests check-hex refresh-hex
 
 all: $(TARGET)
+
+# ---- Test programs: built from assembly (tests/*.s, tests/quirk/*.s) with the MIPS GNU toolchain ----
+# Settings follow cs150 software/makefile.in ASOPTS (+ the -G0 static link of makefile.isr): big-endian
+# o32, -non_shared (no abicalls/PIC), no .pdr, --no-break/--no-trap.  Each .s names its load (= link) address and ISA:
+#   # vv-load: 0x40000000      # vv-isa: -mips1   (hwprobe and the quirk snippets use -mips32r2)
+# Output: build/tests/NAME.bin (raw big-endian .text) and NAME.hex (one word per line).  The tests use
+# the built .bin; without a toolchain they fall back to the committed tests/NAME.hex copies
+# (make refresh-hex updates those; make check-hex shows any difference).
+M_PRE   ?= $(shell command -v mips-linux-gnu-as >/dev/null 2>&1 && echo mips-linux-gnu || \
+                   (command -v mips64-linux-gnu-as >/dev/null 2>&1 && echo mips64-linux-gnu))
+T_AS    := $(M_PRE)-as
+T_LD    := $(M_PRE)-ld
+T_COPY  := $(M_PRE)-objcopy
+T_ASOPTS := -EB -mabi=32 -non_shared -mno-shared -G0 -mno-pdr --no-break --no-trap --no-pad-sections -Itests
+T_SRCS  := $(filter-out tests/check.inc,$(wildcard tests/*.s tests/quirk/*.s))
+T_BINS  := $(patsubst tests/%.s,$(BUILD_DIR)/tests/%.bin,$(T_SRCS))
+T_HEXS  := $(T_BINS:.bin=.hex)
+vv_field = $(shell sed -n 's/^\# vv-$(1): *//p' $(2) | head -1)
+
+ifneq ($(M_PRE),)
+tests: $(T_BINS) $(T_HEXS)
+else
+tests:
+	@echo "tests: no mips-linux-gnu toolchain; the tests use the committed tests/*.hex fallbacks"
+endif
+
+$(BUILD_DIR)/tests/%.o: tests/%.s tests/check.inc
+	@mkdir -p $(dir $@)
+	@echo "  AS    $<"
+	@$(T_AS) $(T_ASOPTS) $(call vv_field,isa,$<) $< -o $@
+
+$(BUILD_DIR)/tests/%.elf: $(BUILD_DIR)/tests/%.o tests/test.ld
+	@$(T_LD) -EB -static -nostdlib --build-id=none --no-warn-rwx-segments \
+	    --defsym=VV_LOAD=$(call vv_field,load,tests/$*.s) -T tests/test.ld $< -o $@
+
+$(BUILD_DIR)/tests/%.bin: $(BUILD_DIR)/tests/%.elf
+	@$(T_COPY) -O binary -j .text $< $@
+
+$(BUILD_DIR)/tests/%.hex: $(BUILD_DIR)/tests/%.bin
+	@od -An -v -tx1 $< | tr -d ' \n' | fold -w8 > $@; echo >> $@
+
+# Compare the built programs with the committed fallback hex (byte for byte).
+.SECONDARY:
+
+ifneq ($(M_PRE),)
+check-hex: tests
+	@bad=0; for h in $(T_HEXS); do c=tests/$${h#$(BUILD_DIR)/tests/}; \
+	  if [ ! -f $$c ]; then echo "check-hex: $$c missing (make refresh-hex)"; bad=1; \
+	  elif [ "$$(tr -d ' \n' < $$c)" != "$$(tr -d ' \n' < $$h)" ]; then echo "check-hex: $$c differs from $$h"; bad=1; fi; done; \
+	[ $$bad = 0 ] && echo "check-hex: all $(words $(T_HEXS)) programs match their committed hex"
+else
+check-hex:
+	@echo "check-hex: skipped (no MIPS toolchain)"
+endif
+
+refresh-hex: tests
+	@for h in $(T_HEXS); do cp $$h tests/$${h#$(BUILD_DIR)/tests/}; done; echo "refresh-hex: $(words $(T_HEXS)) files"
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $^ -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
@@ -69,14 +126,14 @@ run: $(TARGET)
 test-player: $(TARGET)
 	python3 tests/test_player.py
 
-test-quirks: $(TARGET)
+test-quirks: $(TARGET) tests
 	python3 tests/test_quirks.py
 
-test-hex: $(TARGET)
+test-hex: $(TARGET) tests
 	python3 tests/test_hex.py
 
 # All tests (hex programs + hwprobe, quirk detection/emulation, proj7 player via GIOS)
-test: test-hex test-quirks test-player
+test: check-hex test-hex test-quirks test-player
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

@@ -10,75 +10,62 @@
 2. Emulation: each quirk ON (--quirks=+NAME) must give the MIPS150 result and OFF
    (--quirks=-NAME) the standard MIPS32 / Unicorn result (register values via --expect, stdout,
    or exit code), plus the CLI/env interface (VVIZARD_QUIRKS, --no-quirks, --list-quirks).
-Hex: mips-linux-gnu-as -EB (-mips1 for the detection set, -mips32r2 for the emulation set)."""
+Programs: tests/quirk/det_*.s and emu_*.s, built by the Makefile (make tests; tests/vvprog.py)."""
 import os, re, subprocess, sys, tempfile
+from vvprog import prog
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VV = os.path.join(os.path.dirname(HERE), "vvizard")
 ENV = dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib"))
 ENV.pop("VVIZARD_QUIRKS", None)
-# name, expected quirk (None = must not trip), big-endian words
+# name (tests/quirk/det_NAME.s), expected quirk (None = must not trip)
 PROGS = [
-    ("lb_neg", 'lb-sign', "3c085000 24090080 a1090000 00000000 810a0000 00000000 00000000 0000000d"),
-    ("lb_pos", None, "3c085000 2409007f a1090000 00000000 810a0000 00000000 24097fff a5090002 850b0002 00000000 910c0000 00000000 0000000d"),
-    ("lh_neg", 'lb-sign', "3c085000 34098001 a5090002 00000000 850b0002 00000000 0000000d"),
-    ("jalr_rd", 'jalr-rd', "3c084000 35080010 01004809 00000000 00000000 00000000 0000000d"),
-    ("jalr_ok", None, "3c084000 35080010 0100f809 00000000 00000000 00000000 0000000d"),
-    ("unm_load", 'unmapped', "3c087000 8d090000 00000000 0000000d"),
-    ("unm_store", 'unmapped', "ac090000 0000000d"),
-    ("unm_fetch", 'unmapped-fetch', "3c089000 01000008 00000000 0000000d"),
-    ("mmio_fetch", 'unmapped-fetch', "3c088000 01000008 00000000 0000000d"),
-    ("bios_store", 'bios-store', "3c084000 ad080100 0000000d"),
-    ("unaligned", 'unaligned', "3c085000 8d090002 00000000 0000000d"),
-    ("lwl", 'lwlr', "3c085000 89090001 00000000 0000000d"),
-    ("overflow", 'overflow', "3c087fff 3508ffff 21090001 0000000d"),
-    ("add_ok", None, "24080005 01084820 01084822 250afff7 0000000d"),
-    ("hilo", 'hilo', "24080003 01080018 00004812 0000000d"),
-    ("syscall", 'syscall', "0000000c 0000000d"),
-    ("mmio_lane", 'mmio-lane', "3c088000 24090041 a1090008 0000000d"),
-    ("uart_ok", None, "3c088000 24090041 a109000b ad090008 0000000d"),
-    ("load_use", 'load-use', "3c085000 8d090000 01295021 0000000d"),
-    ("load_use_ok", None, "3c085000 8d090000 00000000 01295021 0000000d"),
-    ("bal_untaken", 'bal-untaken', "24040001 04900001 00000000 0000000d"),
-    ("reserved", 'reserved', "0080500a 0000000d"),
-    ("cop0", 'cop0', "40087800 0000000d"),
-    ("ddr2", 'ddr2', "3c082000 ad090100 0000000d"),          # run from ISCR (not BIOS)
+    ("lb_neg", 'lb-sign'),
+    ("lb_pos", None),
+    ("lh_neg", 'lb-sign'),
+    ("jalr_rd", 'jalr-rd'),
+    ("jalr_ok", None),
+    ("unm_load", 'unmapped'),
+    ("unm_store", 'unmapped'),
+    ("unm_fetch", 'unmapped-fetch'),
+    ("mmio_fetch", 'unmapped-fetch'),
+    ("bios_store", 'bios-store'),
+    ("unaligned", 'unaligned'),
+    ("lwl", 'lwlr'),
+    ("overflow", 'overflow'),
+    ("add_ok", None),
+    ("hilo", 'hilo'),
+    ("syscall", 'syscall'),
+    ("mmio_lane", 'mmio-lane'),
+    ("uart_ok", None),
+    ("load_use", 'load-use'),
+    ("load_use_ok", None),
+    ("bal_untaken", 'bal-untaken'),
+    ("reserved", 'reserved'),
+    ("cop0", 'cop0'),
+    ("ddr2", 'ddr2'),          # run from ISCR (not BIOS)
 ]
-LOAD_AT = {"ddr2": 0x60000000}
 
-# name, quirk, load address, words, ON check, OFF check.  A check is a list of REG=VAL, or
+# name (tests/quirk/emu_NAME.s), quirk, ON check, OFF check.  A check is a list of REG=VAL, or
 # "exc" (standard MIPS CPU exception), "rc!=0" (fault), "rc=0", or b"stdout bytes".
 EMU = [
-    ("jalr_rd", "jalr-rd", 0x40000000, "3c084000 35080014 241f0000 01004809 00000000 0000000d",
-     ["ra=0x40000014", "t1=0"], ["t1=0x40000014", "ra=0"]),
-    ("lb_sign", "lb-sign", 0x40000000, "3c085000 24090080 a1090000 34098001 a5090002 810a0000 850b0002 00000000 0000000d",
-     ["t2=0x80", "t3=0x8001"], ["t2=0xffffff80", "t3=0xffff8001"]),
-    ("unm_load", "unmapped", 0x40000000, "3c087000 24090005 240a0006 ad0a0000 8d090000 00000000 0000000d",
-     ["t1=0", "t2=6"], "rc!=0"),
-    ("unm_fetch", "unmapped-fetch", 0x40000000, "3c089000 01000008 00000000 0000000d", "rc=0", "rc!=0"),
-    ("bios_store", "bios-store", 0x40000000, "3c084000 24091234 ad090100 8d0a0100 00000000 0000000d",
-     ["t2=0"], ["t2=0x1234"]),
-    ("ddr2", "ddr2", 0x60000000, "3c082000 24090055 ad090100 3c0b1000 8d6a0100 00000000 0000000d",
-     ["t2=0"], ["t2=0x55"]),
-    ("unaligned", "unaligned", 0x40000000,
-     "3c085000 3c091122 35293344 ad090000 240a0007 8d0a0001 240b0099 ad0b0002 8d0c0000 00000000 0000000d",
-     ["t2=0", "t4=0x11223344", "t0=0x50000000"], "exc"),
-    ("lwlr", "lwlr", 0x40000000, "3c085000 3c091122 35293344 ad090000 240a0077 890a0001 00000000 0000000d",
-     ["t2=0", "t0=0x50000000"], ["t2=0x22334477"]),
-    ("overflow", "overflow", 0x40000000, "3c047fff 3484ffff 24050001 00855020 0000000d",
-     ["t2=0x80000000", "a0=0x7fffffff", "a1=1"], "exc"),
-    ("hilo", "hilo", 0x40000000, "24040003 24050005 00850018 00005012 0000000d", ["t2=0"], ["t2=15"]),
-    ("syscall", "syscall", 0x40000000, "240a0001 0000000c 240a0002 0000000d", ["t2=2"], "exc"),
-    ("movz", "reserved", 0x40000000, "24040007 240a0005 0080500a 0000000d", ["t2=0"], ["t2=7"]),
-    ("tgei", "reserved", 0x40000000, "2404ffff 240a0000 04880002 254a0001 254a0002 254a0004 0000000d",
-     ["t2=5"], ["t2=7"]),
-    ("cop0", "cop0", 0x40000000, "24081234 40887000 400a7000 400b5800 0000000d",
-     ["t2=0", "t3=0xffff"], ["t2=0x1234"]),
-    ("mmio_lane", "mmio-lane", 0x40000000, "3c088000 24090041 a1090008 0000000d", b"\0", b"A"),
-    ("load_use", "load-use", 0x40000000, "3c085000 24090099 ad090000 240a0001 8d0a0000 01405821 0000000d",
-     ["t3=1", "t2=0x99"], ["t3=0x99", "t2=0x99"]),
-    ("bal_untaken", "bal-untaken", 0x40000000, "241f0000 24040001 04900001 00000000 0000000d",
-     ["ra=0"], ["ra=0x40000010"]),
+    ("jalr_rd", "jalr-rd", ["ra=0x40000014", "t1=0"], ["t1=0x40000014", "ra=0"]),
+    ("lb_sign", "lb-sign", ["t2=0x80", "t3=0x8001"], ["t2=0xffffff80", "t3=0xffff8001"]),
+    ("unm_load", "unmapped", ["t1=0", "t2=6"], "rc!=0"),
+    ("unm_fetch", "unmapped-fetch", "rc=0", "rc!=0"),
+    ("bios_store", "bios-store", ["t2=0"], ["t2=0x1234"]),
+    ("ddr2", "ddr2", ["t2=0"], ["t2=0x55"]),
+    ("unaligned", "unaligned", ["t2=0", "t4=0x11223344", "t0=0x50000000"], "exc"),
+    ("lwlr", "lwlr", ["t2=0", "t0=0x50000000"], ["t2=0x22334477"]),
+    ("overflow", "overflow", ["t2=0x80000000", "a0=0x7fffffff", "a1=1"], "exc"),
+    ("hilo", "hilo", ["t2=0"], ["t2=15"]),
+    ("syscall", "syscall", ["t2=2"], "exc"),
+    ("movz", "reserved", ["t2=0"], ["t2=7"]),
+    ("tgei", "reserved", ["t2=5"], ["t2=7"]),
+    ("cop0", "cop0", ["t2=0", "t3=0xffff"], ["t2=0x1234"]),
+    ("mmio_lane", "mmio-lane", b"\0", b"A"),
+    ("load_use", "load-use", ["t3=1", "t2=0x99"], ["t3=0x99", "t2=0x99"]),
+    ("bal_untaken", "bal-untaken", ["ra=0"], ["ra=0x40000010"]),
 ]
 
 
@@ -103,13 +90,10 @@ def check(path, at, opts, want):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="vv_quirk_")
     fails = total = 0
     print("detection:")
-    for name, want, words in PROGS:
-        at = LOAD_AT.get(name, 0x40000000)
-        path = os.path.join(tmp, name + ".bin")
-        open(path, "wb").write(bytes.fromhex(words.replace(" ", "")))
+    for name, want in PROGS:
+        path, at = prog("quirk/det_" + name)
         rc, hits, _, _ = run(path, "--halt-on-quirk=all", at=at)
         ok = (rc == 4 and hits == [want]) if want else (rc == 0 and not hits)
         rc_off, hits_off, _, _ = run(path, at=at)          # no detection flag: never a report line
@@ -122,15 +106,14 @@ def main():
         total += 1; fails += not ok
         print(f"  {name:12s} expect {want or '-':14s} got rc={rc} {hits}  off: rc={rc_off} {'PASS' if ok else 'FAIL'}")
     print("emulation (quirk on / off):")
-    for name, q, at, words, on, off in EMU:
-        path = os.path.join(tmp, "emu_" + name + ".bin")
-        open(path, "wb").write(bytes.fromhex(words.replace(" ", "")))
+    for name, q, on, off in EMU:
+        path, at = prog("quirk/emu_" + name)
         ok_on = check(path, at, [f"--quirks=+{q}"], on)
         ok_off = check(path, at, [f"--quirks=-{q}"], off)
         total += 1; fails += not (ok_on and ok_off)
         print(f"  {name:12s} {q:14s} on {'ok' if ok_on else 'BAD'}  off {'ok' if ok_off else 'BAD'}  {'PASS' if ok_on and ok_off else 'FAIL'}")
     print("interface:")
-    hilo = os.path.join(tmp, "emu_hilo.bin"); jalr = os.path.join(tmp, "emu_jalr_rd.bin")
+    hilo = prog("quirk/emu_hilo")[0]; jalr = prog("quirk/emu_jalr_rd")[0]
     cases = [
         ("default = hardware", lambda: check(hilo, 0x40000000, [], ["t2=0"]) and check(jalr, 0x40000000, [], ["t1=0x40000014"])),
         ("--no-quirks", lambda: check(hilo, 0x40000000, ["--no-quirks"], ["t2=15"])),
