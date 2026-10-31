@@ -79,7 +79,7 @@ static const struct { const char *tag, *sgr; } tag_colors[] = {
     { "trace",  "36"   }, { "hw",    "1;36" }, { "run",    "1;32" }, { "load",   "32"   },
     { "bios",   "32"   }, { "ddr",   "32"   }, { "fault",  "1;91" }, { "warn",   "1;93" },
     { "gpu",    "94"   }, { "disp",  "96"   }, { "lcd",    "95"   }, { "script", "92"   },
-    { "expect", "1;97" }, { "raylib","90"   },
+    { "expect", "1;97" }, { "raylib","90"   }, { "exit",   "1;31" },
 };
 static const char *tag_sgr(const char *t, size_t n) {
     for (unsigned i = 0; i < sizeof tag_colors / sizeof tag_colors[0]; i++)

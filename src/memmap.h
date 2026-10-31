@@ -60,6 +60,9 @@ typedef struct {
 #define VV_OW_GP_GCODE    0x0058u
 #define VV_OW_GP_STATE    0x005Cu
 #define VV_OW_RANDOM32    0x0080u   /* PRNG32LFSR: read value / write seed (src/prng.c) */
+/* 0x84-0xFC: extended area, inside io_base but decoded by no MemMapIO.v case (writes do nothing,
+ * reads 32'dx on the FPGA).  vvizard-only registers live here. */
+#define VV_OW_GUEST_EXIT  0x0084u   /* store: end the run with that exit code (main.c, --no-guest-exit) */
 #define VV_MMIO_DECODE    0x3FFCu   /* word offset within the map: addra[11:0] << 2 */
 #define VV_MMIO_REG_SPAN  0x0100u   /* registers: addra[11:6]==0 only (no 0x100 aliases) */
 #define VV_OW_LCD_BASE    0x0100u   /* LCD char i at 0x80000100 + 4*i, i = 0..31 (src/lcd.h) */

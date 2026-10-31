@@ -81,6 +81,10 @@ static uint64_t max_insns;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
 static int trace_left = -1;
+/* Guest exit register (VV_OW_GUEST_EXIT, 0x80000084): a store ends the run right after the store
+ * instruction; the process exits with code & 0xFF.  --no-guest-exit drops the store (FPGA behaviour). */
+static int opt_guest_exit = 1, guest_exited, stop_req;   /* stop_req: hook_code stops before the next insn */
+static uint32_t guest_code;
 
 /* ---- UART RX sources: --uart-in, then --input-script bytes that are due, then stdin ---- */
 static int stdin_peek = -1, stdin_eof;
@@ -292,6 +296,20 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;   /* (already placed when lane_hw) */
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
         vv_prng_write(insn_count, v); break;
+    case VV_OW_GUEST_EXIT:   /* sb/sh: the lane-placed dina word (as RANDOM32), e.g. sb at +3 = the byte */
+        if (size < 4 && !lane_hw) { unsigned lane = off & 3;
+            v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
+        if (!opt_guest_exit) {
+            static int noted;
+            if (!noted++) vv_eprintf("[exit] guest exit code %u (0x%08x) ignored (--no-guest-exit)\n", v, v);
+            break;
+        }
+        if (!guest_exited) {
+            guest_exited = 1; guest_code = v; stop_req = 1;
+            vv_eprintf("[exit] guest exit code %d (0x%08x) at pc=0x%08x -> exit status %u\n", (int32_t)v, v, vv_cur_pc, v & 0xFF);
+            /* hook_code stops before the next insn runs */
+        }
+        break;
     case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
         { int n = vv_gpu_run(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1);
           vv_gp_launched(gp_frame, n);                 /* GP status frame/fault + irq_gp_done (Cause bit 12) */
@@ -309,7 +327,7 @@ static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e,
     int fetch = t == UC_MEM_FETCH, hole = pa == 0xFFFFFFFFu;
     if (fetch && (hole || (pa >> 28) == 0x8)) {   /* HW fetches DEAD_IMEM = 0 (MemBank.v:132) */
         if ((vv_quirk_active() >> VV_Q_UNMAPPED_FETCH & 1) && stop_reason_intr < 0 && /* not Unicorn's own exception vector */
-            !(max_insns && insn_count >= max_insns))
+            !(max_insns && insn_count >= max_insns) && !stop_req)   /* nor its fetch on the way out of a stop */
             vv_quirk_fetch(uc, (uint32_t)va, hole ? "undecoded" : "MMIO");
         if (vv_quirk_on(VV_Q_UNMAPPED_FETCH)) {    /* execute nops from the VOID page */
             e->paddr = VV_VOID_PA;
@@ -339,6 +357,7 @@ static uint64_t hook_calls;
 static int stopped_max;
 static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     (void)size; (void)u;
+    if (stop_req) { uc_emu_stop(uc); return; }   /* guest exit: nothing after the store runs */
     if (max_insns && ++hook_calls > max_insns) { stopped_max = 1; uc_emu_stop(uc); return; }
     insn_count++;
     vv_cur_pc = (uint32_t)addr;
@@ -363,7 +382,8 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     }
     if ((insn_count & 0xFFF) == 0) {
         vv_term_tick();                      /* flush pending UART text (e.g. a prompt with no newline) */
-        if (vv_disp_tick(uc)) { vv_eprintf("[stop] window closed\n"); uc_emu_stop(uc); }
+        int why = vv_disp_tick(uc);
+        if (why) { vv_eprintf(why == VV_DISP_ESC ? "[stop] Esc pressed\n" : "[stop] window closed\n"); uc_emu_stop(uc); }
     }
     if (opt_trace && trace_left != 0) {
         uint32_t insn = read_insn(uc, (uint32_t)addr);
@@ -541,6 +561,14 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --hold             keep the window open after the run until it is closed\n"
 "  --input-script F   timed events (fN|iN key STR / dump F.ppm)\n"
 "  --expect REG=VAL   exit 0 iff GPR REG equals VAL at stop (repeatable)\n"
+"  --no-guest-exit    ignore stores to the guest exit register 0x%08x (FPGA behaviour: the\n"
+"                     guest goes on, e.g. into its interrupts-off spin loop)\n"
+"  Esc in the window ends the run like closing it (Esc is not sent to the UART)\n"
+"\n"
+"Exit status: 0 normal stop (break, --max-insns, --until, window closed, Esc), 1 setup or CPU\n"
+"  error, 2 usage, 3 an --expect failed, 4 --halt-on-quirk; a guest exit-register store: the\n"
+"  stored code & 0xFF (so guest codes 1-4 look like vvizard's own; the [exit] line tells them\n"
+"  apart), unless an --expect fails (3)\n"
 "\n"
 "Hardware model:\n"
 "  --legacy-io        old untimed I/O: TX always ready, RX served on demand with a level UARX interrupt,\n"
@@ -583,7 +611,7 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  -h, --help         this text\n", p, sw_default, VV_PC_BOOT,
     default_app[0].rel, default_app[0].addr, default_app[1].rel, default_app[1].addr,
     default_app[2].rel, default_app[2].addr, VV_PC_BOOT, VV_PC_BOOT, VV_PC_BOOT,
-    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, VV_UART_RX_FRAME, VV_PF_PERIOD, vv_quirk_names());
+    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, VV_MMIO_BASE + VV_OW_GUEST_EXIT, VV_UART_RX_FRAME, VV_PF_PERIOD, vv_quirk_names());
 }
 
 /* getopt_long's optional arguments only bind with '=' (--color=never).  To accept the
@@ -602,7 +630,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR };
+       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -628,6 +656,7 @@ int main(int argc, char **argv) {
         {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"screenshot",1,0,O_SCREENSHOT},
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
+        {"guest-exit",0,0,O_GUEST_EXIT},{"no-guest-exit",0,0,O_NO_GUEST_EXIT},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
@@ -680,6 +709,8 @@ int main(int argc, char **argv) {
                 vv_eprintf("--color: expected always, never or auto, not '%s'\n", v); return 2; } break;
         case O_BARE: bare = 1; break;
         case O_SW_DIR: sw_dir = optarg; break;
+        case O_GUEST_EXIT: opt_guest_exit = 1; break;
+        case O_NO_GUEST_EXIT: opt_guest_exit = 0; break;
         case 'h': usage(stdout, argv[0]); return 0;
         default: usage(stderr, argv[0]); return 2;
     } }
@@ -806,13 +837,15 @@ int main(int argc, char **argv) {
     if (!vv_quirk_halted) dump_regs(uc);
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
     if (dump_lcd) vv_lcd_dump();
-    run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : stop_reason_intr == 18 ? "STOPPED (break)" :
+    static char exit_state[48];
+    if (guest_exited) snprintf(exit_state, sizeof exit_state, "EXITED (guest code %d)", (int32_t)guest_code);
+    run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : guest_exited ? exit_state : stop_reason_intr == 18 ? "STOPPED (break)" :
                 at_max ? "STOPPED (max-insns)" : "STOPPED";
     vv_disp_status_dirty();
     if (shot_path) vv_disp_screenshot(uc, shot_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);
     vv_disp_close();
-    int rc = err ? 1 : vv_quirk_halted ? 4 : 0;
+    int rc = err ? 1 : vv_quirk_halted ? 4 : guest_exited ? (int)(guest_code & 0xFF) : 0;
     for (int i = 0; i < nexp; i++) {
         char *s = strdup(expects[i]), *eq = strchr(s, '=');
         int r = eq ? (*eq = 0, reg_index(s)) : -1;

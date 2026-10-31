@@ -129,7 +129,9 @@ UART text is flushed at each newline, every byte when stdout is a terminal, befo
   register dumps (`zero`, `t0`, `pc`, `hi`, ...) and `--trace-regs` lines are highlighted.
 
 **Keyboard:** with the window focused, typed keys go to UART RX: printable ASCII as-is, Enter -> `\r`, Backspace -> 0x08,
-Tab -> `\t`, Esc -> 0x1b (Esc no longer closes the window; use the close button). Terminal stdin still works too.
+Tab -> `\t`. **Esc ends the run** (it is not sent to the UART, since a lone Esc doesn't travel well over the real UART
+with `screen`): `[stop] Esc pressed` on stderr, then the same shutdown and exit status (0) as closing the window. It works
+with `--no-window-keys` too and also ends `--hold`. Terminal stdin still works too.
 proj7: `u i o / j k l / m , .` move, space pauses, `d`/`e` clock. `--no-window-keys` disables window capture.
 
 **Note:** `bench` and `draw` are linked to run at DDR 0x10000000 (`LDSTYLE := inject_cache`). Their raw bytes can be
@@ -146,9 +148,49 @@ uses as its shared memory (the stack is at the top of D-scratch).
       --dump-lcd   --screenshot F.png
       --random-ddr[=SEED]   --no-random-ddr   --expect REG=VAL   --color[=WHEN]
       --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]   --no-halt-on-quirk
-      --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N
+      --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N   --no-guest-exit
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
+
+**Exit status:** 0 normal stop (`break`, `--max-insns`, `--until`, window closed, Esc); 1 setup or CPU error; 2 usage;
+3 an `--expect` failed; 4 `--halt-on-quirk` stopped; a guest exit-register store: the stored code & 0xFF (see below).
+
+### Ending a run from guest code
+A store to the **guest exit register at 0x80000084** (one word past the PRNG at 0x80000080) stops vvizard right after
+the store instruction. It prints `[exit] guest exit code N (0x...) at pc=... -> exit status S` on stderr, flushes the
+UART output, runs the normal shutdown (summaries, registers, `--dump-frame`, `--dump-lcd`, `--screenshot`, `--hold`)
+and exits with **status = code & 0xFF** (only the low 8 bits reach the shell, so -1 is 255 and 256 is 0; codes 1-4
+look like vvizard's own statuses, and the `[exit]` line tells them apart; a failing `--expect` still gives 3).
+
+On the FPGA the address is free: MemMapIO.v decodes registers only at `addra[5:0]` = 0x00-0x06, 0x14-0x17 and 0x20
+(PRNG), so 0x84 (`addra` 0x21) selects nothing and the store is a no-op. 0x80000084-0x800000FC is the **extended area**
+for vvizard-only registers. So guest code stores its code, then does what the FPGA needs: interrupts off and spin.
+`--no-guest-exit` makes vvizard behave like the FPGA (the store is ignored, once noted on stderr). Use `sw`: an `sb`
+at 0x80000087 or `sh` at 0x80000086 also works (the byte lands in the low lane), but `sb` at 0x80000084 puts the
+code in bits 31:24 (status 0, and the default `mmio-lane` halt). A read returns 0 (HW: undefined) with no effect.
+
+Assembly (`.set noreorder`):
+
+    lui   $t0, 0x8000
+    li    $t1, 42               # exit code
+    sw    $t1, 0x84($t0)        # vvizard stops here (VV_EXIT)
+    mfc0  $t2, $12              # FPGA (or --no-guest-exit) goes on: Status.IE = 0 ...
+    nop
+    li    $t3, ~1
+    and   $t2, $t2, $t3
+    mtc0  $t2, $12
+1:  b     1b                    # ... and spin
+    nop
+
+C:
+
+    #define VV_EXIT (*(volatile unsigned *)0x80000084)
+    static void vv_exit(unsigned code) {
+        VV_EXIT = code;                          /* vvizard stops here */
+        __asm__ __volatile__("mfc0 $t0, $12\n\tnop\n\tli $t1, ~1\n\t"
+                             "and $t0, $t0, $t1\n\tmtc0 $t0, $12" ::: "t0", "t1");   /* FPGA: IE = 0 */
+        for (;;) ;                               /* ... and spin */
+    }
 
 ### Random DDR at startup
 DDR (256 MiB at 0x10000000) is filled with random data before anything is loaded, as real DRAM would be at power-up.
@@ -222,7 +264,7 @@ those quirks off, the access raises a TLB-style CPU exception (`UC_ERR_EXCEPTION
 MemMapIO gets the word address `addra = ADDR[13:2]` and now decodes it (cs150 branch `lcd-text`, `cpu/MemMapIO.v`):
 | offset (`ADDR[13:0]`) | `addra` | device |
 |---|---|---|
-| 0x0000-0x00FC | `addra[11:6] == 0`, compared on `addra[5:0]` | the registers below (UART, counters, PF/GP, PRNG) |
+| 0x0000-0x00FC | `addra[11:6] == 0`, compared on `addra[5:0]` | the registers below (UART, counters, PF/GP, PRNG); 0x84-0xFC is the extended area (no RTL register; 0x84 = vvizard's guest exit register) |
 | 0x0100-0x017C | `addra[11:5] == 2` | 2x16 LCD text buffer, write-only |
 | 0x0180-0x3FFC | - | nothing: reads 0 here (`32'dx` in HW), stores dropped, logged as MISS-READ / MISS-WRITE |
 
@@ -237,6 +279,7 @@ and drop stores in every quirk setting.
 - **PRNG (0x80000080, `src/prng.c`):** PRNG32LFSR.v, a 32-bit Galois LFSR (mask 0x80200003, reset value 0xACE12468) that steps every clock, not per read. A read in cycle c returns state(c-1) (MemMapIO registers `prng_out` once more before `douta`). Any store (any byte lane, also via the 16 KiB alias 0x80004080; 0x80000180 is no longer an alias) reseeds with the full lane-placed store data, and a seed of 0 becomes 1. The first read in the cycle right after a store returns the old value; from the next cycle on reads return the seed, then the seed advanced one step per cycle. Back-to-back reads return consecutive LFSR states. Cycles are counted as instructions (no stall or cache model), so seeded sequences match hardware only while the CPU does not stall, and the unseeded sequence after reset is not aligned with hardware. CNT_RESET does not reset the PRNG.
 - **PixelFeeder:** a PF_FRAME write only queues the frame. It is displayed from the end of the current scan frame (every 865800 cycles: 1040x666 pixels at 40 MHz), when Cause bit 13 latches. PF_FRAME reads return `{4'h1, frame#, 22'b0}` of the frame being displayed, not the last one written, so software that waits for its frame (proj7 `pf_wait`) now really waits.
 - **GPU:** a GP_CODE write runs the command list at once (`src/gpu.c`; no GPU busy time) and latches Cause bit 12. GP_STATE reads return `{pf_status, gp_status}` in the `graphics.h` `gstate_s` layout: displayed frame in bits 29:24, `gp_fault` in bit 15 (set by a bad opcode, cleared by the next launch), the launched frame in bits 13:8, and all five engines ready (bits 4:0). That is the intended layout; GPU.v as written drops the fault bit and puts the frame in bits 14:9, an RTL bug (see QUIRKS.md "gp-status RTL bug").
+- **Guest exit (0x80000084, vvizard only):** a store ends the run with that exit code; see [Ending a run from guest code](#ending-a-run-from-guest-code).
 - **Other offsets:** logged as MISS-READ or MISS-WRITE (reads 0, stores dropped).
 - **Interrupts:** see the next section.
 
@@ -291,7 +334,7 @@ a read miss, never flushed or snooped. By default vvizard also returns the stale
 `make test` runs `check-hex`, `test-hex`, `test-hw`, `test-quirks` and `test-player`. `make test-hex` runs `tests/test_hex.py`
 (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-hw` runs `tests/test_hw.py`:
 `tests/hw/*.s` checks UART TX timing, the RX edge and holding register, the PixelFeeder frame latch, the timer and
-interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, and makes every guest-bug detector warn,
+interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, the guest exit register (and `--no-guest-exit`), and makes every guest-bug detector warn,
 halt (exit 4) and go quiet, and checks the stdout/stderr split and `--color`. `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
 `--input-script` UART keys and UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`: one tiny program per
 quirk for detection, with clean counterparts, each quirk on and off against the standard MIPS result, and the CLI and
@@ -317,7 +360,7 @@ the built programs are byte-identical to the committed hex (part of `make test`;
 The window is titled `vvizard`. It shows the selected frame unscaled at the top (800×600) and a 76-pixel status strip
 underneath:
 - **Left:** the 2x16 LCD in green dot-matrix style. Codes 0x20-0x7F use HD44780 ROM A00 glyphs (`src/lcdfont.h`, so 0x5C is ¥ and 0x7E/0x7F are → / ←). 0x10-0x1F and 0x80-0xA0 are blank as in A00. CGRAM codes 0x00-0x0F (LCDText2x16 never loads CGRAM) and 0xA1-0xFF (katakana and symbols, not drawn) show as a hollow box.
-- **Right, line 1:** run state (RUN, STOPPED (break / max-insns / error) or HALTED (quirk)), instructions, the displayed PF_FRAME and the number of PF_FRAME writes, GP launches and injected IRQs.
+- **Right, line 1:** run state (RUN, STOPPED (break / max-insns / error), EXITED (guest code N) or HALTED (quirk)), instructions, the displayed PF_FRAME and the number of PF_FRAME writes, GP launches and injected IRQs.
 - **Right, line 2:** when D-scratch holds proj6/proj7 shared memory (magic 0xFEDBEEFn at 0x50000000): graphics paused (flags bit 0, ' ' key), clock paused (flags bit 1, 'd'/'e' keys) and the BCD mm:ss clock.
 - **Right, bottom:** recent keys. Window keystrokes are shown when pressed, `--input-script` keys when due, and `--uart-in` and stdin bytes when the guest reads them. The newest key is at the right and older keys scroll out to the left.
 - `--screenshot F.png` writes the whole window, strip included, as PNG when the run ends (needs a window; works under `xvfb-run`).

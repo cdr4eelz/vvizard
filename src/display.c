@@ -45,16 +45,22 @@ static void grab(uc_engine *uc) {
 int vv_disp_keys_enabled = 1;
 static unsigned char kq[256]; static unsigned kq_h, kq_t;
 static void kq_put(int c) { unsigned n = (kq_t + 1) % sizeof kq; if (n != kq_h) { kq[kq_t] = (unsigned char)c; kq_t = n; } }
+/* Esc ends the run (VV_DISP_ESC from vv_disp_tick): a terminal on a real UART (screen etc.) can't
+ * send a lone Esc cleanly, so it is not forwarded to the guest.  Checked even with --no-window-keys. */
+static int esc_pressed;
 static void collect_keys(void) {
-    if (!have_window || !vv_disp_keys_enabled) return;
-    int c;
-    while ((c = GetCharPressed()) > 0) if (c < 0x80) { kq_put(c); vv_disp_key_log(c); }   /* printable ASCII only */
-    while ((c = GetKeyPressed()) > 0) switch (c) {
+    if (!have_window) return;
+    int c, keys = vv_disp_keys_enabled;
+    while ((c = GetCharPressed()) > 0) if (keys && c < 0x80) { kq_put(c); vv_disp_key_log(c); }   /* printable ASCII only */
+    while ((c = GetKeyPressed()) > 0) {
+        if (c == KEY_ESCAPE) { esc_pressed = 1; continue; }
+        if (!keys) continue;
+        switch (c) {
         case KEY_ENTER: case KEY_KP_ENTER: kq_put('\r'); vv_disp_key_log('\r'); break;
         case KEY_BACKSPACE: kq_put(0x08); vv_disp_key_log(0x08); break;
         case KEY_TAB: kq_put('\t'); vv_disp_key_log('\t'); break;
-        case KEY_ESCAPE: kq_put(0x1b); vv_disp_key_log(0x1b); break;
         default: break; }
+    }
 }
 
 /* ---- recent keys ticker: newest at the right, older ones slide out to the left ---- */
@@ -166,7 +172,8 @@ int vv_disp_init(int want_window) {
     if (!IsWindowReady()) { vv_eprintf("[disp] cannot open window; continuing headless\n"); return -1; }
     Image img = { rgba, VV_SCREEN_W, VV_SCREEN_H, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     tex = LoadTextureFromImage(img);
-    SetExitKey(KEY_NULL);                   /* Esc goes to UART, not window close */
+    SetExitKey(KEY_NULL);                   /* raylib's default exit key is Esc; vvizard handles Esc itself
+                                             * (collect_keys) so it can report it and run the normal shutdown */
     have_window = 1; last_draw = 0;
     return 0;
 }
@@ -182,7 +189,8 @@ int vv_disp_tick(uc_engine *uc) {
     double t = now();
     if (t - last_draw >= 1.0 / 60) draw(uc);          /* EndDrawing polls events + collects */
     else if (t - last_poll >= POLL_PERIOD) { PollInputEvents(); collect_keys(); last_poll = t; }
-    return WindowShouldClose();
+    if (esc_pressed) { esc_pressed = 0; return VV_DISP_ESC; }
+    return WindowShouldClose() ? VV_DISP_CLOSED : 0;
 }
 int vv_disp_dump_ppm(uc_engine *uc, const char *path) {
     grab(uc);

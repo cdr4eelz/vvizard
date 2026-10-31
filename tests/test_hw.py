@@ -108,7 +108,17 @@ def t_dcache_stale():  # stale line after a GPU write: HW (default) reads the ol
         and halted(h, "dcache-stale")
 
 
-# ---- C: output streams and --color ----
+# ---- C: guest exit register (0x80000084) ----
+def t_guest_exit():   # sw ends the run at once: status = code & 0xFF, [exit] line; --no-guest-exit spins on
+    a = run("guest_exit", None, "--halt-on-quirk", "--expect", "s0=0")   # no stray quirk at the stop
+    b = run("guest_exit", None, "--no-guest-exit", "--max-insns", "5000", "--expect", "s0=1")
+    return a.returncode == 42 and "[exit] guest exit code 42 (0x0000002a)" in a.err and "exit status 42" in a.err \
+        and "$s0 = 0x00000000 (want 0x00000000) PASS" in a.err and "[stop] max-insns" not in a.err \
+        and b.returncode == 0 and "ignored (--no-guest-exit)" in b.err and "[stop] max-insns 5000 reached" in b.err \
+        and "$s0 = 0x00000001 (want 0x00000001) PASS" in b.err
+
+
+# ---- D: output streams and --color ----
 def t_streams():      # stdout = guest UART bytes only (also with --trace-regs); vvizard's own text on stderr
     r = run("uart_tx", 6, "--trace-regs", "--color=never")
     return r.returncode == 0 and r.stdout == b"AB" and "[trace]" in r.err and "[run]" in r.err \
@@ -125,7 +135,7 @@ def t_color():        # auto (not a tty) = off; always: green UART run on stdout
 
 TESTS = [t_uart_tx, t_uart_rx, t_uart_rx_hold, t_pf, t_pf_period, t_timer, t_irq_defer, t_gp_status, t_reset_regs,
          t_legacy_io, t_tx_busy, t_rx_overrun, t_irq_storm, t_undef_reg, t_dcache_stale,
-         t_streams, t_color]
+         t_guest_exit, t_streams, t_color]
 
 
 def main():
