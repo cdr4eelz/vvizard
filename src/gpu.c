@@ -5,6 +5,7 @@
 #include "memmap.h"
 #include "loader.h"
 #include "display.h"
+#include "dcache.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -34,7 +35,9 @@ static void span(uc_engine *uc, int y, int x0, int x1, uint32_t c) {
         uint8_t *p = buf + 4 * (x - x0);
         p[0] = c >> 24; p[1] = c >> 16; p[2] = c >> 8; p[3] = c;   /* big-endian word */
     }
-    uc_mem_write(uc, vv_canon(fbase + (uint32_t)y * VV_ROW_PITCH + (uint32_t)x0 * 4), buf, (size_t)(x1 - x0 + 1) * 4);
+    uint32_t a = vv_canon(fbase + (uint32_t)y * VV_ROW_PITCH + (uint32_t)x0 * 4); size_t n = (size_t)(x1 - x0 + 1) * 4;
+    vv_dc_dma_write(uc, a, n);                  /* DDR write behind the CPU D-cache (dcache-stale) */
+    uc_mem_write(uc, a, buf, n);
 }
 static void pixel(uc_engine *uc, int x, int y, uint32_t c) { span(uc, y, x, x, c); }
 
@@ -83,9 +86,12 @@ static void slr_run(uc_engine *uc, uint32_t y, uint32_t l, uint32_t r, uint32_t 
     }
     uint32_t row = fbase + y * VV_ROW_PITCH;
     if (dofill || r - l < 2) {
+        vv_dc_dma_write(uc, vv_canon(row + l * 4), (size_t)(r - l + 1) * 4);
         uc_mem_write(uc, vv_canon(row + l * 4), buf, (size_t)(r - l + 1) * 4);
     } else {
+        vv_dc_dma_write(uc, vv_canon(row + l * 4), 4);
         uc_mem_write(uc, vv_canon(row + l * 4), buf, 4);
+        vv_dc_dma_write(uc, vv_canon(row + r * 4), 4);
         uc_mem_write(uc, vv_canon(row + r * 4), buf + 4 * (r - l), 4);
     }
 }
@@ -140,7 +146,8 @@ int vv_gpu_run(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose) {
         }
         if (op != VV_GOP_LINE && op != VV_GOP_ELIP && op != VV_GOP_RECT) {
             fprintf(stderr, "[gpu] fault: bad opcode %u (0x%08x) at 0x%08x\n", op, inst, pc - 4);
-            break;
+            st.faults++; st.cmds += n;
+            return -2;                         /* GP_fault (GraphicsProcessor.v:188-189) */
         }
         uint32_t p0 = rd_word(uc, pc, &ok), p1 = rd_word(uc, pc + 4, &ok); pc += 8;
         /* gpcommands.vh:23-26 X=25:16, Y=9:0 (XVAR/YVAR flag fields ignored) */

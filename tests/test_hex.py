@@ -34,10 +34,10 @@ def t_loop():   return at("loop", 0x40000000, "--expect", "t0=30", "--expect", "
 def lcd_lines(r):
     """--dump-lcd output -> [line1 hex bytes, line2 hex bytes]"""
     return [bytes.fromhex(l.split(b"hex")[1].decode()) for l in r.stderr.splitlines() if l.startswith((b"[lcd] 1 ", b"[lcd] 2 "))]
-def t_uart():   # 0x80000108 is no longer a UART TX alias: the 'i' lands in LCD[2]
-    r = at("uart", 0x40000000, "--expect", "t2=1", "--dump-lcd")
-    return r.returncode == 0 and r.stdout == b"H\n" and lcd_lines(r)[0][:3] == b"  i"
-LCD_REGS = ["t2=0", "t3=0", "t4=1", "t5=0", "t6=1", "t7=0"]
+def t_uart():   # 0x80000108 is no longer a UART TX alias: the 'i' lands in LCD[2]; TX_READY 0 after a store
+    r = at("uart", 0x40000000, "--expect", "t2=0", "--dump-lcd")
+    return r.returncode == 0 and r.stdout == b"H\n" and lcd_lines(r)[0][:3] == b"  i" and b"[guest bug]" not in r.stderr
+LCD_REGS = ["t2=0", "t3=0", "t4=1", "t5=0", "t6=1", "t7=0", "t8=0"]
 def t_lcd():    # tests/lcd.s: LCD MMIO lanes, line ends, 16 KiB alias, reads 0, no 0x100 register aliases
     ok = True
     for q, l1 in (("default", b"QiU\0X\0" + b" " * 9 + b"L"), ("-mmio-lane", b"QiUXXX" + b" " * 9 + b"L")):

@@ -30,12 +30,13 @@
         sw    $t1, 0x108($t0)        # old UART TX alias: now LCD[2] = 'U', nothing on the UART
         sw    $t1, 0x180($t0)        # 0x80000180: neither registers nor LCD -> dropped
         sw    $t1, 0x208($t0)        # 0x80000208: old UART TX alias -> dropped
-        li    $t1, '\n'
-        sw    $t1, 0x4008($t0)       # 0x80004008: 16 KiB alias of UART TX -> sends '\n'
         lw    $t2, 0x100($t0)        # LCD read -> 0
         lw    $t3, 0x104($t0)        # LCD read -> 0
-        lw    $t4, 0x0($t0)          # UART TX_READY -> 1
+        lw    $t4, 0x0($t0)          # UART TX_READY -> 1 (idle)
         lw    $t5, 0x100($t0)        # TX_READY alias at 0x80000100? no: LCD -> 0
         lw    $t6, 0x4000($t0)       # 16 KiB alias of TX_READY -> 1
         lw    $t7, 0x184($t0)        # unmapped offset reads 0 (HW: 32'dx)
+        li    $t1, '\n'
+        sw    $t1, 0x4008($t0)       # 0x80004008: 16 KiB alias of UART TX -> sends '\n'
+        lw    $t8, 0x4000($t0)       # TX_READY (alias) -> 0: the '\n' is shifting out
         break

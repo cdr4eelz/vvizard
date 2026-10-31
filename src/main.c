@@ -17,6 +17,7 @@
 #include "quirk.h"
 #include "prng.h"
 #include "lcd.h"
+#include "hw.h"
 
 /* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
  * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
@@ -74,19 +75,24 @@ static int trace_left = -1;
 /* ---- UART RX sources: --uart-in, then --input-script bytes that are due, then stdin ---- */
 static int stdin_peek = -1, stdin_eof;
 static char script_q[4096]; static size_t sq_head, sq_tail;   /* due script bytes */
-static int rx_avail(void) {
+/* The host end of the serial line (src/hw.c times the bytes onto RX).  poll_stdin: also poll() stdin. */
+int vv_host_rx_avail(int poll_stdin) {
     if (uart_in && *uart_in) return 1;
     if (sq_head != sq_tail) return 1;
     if (vv_disp_key_avail()) return 1;
-    if (stdin_peek < 0 && !stdin_eof) {
+    if (poll_stdin && stdin_peek < 0 && !stdin_eof) {
         struct pollfd p = { 0, POLLIN, 0 }; unsigned char c;
         if (poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP))) {
             if (read(0, &c, 1) == 1) stdin_peek = c; else stdin_eof = 1; }
     }
     return stdin_peek >= 0;
 }
-static int rx_take(void) {
-    if (!rx_avail()) return 0;
+/* --uart-in is typed by a patient host: its next byte waits until the guest has read the last one
+ * (then the --uart-rx-gap idle time), so auto-typing a command never overruns RX.  Script keys,
+ * window keys and stdin are not paced: they arrive when due, as a person types. */
+int vv_host_rx_paced(void) { return uart_in && *uart_in; }
+int vv_host_rx_take(void) {
+    if (!vv_host_rx_avail(1)) return 0;
     if (uart_in && *uart_in) { int c = (unsigned char)*uart_in++; vv_disp_key_log(c); return c; }
     if (sq_head != sq_tail) { int c = (unsigned char)script_q[sq_head]; sq_head = (sq_head + 1) % sizeof script_q; return c; }
     if (vv_disp_key_avail()) return vv_disp_key_take();       /* logged when pressed (display.c) */
@@ -101,7 +107,7 @@ static int rx_take(void) {
 typedef struct { int is_frame; uint64_t when; int is_dump; char *arg; } vv_event;
 static vv_event *events; static int nevents, ev_next_f, ev_next_i;
 static uint64_t pf_writes;               /* number of PF_FRAME writes so far */
-static int opt_irq;                      /* inject UARX interrupts (on with --input-script or --irq) */
+static int opt_irq = 1;                  /* take COP0150 interrupts (default; --no-irq turns off) */
 static unsigned dump_every; static const char *dump_prefix = "frame";
 static void run_event(uc_engine *uc, vv_event *e) {
     if (e->is_dump) vv_disp_dump_ppm(uc, e->arg);
@@ -142,50 +148,33 @@ static int load_script(const char *path) {
     fclose(f); (void)ev_next_f; (void)ev_next_i; return 0;
 }
 
-/* ---- Shadow COP0 Cause/EPC + UARX interrupt injection ----
- * Unicorn 2.1.1 can't set Cause IP bits or read Cause/EPC from the host (NOTES.md), and its
- * exception entry would use the MIPS vector + EXL, which COP0150 lacks.  So: when Status.IE
- * (bit 0) and Status.IM_UARX (bit 10) are set and RX data is available, we emulate the COP0150
- * entry ourselves: EPC=pc, clear Status.IE, jump to PC_ISR (0xC0000180).  mfc0 $13/$14 results
- * are patched with the shadow values; mtc0 $13/$14 update the shadow.  The ISR returns with
- * `jr $k0; mtc0 Status` (no eret), which Unicorn executes natively. */
-static uint32_t sh_cause, sh_epc; static int fix_rt = -1; static uint32_t fix_val;
-static uint32_t last_pc = 0xFFFFFFFFu; static uint64_t irq_count;
-#define VV_IM_UARX 0x400u
+/* ---- Interrupt entry (COP0150 + CPUMIPS.v DO_ISR) ----
+ * The Cause latch, Count/Compare and the device interrupt sources are in src/hw.c.  Unicorn 2.1.1
+ * can't set Cause IP bits or expose Cause/EPC (NOTES.md), and its exception entry (MIPS vector, EXL)
+ * differs from COP0150, so the entry is done here: when Status.IE and any Status.IM & Cause.IP bit
+ * are set (and the deferral rules of CPUMIPS.v:114 allow it, below), EPC = pc, Status.IE = 0 and the PC
+ * jumps to PC_ISR (0xC0000180); the insn at pc runs after the ISR returns.  With the cop0
+ * quirk on (default) mfc0/mtc0 use the hw.c registers (quirk.c); with it off, Status is Unicorn's
+ * and mfc0/mtc0 $13/$14 inside the ISR BRAM are patched to the hw.c Cause/EPC.  The ISR returns
+ * with `jr $k0; mtc0 Status` (eret is a nop on the MIPS150).  Leaving the ISR (IE 0 -> 1) with the
+ * entry's Cause bit still pending and enabled is the irq-storm guest bug. */
+static int fix_rt = -1; static uint32_t fix_val;
+#define NOPC 0xFFFFFFFFu
+static uint32_t last_pc = NOPC, last2_pc = NOPC, last3_pc = NOPC;   /* the last three insns run */
+static uint64_t irq_count;
+static uint32_t prev_status;
 static uint32_t read_insn(uc_engine *uc, uint32_t a) {
     unsigned char b[4]; uint32_t c = vv_canon(a);
     if (c == 0xFFFFFFFFu || (c >> 28) == 0x8 || uc_mem_read(uc, c, b, 4)) return 0;   /* no MMIO side effects */
     return b[0]<<24|b[1]<<16|b[2]<<8|b[3];
 }
+static int is_mtc0(uint32_t i) { return (i >> 21) == 0x204; }   /* 010000 00100 (CPUMIPS.v:113) */
 static int is_branch(uint32_t i) {
     unsigned op = i >> 26, fn = i & 0x3F;
     return (op == 0 && (fn == 8 || fn == 9)) || op == 1 || (op >= 2 && op <= 7) || (op >= 20 && op <= 23);
 }
-/* COP0150 register model for the cop0 quirk (COP0150.v): Count runs (one tick per instruction
- * here), Compare resets to 0xFFFF and a write clears the timer IP bit (Cause[15]), Status is a
- * plain 32-bit register reset to 0, EPC is written only by interrupt entry, everything else reads 0. */
-static uint32_t sh_status, sh_compare = 0xFFFFu, cnt0_val; static uint64_t cnt0_insn;
-uint32_t vv_cop0_read(unsigned rd) {
-    switch (rd) {
-    case 9:  return cnt0_val + (uint32_t)(insn_count - cnt0_insn);
-    case 11: return sh_compare;
-    case 12: return sh_status;
-    case 13: return sh_cause | (rx_avail() ? VV_IM_UARX : 0);
-    case 14: return sh_epc;
-    default: return 0;
-    }
-}
-void vv_cop0_write(unsigned rd, uint32_t v) {
-    switch (rd) {
-    case 9:  cnt0_val = v; cnt0_insn = insn_count + 1; break;
-    case 11: sh_compare = v; sh_cause &= ~0x8000u; break;
-    case 12: sh_status = v; break;
-    case 13: sh_cause = (v & ~0xFC00u) | (sh_cause & v & 0xFC00u & ~VV_IM_UARX); break;
-    default: break;                              /* EPC (14) and the rest: ignored by COP0150 */
-    }
-}
-void vv_mmio_side_read(uint32_t canon) {         /* a HW read of UARX_DATA pops the RX FIFO */
-    if ((canon & VV_MMIO_DECODE) == VV_OW_UARX_DATA) (void)rx_take();
+void vv_mmio_side_read(uint32_t canon) {         /* a HW read of UARX_DATA pops the RX holding register */
+    if ((canon & VV_MMIO_DECODE) == VV_OW_UARX_DATA) (void)vv_uart_rx_read();
 }
 static void irq_step(uc_engine *uc, uint32_t pc) {
     int cop0 = vv_quirk_on(VV_Q_COP0);
@@ -197,28 +186,36 @@ static void irq_step(uc_engine *uc, uint32_t pc) {
             unsigned rs = (i >> 21) & 31, rt = (i >> 16) & 31, rd = (i >> 11) & 31;
             uint32_t v;
             if (rs == 0 && (rd == 13 || rd == 14)) {      /* mfc0 */
-                fix_rt = rt; fix_val = rd == 14 ? sh_epc : (sh_cause | (rx_avail() ? VV_IM_UARX : 0));
+                fix_rt = rt; fix_val = rd == 14 ? vv_hw_epc() : vv_hw_cause();
             } else if (rs == 4 && (rd == 13 || rd == 14)) { /* mtc0 */
                 uc_reg_read(uc, UC_MIPS_REG_0 + rt, &v);
-                if (rd == 13)   /* COP0150: IP bits 15:10 only clear (next_ip & wd); others written as-is */
-                    sh_cause = (v & ~0xFC00u) | (sh_cause & v & 0xFC00u & ~VV_IM_UARX);  /* UARX is level */
-                else sh_epc = v;
+                if (rd == 13) vv_cop0_write(13, v);       /* COP0150: IP bits 15:10 only clear */
+                else vv_hw_set_epc(v);
             }
         }
     }
-    if (rx_avail()) {
-        uint32_t st; uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
-        if (cop0) st = sh_status;
-        if ((st & 1) && (st & VV_IM_UARX) && !(last_pc + 4 == pc && is_branch(read_insn(uc, last_pc)))) {
-            sh_epc = pc; st &= ~1u; uc_reg_write(uc, UC_MIPS_REG_CP0_STATUS, &st);
-            if (cop0) sh_status = st;
+    uint32_t st;
+    if (cop0) st = vv_hw_status(); else uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
+    if ((st & 1) && !(prev_status & 1)) vv_hw_isr_exit_check(st, pc, "IE re-enabled");   /* irq-storm */
+    prev_status = st;
+    if (vv_quirk_halted) return;
+    /* CPUMIPS.v:114 DO_ISR replaces the fetch AFTER the instruction in F (X, the one that just ran here),
+     * so EPC = pc.  Not when X could branch, X is an mtc0, or X is a taken branch's target (WAS_Branch:
+     * the branch two instructions back was taken); WAS_ISR needs IE, which entry cleared. */
+    if (vv_hw_irq_request(st)) {
+        int defer = 0;
+        if (last_pc != NOPC) { uint32_t x = read_insn(uc, last_pc); defer = is_branch(x) || is_mtc0(x); }
+        if (!defer && last3_pc != NOPC && is_branch(read_insn(uc, last3_pc)) && last_pc != last3_pc + 8) defer = 1;
+        if (!defer) {
+            vv_hw_isr_enter(pc, st); st &= ~1u; prev_status = st;
+            if (!cop0) uc_reg_write(uc, UC_MIPS_REG_CP0_STATUS, &st);
             uint32_t npc = VV_PC_ISR; irq_count++;
-            last_pc = 0xFFFFFFFFu;
-            uc_reg_write(uc, UC_MIPS_REG_PC, &npc);   /* insn at pc not executed; resumes at ISR */
+            last_pc = last2_pc = last3_pc = NOPC;
+            uc_reg_write(uc, UC_MIPS_REG_PC, &npc);   /* insn at pc not executed yet; resumes at ISR */
             return;
         }
     }
-    last_pc = pc;
+    last3_pc = last2_pc; last2_pc = last_pc; last_pc = pc;
 }
 
 static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
@@ -231,17 +228,13 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
         w = 0xFFFFFFFFu;                        /* no register: v stays 0 */
     }
     switch (w) {
-    case VV_OW_UATX_READY: v = 1; break;        /* host stdout always ready */
-    case VV_OW_UARX_VALID: v = rx_avail(); break;
-    case VV_OW_UARX_DATA:  v = rx_take(); break;
+    case VV_OW_UATX_READY: v = vv_uart_tx_ready(); break;   /* low while a byte shifts out (hw.c) */
+    case VV_OW_UARX_VALID: v = vv_uart_rx_valid(); break;
+    case VV_OW_UARX_DATA:  v = vv_uart_rx_read(); break;
     case VV_OW_CNT_CYCLE: /* no cycle model: cycles == instructions */
     case VV_OW_CNT_INST:  v = (uint32_t)(insn_count - cnt_base_insn); break;
-    case VV_OW_PF_FRAME:  v = 0x10000000u | (((pf_frame >> VV_FSHIFT) & VV_FNMASK) << VV_FSHIFT); break;
-    case VV_OW_GP_STATE:  /* graphics.h:72-92 gstate_s: {pf_fault,pf_dormant,pf_frame[5:0], 8'b0,
-                           * gp_fault,0,gp_procframe[5:0], 3'b0,rect,elip,line,filler,gp_ready}.
-                           * Stub GPU finishes instantly => all engines ready. */
-        v = (vv_disp_frame() & 0x3F) << 24
-          | (((gp_frame >> 28) ? (gp_frame >> VV_FSHIFT) : gp_frame) & 0x3F) << 16 | 0x1F; break;
+    case VV_OW_PF_FRAME:  v = 0x10000000u | vv_pf_frame() << VV_FSHIFT; break;   /* frame being scanned (MemMapIO.v:162) */
+    case VV_OW_GP_STATE:  v = vv_gp_status_word(); break;   /* graphics.h gstate_s layout (hw.c) */
     case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
     case 0xFFFFFFFFu: break;
     default:
@@ -270,9 +263,9 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
         return;
     }
     switch (w) {
-    case VV_OW_UATX_DATA: putchar(v & 0xFF); fflush(stdout); return; /* dina[7:0] */
+    case VV_OW_UATX_DATA: vv_uart_tx_write(v & 0xFF); return;    /* dina[7:0]; lost while TX busy */
     case VV_OW_CNT_RESET: cnt_base_insn = insn_count; break;
-    case VV_OW_PF_FRAME:  pf_frame = v; vv_disp_pf_write(uc, v); pf_writes++;
+    case VV_OW_PF_FRAME:  pf_frame = v; vv_pf_write(uc, v); pf_writes++;   /* takes effect at the frame end (hw.c) */
         if (dump_every && pf_writes % dump_every == 0) { char fn[PATH_MAX];
             snprintf(fn, sizeof fn, "%s%06llu.ppm", dump_prefix, (unsigned long long)pf_writes); vv_disp_dump_ppm(uc, fn); }
         if (nevents) run_due_events(uc, 1);
@@ -285,8 +278,8 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
         vv_prng_write(insn_count, v); break;
     case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
         { int n = vv_gpu_run(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1);
+          vv_gp_launched(gp_frame, n);                 /* GP status frame/fault + irq_gp_done (Cause bit 12) */
           if (!opt_quiet_mmio) fprintf(stderr, "[gpu] launch #%u code@0x%08x frame=0x%08x -> %d cmds\n", gp_launches, gp_code, gp_frame, n); }
-        /* HW would raise irq_gp_done (IB_GPU=12) here; interrupts are not injected yet. */
         break;
     default: break;
     }
@@ -326,6 +319,9 @@ static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e,
 static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     (void)size; (void)u;
     insn_count++;
+    vv_cur_pc = (uint32_t)addr;
+    vv_hw_tick(uc, insn_count);              /* devices advance one cycle (UART, PixelFeeder, timer) */
+    if (vv_quirk_halted) { uc_emu_stop(uc); return; }
     if (nevents) run_due_events(uc, 0);
     if (vv_quirk_active()) {                 /* emulated quirks and/or --halt-on-quirk / --warn-on-quirk */
         if (vv_quirk_halted) { uc_emu_stop(uc); return; }
@@ -451,7 +447,8 @@ static void usage(const char *p) {
 "usage: %s [options] [isr.elf ...] [prog.elf]  (entry = last ELF)\n"
 "  --load FILE@ADDR   load raw binary (repeatable); FILE may also be an ELF\n"
 "  --entry ADDR       start PC (default: ELF entry, else 0x%08x)\n"
-"  --sp ADDR          initial $sp (default 0x50004000)\n"
+"  --sp ADDR          preset $sp (default: none; registers start at 0 as on hardware, and reading\n"
+"                     one that was never written is the undef-reg guest bug)\n"
 "  --max-insns N      stop after N instructions (default 1000000, 0=unlimited)\n"
 "  --until ADDR       stop when PC reaches ADDR\n"
 "  --trace[=N]        print PC of each (or first N) instruction(s)\n"
@@ -464,13 +461,19 @@ static void usage(const char *p) {
 "  --random-ddr[=SEED] fill DDR with random data at power-up (default on; seed defaults to time)\n"
 "  --no-random-ddr    start DDR zeroed instead\n"
 "  --uart-in STR      feed STR to UART RX before stdin (\\r \\n escapes; GIOS needs \\r)\n"
-"  --dump-frame F.ppm write the selected frame (PF_FRAME) as PPM at exit\n"
+"  --dump-frame F.ppm write the displayed frame as PPM at exit\n"
 "  --trace-regs       --trace plus GPRs changed by the previous insn (debug)\n"
 "  --hold             keep the window open after the run until it is closed\n"
 "  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
-"  --input-script F  timed events (fN|iN key STR / dump F.ppm); enables --irq\n"
-"  --irq              inject UART-RX interrupts (EPC/Cause shadowed, ISR at 0x%08x)\n"
+"  --input-script F  timed events (fN|iN key STR / dump F.ppm)\n"
+"  --no-irq           don't take interrupts (default: COP0150 interrupts, ISR at 0x%08x; --irq is accepted)\n"
+"  --legacy-io        old untimed I/O: TX always ready, RX served on demand with a level UARX interrupt,\n"
+"                     PF_FRAME switches at once, no TX/GP/PF/timer/RTC interrupts\n"
+"  --uart-rx-gap N    idle cycles the host leaves between UART RX bytes (default %u = one byte time;\n"
+"                     0 = back-to-back at 115200 baud)\n"
+"  --pf-period N      cycles per PixelFeeder frame (default %u = 1040x666 @ 40 MHz in 50 MHz cycles;\n"
+"                     0 = PF_FRAME writes take effect at once, no frame interrupt)\n"
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --expect REG=VAL   exit 0 iff GPR REG equals VAL at stop (repeatable)\n"
@@ -483,29 +486,33 @@ static void usage(const char *p) {
 "  --halt-on-quirk[=LIST] stop (exit 4) with PC, insn, quirk name and registers when the guest hits\n"
 "                     a quirk. LIST as for --quirks; default and a leading -NAME/+NAME start from\n"
 "                     the emulated set ('all' also reports quirks that are not emulated)\n"
-"  --warn-on-quirk[=LIST] same detection, but log each (quirk, pc) once and keep running\n", p, VV_PC_BOOT,
-    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, vv_quirk_names());
+"  --warn-on-quirk[=LIST] same detection, but log each (quirk, pc) once and keep running\n"
+"                     (the guest-bug detectors dcache-stale, tx-busy, rx-overrun, irq-storm, undef-reg\n"
+"                     always warn unless silenced; --halt-on-quirk stops on them too)\n"
+"  --quiet-quirk=LIST don't report these categories at all\n", p, VV_PC_BOOT,
+    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, VV_UART_RX_FRAME, VV_PF_PERIOD, vv_quirk_names());
 }
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
     const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0;
-    uint32_t entry = VV_PC_BOOT, sp = 0x50004000u; int have_entry = 0, have_elf_entry = 0;
+    uint32_t entry = VV_PC_BOOT, sp = 0; int have_entry = 0, have_elf_entry = 0, have_sp = 0;
     const char *loads[32]; int nloads = 0;
     const char *expects[32]; int nexp = 0;
     max_insns = 1000000;
     static struct option lo[] = {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
         {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},{"input-script",1,0,'S'},{"irq",0,0,'I'},{"dump-every",1,0,'E'},{"dump-prefix",1,0,'P'},
-        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"quirks",1,0,'J'},{"no-quirks",0,0,'O'},{"list-quirks",0,0,'Y'},{"dump-lcd",0,0,'C'},{"screenshot",1,0,'G'},{"help",0,0,'h'},{0,0,0,0}};
+        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"quirks",1,0,'J'},{"no-quirks",0,0,'O'},{"list-quirks",0,0,'Y'},{"dump-lcd",0,0,'C'},{"screenshot",1,0,'G'},{"help",0,0,'h'},
+        {"legacy-io",0,0,'y'},{"uart-rx-gap",1,0,'g'},{"pf-period",1,0,'p'},{"no-irq",0,0,'n'},{"quiet-quirk",1,0,'k'},{0,0,0,0}};
     int c;
     uint32_t emul = vv_quirk_default();
-    const char *qenv = getenv("VVIZARD_QUIRKS"), *qcli = NULL, *qdet = NULL; int qdet_on = 0;
+    const char *qenv = getenv("VVIZARD_QUIRKS"), *qcli = NULL, *qdet = NULL, *qquiet = NULL; int qdet_on = 0, qwarn = 0;
     if (qenv && vv_quirk_parse(qenv, emul, &emul)) { fprintf(stderr, "bad VVIZARD_QUIRKS\n"); return 2; }
     while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) switch (c) {
         case 'l': if (nloads < 32) loads[nloads++] = optarg; break;
         case 'e': entry = strtoul(optarg, 0, 0); have_entry = 1; break;
-        case 's': sp = strtoul(optarg, 0, 0); break;
+        case 's': sp = strtoul(optarg, 0, 0); have_sp = 1; break;
         case 'm': max_insns = strtoull(optarg, 0, 0); break;
         case 'u': stop_addr = strtoul(optarg, 0, 0); have_stop = 1; break;
         case 't': opt_trace = 1; if (optarg) trace_left = atoi(optarg); break;
@@ -522,12 +529,17 @@ int main(int argc, char **argv) {
         case 'r': opt_random_ddr = 1; if (optarg) { ddr_seed = strtoull(optarg, NULL, 0); ddr_seed_given = 1; } break;
         case 'z': opt_random_ddr = 0; break;
         case 'U': uart_in = decode_escapes(optarg); break;
-        case 'S': if (load_script(optarg)) return 2; opt_irq = 1; break;
+        case 'S': if (load_script(optarg)) return 2; break;
         case 'I': opt_irq = 1; break;
         case 'E': dump_every = strtoul(optarg, 0, 0); break;
         case 'P': dump_prefix = optarg; break;
         case 'x': if (nexp < 32) expects[nexp++] = optarg; break;
-        case 'Q': case 'w': qdet_on = 1; qdet = optarg; vv_quirk_warn = c == 'w'; break;
+        case 'Q': case 'w': qdet_on = 1; qdet = optarg; qwarn = c == 'w'; break;
+        case 'k': qquiet = optarg; break;
+        case 'y': vv_legacy_io = 1; break;
+        case 'g': vv_uart_rx_gap = strtoull(optarg, 0, 0); break;
+        case 'p': vv_pf_period = strtoull(optarg, 0, 0); break;
+        case 'n': opt_irq = 0; break;
         case 'J': qcli = optarg; break;
         case 'O': qcli = "none"; break;
         case 'Y': vv_quirk_list(stdout); return 0;
@@ -537,12 +549,15 @@ int main(int argc, char **argv) {
     }
     if (qcli && vv_quirk_parse(qcli, emul, &emul)) return 2;
     vv_quirk_emul = emul;
+    uint32_t det = 0, quiet = 0;
     if (qdet_on) {                               /* bare / leading -NAME: relative to the emulated set */
-        uint32_t d = emul;
-        if (qdet && *qdet && vv_quirk_parse(qdet, emul, &d)) return 2;
-        if (qdet && !strcmp(qdet, "default")) d = emul;
-        vv_quirk_detect = d;
+        det = emul;
+        if (qdet && *qdet && vv_quirk_parse(qdet, emul, &det)) return 2;
+        if (qdet && !strcmp(qdet, "default")) det = emul;
     }
+    if (qquiet && vv_quirk_parse(qquiet, 0, &quiet)) return 2;
+    vv_quirk_halt = qdet_on && !qwarn ? det & ~quiet : 0;
+    vv_quirk_detect = (det | vv_quirk_bugs()) & ~quiet;   /* guest-bug detectors warn by default */
     uc_engine *uc; uc_err err;
     guest_big = big; vv_lcd_reset();
     if ((err = uc_open(UC_ARCH_MIPS, UC_MODE_MIPS32 | (big ? UC_MODE_BIG_ENDIAN : UC_MODE_LITTLE_ENDIAN), &uc))) {
@@ -612,12 +627,14 @@ int main(int argc, char **argv) {
         if (!at) { fprintf(stderr, "--load needs FILE@ADDR\n"); return 2; }
         *at = 0; if (vv_load_raw(uc, s, strtoul(at + 1, 0, 0))) return 1; free(s);
     }
-    uc_reg_write(uc, UC_MIPS_REG_SP, &sp);
+    if (have_sp) { uc_reg_write(uc, UC_MIPS_REG_SP, &sp); vv_quirk_reg_defined(29); }
+    vv_quirk_init(uc);
     fprintf(stderr, "[quirk] emulating: %s\n", vv_quirk_set_str(vv_quirk_emul));
-    if (vv_quirk_detect) fprintf(stderr, "[quirk] %s on: %s\n", vv_quirk_warn ? "warn" : "halt", vv_quirk_set_str(vv_quirk_detect));
+    if (vv_quirk_halt) fprintf(stderr, "[quirk] halt on: %s\n", vv_quirk_set_str(vv_quirk_halt));
+    if (vv_quirk_detect & ~vv_quirk_halt) fprintf(stderr, "[quirk] warn on: %s\n", vv_quirk_set_str(vv_quirk_detect & ~vv_quirk_halt));
     vv_disp_init(want_window);
-    fprintf(stderr, "[run] %s-endian entry=0x%08x sp=0x%08x max-insns=%llu\n", big ? "big" : "little",
-            entry, sp, (unsigned long long)max_insns);
+    fprintf(stderr, "[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s\n", big ? "big" : "little",
+            entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed");
     err = uc_emu_start(uc, entry, have_stop ? stop_addr : 0xFFFFFFFFull, 0, max_insns);
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
@@ -626,8 +643,9 @@ int main(int argc, char **argv) {
     if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0 && max_insns && insn_count >= max_insns) err = UC_ERR_OK;
     if (!err && max_insns && insn_count >= max_insns) fprintf(stderr, "[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
     if (err) fprintf(stderr, "[stop] uc_emu_start: %s\n", uc_strerror(err));
-    if (opt_irq) fprintf(stderr, "[irq] UARX interrupts injected: %llu, PF_FRAME writes: %llu\n",
+    if (opt_irq) fprintf(stderr, "[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
+    vv_hw_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);

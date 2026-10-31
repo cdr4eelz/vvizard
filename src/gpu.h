@@ -13,7 +13,8 @@ typedef struct {
     uint32_t last_frame;   /* frame# drawn by last launch */
 } vv_gpu_stats;
 /* GP_CODE write: walk command list at code_addr, drawing into frame FRAME_BITS(gp_frame).
- * Completes synchronously. Returns number of commands executed, <0 on fault. */
+ * Completes synchronously. Returns the number of commands executed; -2 bad opcode (GP_fault set),
+ * -1 no STOP within the runaway guard or an unreadable address. */
 int vv_gpu_run(uc_engine *uc, uint32_t gp_frame, uint32_t code_addr, int verbose);
 const vv_gpu_stats *vv_gpu_get_stats(void);
 #endif

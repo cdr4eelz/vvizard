@@ -10,7 +10,10 @@
 2. Emulation: each quirk ON (--quirks=+NAME) must give the MIPS150 result and OFF
    (--quirks=-NAME) the standard MIPS32 / Unicorn result (register values via --expect, stdout,
    or exit code), plus the CLI/env interface (VVIZARD_QUIRKS, --no-quirks, --list-quirks).
-Programs: tests/quirk/det_*.s and emu_*.s, built by the Makefile (make tests; tests/vvprog.py)."""
+Programs: tests/quirk/det_*.s and emu_*.s, built by the Makefile (make tests; tests/vvprog.py).
+These snippets are about the CPU quirks, so the guest-bug detectors (which warn by default; some
+snippets read never-written registers or store to UART TX back to back) are silenced with
+--quiet-quirk; tests/test_hw.py covers them."""
 import os, re, subprocess, sys, tempfile
 from vvprog import prog
 
@@ -69,8 +72,12 @@ EMU = [
 ]
 
 
+BUGS = "dcache-stale,tx-busy,rx-overrun,irq-storm,undef-reg"
+
+
 def run(path, *opts, at=0x40000000, env=ENV):
-    r = subprocess.run([VV, "--no-window", "--quiet-mmio", "--no-random-ddr", "--max-insns", "1000", *opts,
+    r = subprocess.run([VV, "--no-window", "--quiet-mmio", "--no-random-ddr", "--max-insns", "1000",
+                        f"--quiet-quirk={BUGS}", *opts,
                         "--load", f"{path}@{at:#x}", "--entry", f"{at:#x}"],
                        stdin=subprocess.DEVNULL, capture_output=True, env=env)
     err = r.stderr.decode(errors="replace")
@@ -122,7 +129,7 @@ def main():
         ("env VVIZARD_QUIRKS=-hilo", lambda: run(hilo, "--expect=t2=15", env=dict(ENV, VVIZARD_QUIRKS="-hilo"))[0] == 0),
         ("env then CLI +hilo", lambda: run(hilo, "--quirks=+hilo", "--expect=t2=0", env=dict(ENV, VVIZARD_QUIRKS="-hilo"))[0] == 0),
         ("bad name -> rc 2", lambda: run(hilo, "--quirks=bogus")[0] == 2),
-        ("--list-quirks", lambda: subprocess.run([VV, "--list-quirks"], capture_output=True, env=ENV, text=True).stdout.count("\n") == 17),
+        ("--list-quirks", lambda: subprocess.run([VV, "--list-quirks"], capture_output=True, env=ENV, text=True).stdout.count("\n") == 22),
     ]
     for label, fn in cases:
         ok = fn(); total += 1; fails += not ok

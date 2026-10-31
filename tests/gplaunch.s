@@ -13,4 +13,13 @@ _start:
     ori $t2,$t2,0x3000                       # 40000010: 354a3000
     sw $t2,88($t0)                           # 40000014: ad0a0058
     sw $t1,80($t0)                           # 40000018: ad090050
+# PF_FRAME takes effect at the end of the frame being scanned: wait until it reads back frame 1
+L_wait:
+    lw $t6,80($t0)
+    nop
+    srl $t6,$t6,22
+    andi $t6,$t6,0x3f
+    addiu $t7,$zero,1
+    bne $t6,$t7,L_wait
+    nop
     break                                    # 4000001c: 0000000d

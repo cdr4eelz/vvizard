@@ -15,7 +15,7 @@ ROOT = os.path.dirname(HERE)
 SW = os.path.abspath(os.path.join(ROOT, "..", "..", "software"))
 VV = os.path.join(ROOT, "vvizard")
 
-PRESSES, GAP, SETTLE, START = 3, 2, 6, 20
+PRESSES, GAP, SETTLE, START = 3, 1, 4, 4
 # name, key, unit (dx, dy) per press
 STEPS = [
     ("idle",       None, (0, 0)),
@@ -65,7 +65,7 @@ def main():
         p = f"{tmp}/s{n:02d}.ppm"; lines.append(f"f{f} dump {p}"); dumps.append(p)
     script = os.path.join(tmp, "input.txt")
     open(script, "w").write("\n".join(lines) + "\n")
-    max_insns = (f + 10) * 20000
+    max_insns = (f + 4) * 900000      # PixelFeeder frame = 865800 cycles
     cmd = [VV, "--no-window", "--quiet-mmio", "--no-random-ddr",
            "--bios", f"{SW}/gios/gios.inst.bin", "--uart-in", "jal 60000000\\r",
            "--input-script", script, "--max-insns", str(max_insns),

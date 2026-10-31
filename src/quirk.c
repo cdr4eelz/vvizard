@@ -13,25 +13,32 @@
  * Cost with nothing pending: one 4-byte read + decode per instruction. */
 #include "quirk.h"
 #include "memmap.h"
+#include "hw.h"
+#include "dcache.h"
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
-uint32_t vv_quirk_emul, vv_quirk_detect;
-int vv_quirk_warn, vv_quirk_halted;
+uint32_t vv_quirk_emul, vv_quirk_detect, vv_quirk_halt;
+int vv_quirk_halted;
 
 static const char *qname[VV_Q_COUNT] = {
-#define Q(id, n, def, d) n,
+#define Q(id, n, def, bug, d) n,
     VV_QUIRK_TABLE
 #undef Q
 };
 static const char *qdesc[VV_Q_COUNT] = {
-#define Q(id, n, def, d) d,
+#define Q(id, n, def, bug, d) d,
     VV_QUIRK_TABLE
 #undef Q
 };
 static const uint8_t qdef[VV_Q_COUNT] = {
-#define Q(id, n, def, d) def,
+#define Q(id, n, def, bug, d) def,
+    VV_QUIRK_TABLE
+#undef Q
+};
+static const uint8_t qbug[VV_Q_COUNT] = {
+#define Q(id, n, def, bug, d) bug,
     VV_QUIRK_TABLE
 #undef Q
 };
@@ -47,6 +54,12 @@ uint32_t vv_quirk_default(void) {
     return m;
 }
 
+uint32_t vv_quirk_bugs(void) {
+    uint32_t m = 0;
+    for (int i = 0; i < VV_Q_COUNT; i++) if (qbug[i]) m |= 1u << i;
+    return m;
+}
+
 const char *vv_quirk_names(void) {
     static char buf[512];
     if (!buf[0]) for (int i = 0; i < VV_Q_COUNT; i++) { if (i) strcat(buf, ","); strcat(buf, qname[i]); }
@@ -58,8 +71,8 @@ const char *vv_quirk_set_str(uint32_t m) {
     return buf[0] ? buf : "none";
 }
 void vv_quirk_list(FILE *f) {
-    fprintf(f, "%-15s %-7s %s\n", "quirk", "default", "hardware behaviour (emulated when enabled)");
-    for (int i = 0; i < VV_Q_COUNT; i++) fprintf(f, "%-15s %-7s %s\n", qname[i], qdef[i] ? "on" : "off", qdesc[i]);
+    fprintf(f, "%-15s %-7s %s\n", "quirk", "default", "hardware behaviour (emulated when enabled; 'bug' = guest-bug detector, warns by default)");
+    for (int i = 0; i < VV_Q_COUNT; i++) fprintf(f, "%-15s %-7s %s\n", qname[i], qbug[i] ? "bug" : qdef[i] ? "on" : "off", qdesc[i]);
 }
 
 static int lookup(const char *t) {
@@ -144,17 +157,21 @@ static int seen_add(int key, uint32_t pc) {
     return 0;                             /* table full: stop logging new sites */
 }
 static uc_engine *g_uc;
+static uint32_t fetch(uc_engine *uc, uint32_t a);
 static unsigned rep_back;               /* 1 when reporting the PREVIOUS insn (post-check) */
 static void report(int cat, uint32_t pc, uint32_t insn, const char *detail) {
-    if (vv_quirk_warn && !seen_add(cat, pc)) return;
+    int halt = (vv_quirk_halt >> cat) & 1;
+    /* warnings: once per (category, pc); rx-overrun happens between instructions: once per run */
+    if (!halt && !seen_add(cat, cat == VV_Q_RX_OVERRUN ? 0 : pc)) return;
     char d[64]; disasm(pc, insn, d, sizeof d);
     fprintf(stderr, "[quirk] %s at pc=0x%08x insn=%08x  %-28s %s (insn #%llu)%s\n", qname[cat], pc, insn, d, detail,
             (unsigned long long)(vv_insns() - rep_back),
-            vv_quirk_warn ? (vv_quirk_on(cat) ? " [emulated]" : " [not emulated: standard MIPS]") : "");
-    if (vv_quirk_warn) return;
+            halt ? "" : qbug[cat] ? " [guest bug]" : vv_quirk_on(cat) ? " [emulated]" : " [not emulated: standard MIPS]");
+    if (!halt) return;
     fprintf(stderr, "[quirk] HW: %s\n", qdesc[cat]);
     vv_dump_regs(g_uc);
-    fprintf(stderr, "[stop] --halt-on-quirk: %s (use --halt-on-quirk=-%s to skip this category)\n", qname[cat], qname[cat]);
+    fprintf(stderr, "[stop] --halt-on-quirk: %s (use --halt-on-quirk=-%s to skip this category%s)\n", qname[cat], qname[cat],
+            qbug[cat] ? "; it still warns" : "");
     vv_quirk_halted = 1;
     uc_emu_stop(g_uc);
 }
@@ -165,6 +182,13 @@ static int ev(int cat, uint32_t pc, uint32_t insn, const char *fmt, ...) {
     if (!((vv_quirk_detect >> cat) & 1) || vv_quirk_halted) return vv_quirk_halted;
     char detail[256]; va_list ap; va_start(ap, fmt); vsnprintf(detail, sizeof detail, fmt, ap); va_end(ap);
     report(cat, pc, insn, detail);
+    return vv_quirk_halted;
+}
+int vv_quirk_report(int cat, uint32_t pc, const char *fmt, ...) {
+    qhits[cat]++;
+    if (!((vv_quirk_detect >> cat) & 1) || vv_quirk_halted) return vv_quirk_halted;
+    char detail[320]; va_list ap; va_start(ap, fmt); vsnprintf(detail, sizeof detail, fmt, ap); va_end(ap);
+    report(cat, pc, fetch(g_uc, pc), detail);
     return vv_quirk_halted;
 }
 /* An enabled quirk that vvizard cannot reproduce at this site: say so once per (quirk, pc). */
@@ -260,6 +284,21 @@ static uint32_t q_last_pc = 0xFFFFFFFFu;   /* last instruction decoded by pre() 
 static void p_rest(uc_engine *uc, unsigned r) { if (r && P.nrest < 4) { P.rr[P.nrest] = r; P.rv[P.nrest++] = gr(uc, r); P.active = 1; } }
 static void p_set(unsigned r, uint32_t v) { if (r && P.nset < 3) { P.qr[P.nset] = r; P.qv[P.nset++] = v; P.active = 1; } }
 
+void vv_quirk_init(uc_engine *uc) { g_uc = uc; }
+
+/* undef-reg: GPRs written since reset (bit r).  $zero is always defined. */
+static uint32_t reg_defined = 1;
+void vv_quirk_reg_defined(unsigned r) { if (r < 32) reg_defined |= 1u << r; }
+/* Registers whose VALUE insn i uses (for undef-reg): reads() minus the data operand of a store
+ * (saving a never-written register, e.g. a prologue spill or the ISR stash, is harmless) and minus
+ * xor/sub/subu rd,rs,rs whose result does not depend on rs. */
+static uint32_t value_reads(uint32_t i) {
+    unsigned op = i >> 26, rs = (i >> 21) & 31, rt = (i >> 16) & 31, fn = i & 63;
+    if (op >= 0x28 && op <= 0x2E) return 1u << rs;
+    if (op == 0 && rs == rt && (fn == 34 || fn == 35 || fn == 38)) return 0;
+    return reads(i);
+}
+
 void vv_quirk_cancel(void) { L.rt = 0; prev_cti = 0; B.pend = 0; memset(&P, 0, sizeof P); }
 
 static void post_fix(uc_engine *uc);
@@ -326,6 +365,16 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
     int16_t imm = (int16_t)(i & 0xFFFF);
     int in_ds = prev_cti; prev_cti = is_cti(i);
     memset(&P, 0, sizeof P); P.pc = pc; P.insn = i;
+
+    /* undef-reg: reading a register no instruction has written since reset */
+    uint32_t und = value_reads(i) & ~reg_defined;
+    if (und) {
+        unsigned r = (unsigned)__builtin_ctz(und);
+        reg_defined |= und;                              /* each register is reported once */
+        if (ev(VV_Q_UNDEF_REG, pc, i, "reads $%s, never written since reset (HW: 0 after FPGA configuration, the old value after a reset button press)%s",
+               R[r], und & ~(1u << r) ? " (and more)" : "")) return;
+    }
+    reg_defined |= writes(i);
 
     /* load-use: this insn reads the rt of the load right before it */
     if (L.rt) {
@@ -408,6 +457,12 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
                                          rs ? "ignores it" : "reads COP0150 register (0 if none)")) return;
             if (E(COP0)) { if (rs == 0) p_set(rt, vv_cop0_read(rd)); else vv_cop0_write(rd, gr(uc, rt)); }
         } else {                                         /* eret, di/ei, tlb*, wait, ...: nop */
+            if (i == 0x42000018u && vv_hw_in_isr()) {      /* irq-storm: returning with the cause still pending */
+                uint32_t st = vv_hw_status();
+                if (!E(COP0)) uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
+                vv_hw_isr_exit_check(st, pc, "eret");
+                if (vv_quirk_halted) return;
+            }
             if (ANY(RESERVED) && ev(VV_Q_RESERVED, pc, i, "COP0 op: HW nop")) return;
             if (E(RESERVED)) skip_insn(uc, VV_Q_RESERVED, pc, i, in_ds);
         }
@@ -476,6 +531,23 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
                                  a, v, placed, (c & VV_MMIO_DECODE) == VV_OW_UATX_DATA ? ", UART sends 0x00" :
                                  ((c & VV_MMIO_DECODE) & ~0x7Fu) == VV_OW_LCD_BASE ? ", LCD char gets 0x00" : "")) return;
         /* emulated in main.c mmio_write() */
+    }
+    /* D-cache path (nibbles 0x1/0x3), aligned: dcache-stale */
+    if (size && !(a & (size - 1)) && c != 0xFFFFFFFFu && (c >> 28) == 0x1 && ((a >> 28) == 0x1 || (a >> 28) == 0x3)) {
+        if (store) vv_dc_store(c, size, gr(uc, rt));
+        else {
+            uint32_t old, cur; uint8_t b[4];
+            if (vv_dc_load(c & ~3u, &old) && !uc_mem_read(uc, c & ~3u, b, 4) &&
+                old != (cur = (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3])) {
+                unsigned sh = 8 * (4 - size - (a & 3));
+                uint32_t v = size == 4 ? old : (old >> sh) & ((1u << (8 * size)) - 1);
+                if (op == 0x20 && (v & 0x80u) && !E(LB_SIGN)) v |= 0xFFFFFF00u;          /* lb  */
+                if (op == 0x21 && (v & 0x8000u) && !E(LB_SIGN)) v |= 0xFFFF0000u;        /* lh  */
+                if (ev(VV_Q_DCACHE_STALE, pc, i, "load of 0x%08x hits a D-cache line the GPU wrote behind the cache: HW returns the cached 0x%08x (DDR has 0x%08x)",
+                       a, old, cur)) return;
+                if (E(DCACHE_STALE) && rt) p_set(rt, v);
+            }
+        }
     }
     if (!store && (op == 0x20 || op == 0x21) && ANY(LB_SIGN) && rt) {
         P.lbchk = 1; P.lb_rt = rt; P.lb_mask = op == 0x20 ? 0xFFu : 0xFFFFu; P.active = 1;

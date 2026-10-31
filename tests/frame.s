@@ -28,4 +28,13 @@ L_40000020:
     lui $t0,0x8000                           # 40000044: 3c088000
     addiu $t5,$zero,1                        # 40000048: 240d0001
     sw $t5,80($t0)                           # 4000004c: ad0d0050
+# PF_FRAME takes effect at the end of the frame being scanned: wait until it reads back frame 1
+L_wait:
+    lw $t6,80($t0)
+    nop
+    srl $t6,$t6,22
+    andi $t6,$t6,0x3f
+    addiu $t7,$zero,1
+    bne $t6,$t7,L_wait
+    nop
     break                                    # 40000050: 0000000d

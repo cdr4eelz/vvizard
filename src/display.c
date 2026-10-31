@@ -11,7 +11,7 @@
 #include <time.h>
 
 static int have_window;
-static uint32_t cur_frame;              /* FRAME_BITS of last PF_FRAME write (reset 0) */
+static uint32_t cur_frame;              /* displayed frame (reset 0); hw.c switches it at frame end */
 static Texture2D tex;
 static uint8_t rgba[VV_SCREEN_W * VV_SCREEN_H * 4];
 static double last_draw;
@@ -153,7 +153,7 @@ int vv_disp_init(int want_window) {
     return 0;
 }
 void vv_disp_pf_write(uc_engine *uc, uint32_t v) {
-    cur_frame = frame_bits(v);              /* applied immediately (HW: at end of scan) */
+    cur_frame = frame_bits(v);              /* called by hw.c when the PixelFeeder switches frames */
     draw(uc);
 }
 uint32_t vv_disp_frame(void) { return cur_frame; }
