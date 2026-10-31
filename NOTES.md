@@ -364,3 +364,44 @@ proj7 via GIOS (built-in default program), window, `--warn-on-quirk --random-ddr
   the GPU (instant, on the emulator thread) and the per-frame redraw run ~3-4x as often.
 - Only the frame clock is wall time: Count/Compare, the RTC and the UART still count instructions, so proj7's
   timer-driven mm:ss clock advanced ~3 s in a 10 s wall run on Debian (173M cycles = 3.5 s at 50 MHz).
+
+## Threads (Oct 31 2026, branch `multithreading`; docs/MULTITHREADING-PLAN.md)
+proj7 via GIOS (built-in default program), `--frame-clock=emulated --random-ddr=1 --no-halt-on-quirk --max-insns
+50000000`, -O3, modes interleaved, 5 runs each, median (range). Wall includes startup (DDR fill, window).
+M instr/s is the `[frame]` line (guest run only). DEB13 = this Debian 13 VM, 8 vCPU, Xvfb :2 with llvmpipe. UBU24 =
+Intel Core 7 150U (2P+8E, 12 threads), Mesa Intel GL on the real X display :0, build copied to /tmp (not sshfs).
+
+| machine | mode | `--sync` wall / M instr/s | `--threads=on` wall / M instr/s | speedup (instr/s) |
+|---|---|---|---|---|
+| DEB13 | headless | 2296 ms (2292-2372) / 23.23 | 2202 ms (2177-2246) / 24.44 | 1.05x, wall -4% |
+| DEB13 | window | 2924 ms (2911-3124) / 18.56 | 2336 ms (2311-2408) / 23.73 | 1.28x, wall -20% |
+| UBU24 | headless | 2484 ms (2400-2558) / 21.50 | 2382 ms (2353-2416) / 22.24 | 1.03x, wall -4% |
+| UBU24 | window | 2864 ms (2832-2901) / 19.72 | 2775 ms (2566-2786) / 21.05 | 1.07x, wall -3% |
+
+`--frame-clock=wall --max-seconds 5`, 3 runs, instructions per frame (more = more guest work per 16.58 ms frame):
+
+| machine | mode | `--sync` | `--threads=on` |
+|---|---|---|---|
+| DEB13 | headless | 366844 / 368640 / 359074 | 413410 / 413941 / 412417 (1.13x) |
+| DEB13 | window | 287414 / 299049 / 297212 | 394172 / 407940 / 399122 (1.36x) |
+| UBU24 | headless | 330960 / 334348 / 338362 | 372233 / 380778 / 379377 (1.12x) |
+| UBU24 | window | 307431 / 295511 / 314412 | 334756 / 319298 / 325823 (1.07x) |
+
+- The plan expected about 1.2x (16% less wall) windowed on Linux. DEB13 gives 1.28x: with llvmpipe the draw costs
+  CPU (the `--sync` window costs 27% here), and the VM has spare cores. On UBU24 the Intel GPU does the drawing, so
+  the `--sync` window costs only ~15%. Less work leaves the emulator thread, and the frame copy stays on it. Single
+  runs on the hybrid CPU vary: one earlier threaded wall-mode run fell to 278747 instr/frame with 3 skipped
+  deadlines, probably the emulator thread on an E-core.
+- Headless gains a few percent with emulated frames, as the plan expected. Only the pixel stores move to the
+  worker; the count pass stays on the emulator. In wall mode proj7 fills a frame 60 times a second, so the worker
+  gives 1.12-1.13x.
+- Guest timing: threaded and `--sync` differ by design wherever the GPU is used (busy time, ready edge). Threaded
+  runs are repeatable (`tests/compare_runs.py`: 29/29 cases identical between two threaded runs; a 150M-instruction
+  proj7 run gives identical events, UART and dump windowed vs headless). With the same arguments, proj7's UART
+  output and the player test's frame positions are the same in both modes.
+- Grok Build review (read-only) of the first version found: a worker draw into a frame the guest runs code from
+  leaves stale translations (fixed: `uc_ctl_remove_cache` at the ready edge; the `tlb_fill` detection it relied on
+  also never fired after a data access, now `hook_code` tracks DDR code pages); host readers racing the worker
+  (fixed: `vv_gpu_settle`); the last frame not shown; `CLOCK_REALTIME` condvar wait; MMIO command lists. Accepted
+  as in the plan: guest loads and stores to a frame or list during the busy window race the worker (same race as
+  the FPGA, but not cycle-deterministic here).

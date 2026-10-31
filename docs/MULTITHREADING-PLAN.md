@@ -1,6 +1,49 @@
 # Multithreading plan
 
-This is a plan. Nothing in it is implemented yet. The default `make` stays `-O3 -g` until this lands. No new library: pthreads on Linux and macOS, and `-pthread` on the link line in the `Makefile`.
+## Status (Oct 31 2026, branch `multithreading`)
+
+Implemented (steps 1-5 on Linux; macOS not built or measured). `--threads=on` is the default; `--sync`,
+`--threads=1` and `--threads=off` keep the old single thread. Where the code differs from the text below:
+
+- **Step 2 was already done.** Every RAM region, DDR included, was a `uc_mem_map_ptr` host buffer before this
+  work (`src/main.c`). `VV_PF_PERIOD` is now 828960, not 865800.
+- **Completion cycle is fixed at launch, and the emulator waits for the worker.** At `GP_CODE`, the emulator walks
+  the list once without storing (`vv_gpu_count`: same `[gpu]` messages and stats as `vv_gpu_run`), so
+  `launch + pixels/4 + 32 * commands` is known before the worker starts. At that cycle `vv_hw_tick` calls
+  `vv_gpu_wait` if the worker is still drawing, then raises ready and Cause bit 12. Section 6 lets ready wait for
+  both instead. Waiting instead makes threaded runs repeatable: with `--frame-clock=emulated`, two threaded runs,
+  or a windowed and a headless one, give byte-identical event traces (`--event-trace`), UART output and dumps.
+  The worker is normally done long before.
+- **Inline draws.** Section 6 asks when the guest's executed DDR is "awkward to name". `hook_code` records the DDR
+  pages the guest has run code from, as a range. `tlb_fill` cannot do this: a data access had already filled the TLB
+  entry with execute permission. A launch whose 4 MiB frame overlaps that range draws inline with `uc_mem_write`,
+  with the same busy time. So does a list that has words in MMIO, which the worker cannot read. If code runs from a
+  frame while the worker is drawing it, `uc_ctl_remove_cache` drops that frame's translations at the ready edge.
+- **Host readers wait for the worker.** The window copy (`publish`) and PPM dumps (`grab`) call `vv_gpu_settle`
+  first, which waits for a worker drawing that frame. They show the finished draw, and the guest does not see the
+  wait.
+- **Headless** keeps the emulator on the main thread and adds only the GPU worker. **`--legacy-io`** keeps the GPU
+  synchronous.
+- **Triple buffer:** a lock-free 3-slot exchange (back/middle/front, a fresh bit on the middle index). The emulator
+  publishes at every frame end and on the `vv_disp_tick` timer, and once more at the end of the run.
+- **`gp-busy`** is a quirk-table entry (default 1, bug 1, like `tx-busy`). `--halt-on-quirk` therefore stops on it
+  by default; proj7 never triggers it.
+- **Logging:** one recursive mutex in `src/term.c` covers `vv_eprintf` and also `vv_uart_out` /
+  `vv_term_tick`, because both share the stdout color/flush state.
+- **New:** `--event-trace FILE` and `tests/compare_runs.py` (section 10's trace comparison), and `make test-threads`
+  (`tests/test_threads.py`, new `tests/hw/gpstat_async.s`, `dcache_async.s`, `gp_inline.s`).
+
+Checks: `make test` (all `--sync`): 67 hex, 8/8, 20/20, 55/55, 12/12, plus `test-threads` 9/9, on DEB13 and UBU24.
+`--sync` against the pre-threads build (00ac75e plus the event trace only) gives byte-identical UART, event trace,
+guest-state stderr and frame dumps on all 29 `compare_runs.py` cases, windowed proj7 included. `--sync` against
+threaded differs only in the 10 cases that launch the GPU. `make TSAN=1`: no reports on windowed and headless proj7
+(emulated and wall) or on `test-threads`, except `gp_inline`. That test runs code from a frame while the worker
+draws it, which is the accepted guest race in section 13.
+
+Measured (proj7, `--frame-clock=emulated --max-insns 50000000`, median of 5 interleaved runs; NOTES.md
+"Threads"): windowed DEB13 (Xvfb, llvmpipe) 18.56 -> 23.73 M instr/s (1.28x, wall -20%). Windowed UBU24
+(Intel GL) 19.72 -> 21.05 (1.07x, wall -3%). Headless 1.04-1.05x. In wall mode (60 fills/s), headless gains 1.12-1.13x
+on both machines.
 
 Baseline (NOTES.md "Window cost", Linux `-O3`, Xvfb, proj7 via GIOS, 50M instructions): about 10.7M guest instructions/s headless. A windowed run is about 5.6 s against about 4.6 s headless. The difference is about 1.0 s inside `draw()` (`src/display.c`): about 291 draws at about 2.7 ms, of which `draw_strip` is about 0.45 ms. `hook_code` (`src/main.c`) runs on every instruction and stays serial. GPU time is unmeasured.
 

@@ -150,7 +150,7 @@ uses as its shared memory (the stack is at the top of D-scratch).
       --random-ddr[=SEED]   --no-random-ddr   --expect REG=VAL   --color[=WHEN]
       --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]   --no-halt-on-quirk
       --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N   --frame-clock=emulated|wall
-      --no-guest-exit
+      --no-guest-exit   --threads=on|off (--sync = --threads=1)   --event-trace F
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
 
@@ -353,8 +353,27 @@ Beyond the CPU quirks, vvizard flags five guest software bugs. They **warn by de
 a read miss, never flushed or snooped. By default vvizard also returns the stale data, as the hardware does
 (`--quirks=-dcache-stale` returns DDR). Details per detector are in [QUIRKS.md](QUIRKS.md#guest-bug-detectors).
 
+## Threads (`--threads`, `--sync`)
+By default (`--threads=on`) the GPU draws command lists on a worker thread, and with a window the emulator runs
+on its own thread while the main thread draws the window (the frame is copied into a triple buffer at each frame
+end; raylib stays on the main thread). The guest then sees a busy GPU: GP_STATE's ready bits read 0 from the
+`GP_CODE` store until `launch + pixels/4 + 32 x commands` cycles, Cause bit 12 latches at that edge, and a
+`GP_CODE` store while busy is dropped (the `gp-busy` guest bug; wait with `GP_WAIT()`). The busy time is fixed at
+the launch and the emulator waits for the worker at that cycle if needed, so threaded runs with
+`--frame-clock=emulated` are repeatable (also windowed vs headless). `--sync` (= `--threads=1` / `--threads=off`) is
+the old single thread: the GPU finishes inside the store and is always ready; `make test` uses it, `make
+test-threads` covers the threaded mode. Speed (proj7, NOTES.md "Threads"): windowed 1.07-1.28x, headless ~1.05x
+(1.12x in wall mode). `make TSAN=1` builds with ThreadSanitizer.
+
+`--event-trace F` writes every guest-visible device event (Cause IP latches, IRQ entries, frame ends, GPU launch /
+busy / ready, UART bytes, MMIO writes, MMIO reads whose value changed) with its instruction count;
+`tests/compare_runs.py "A" "B"` runs two builds or modes over all test programs and proj7 and compares UART, event
+traces, guest-state stderr and frame dumps byte for byte.
+
 ## Tests
-`make test` runs `check-hex`, `test-hex`, `test-hw`, `test-quirks` and `test-player`. `make test-hex` runs `tests/test_hex.py`
+`make test` runs `check-hex`, `test-hex`, `test-hw`, `test-quirks`, `test-player` (all with `--sync`) and
+`test-threads` (`tests/test_threads.py`: the threaded GPU model, determinism of threaded runs, the player with
+`--threads=on`). `make test-hex` runs `tests/test_hex.py`
 (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-hw` runs `tests/test_hw.py`:
 `tests/hw/*.s` checks UART TX timing, the RX edge and holding register, the PixelFeeder frame latch, the timer and
 interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, the guest exit register (and `--no-guest-exit`), and makes every guest-bug detector warn,
@@ -389,8 +408,8 @@ underneath:
 - `--screenshot F.png` writes the whole window, strip included, as PNG when the run ends (needs a window; works under `xvfb-run`).
 
 - Frame N starts at `0x10000000 + N<<22`. The visible area is 800×600, rows start 4096 bytes apart, and each pixel is a 32-bit big-endian XRGB word.
-- **Window cost** (measured, see NOTES.md "Window cost"): the window costs ~18% against `--no-window` (50M
-  instructions: 5.6 s vs 4.6 s); the status strip is ~0.4 ms of a ~2.6 ms redraw (~2% of the run). The status text is
+- **Window cost** (measured, see NOTES.md "Window cost"; single-threaded, i.e. `--sync`, numbers): the window costs ~18% against `--no-window` (50M
+  instructions: 5.6 s vs 4.6 s; with the default `--threads=on` most of it moves to the main thread, NOTES.md "Threads"); the status strip is ~0.4 ms of a ~2.6 ms redraw (~2% of the run). The status text is
   re-read at most 4 times a second.
 - A PF_FRAME write (0x80000050) is shown from the next frame end (as on hardware; details in NOTES.md), and the window
   is redrawn at every frame end (also when the frame did not change, since the GPU may have drawn into it). With
