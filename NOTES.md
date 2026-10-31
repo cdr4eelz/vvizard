@@ -74,6 +74,10 @@ Makefile build leaves out (`--no-pad-sections`).
 - `gpcmds` + `gplaunch`: load gpcmds at 0x12003000 and gplaunch at 0x40000000, run with `--dump-frame`, check with `tests/check_gp.py`.
 - `hwprobe` (source `tests/hwprobe.s`, at 0x60000000, `--no-bios --no-random-ddr`): passes with `--expect s5=0 --expect s3=45` (default quirks).
 - `make test-hex` runs all of the above (`tests/test_hex.py`); `make test` = check-hex + test-hex + test-hw + test-quirks + test-player.
+- Every test command line names its program (`--load`), so it never gets vvizard's default program, and states the
+  settings it relies on: test-hex and test-hw pass `--no-window --quiet-mmio --no-random-ddr --no-bios --max-insns
+  1000000 --no-halt-on-quirk` (the pre-CLI built-in defaults), test-quirks `--max-insns 1000 --no-halt-on-quirk` before
+  its own `--halt-on-quirk=...` (later options win).
 - `test-hw` (`tests/test_hw.py`, programs `tests/hw/*.s` at 0x40000000, `--no-bios --no-random-ddr`): each program
   counts EXPECTs in `$s3` and mismatches in `$s5` (`tests/hw/hw.inc`); a test passes with `--expect s5=0 --expect
   s3=N` plus its stdout, `[hw]` counters and the exact set of `[guest bug]` categories reported:
@@ -108,8 +112,11 @@ Makefile build leaves out (`--no-pad-sections`).
   - `dcache_stale` (2): a load caches 0x10000000, the GPU FILLs frame 0 with 0x345678, the reload reads 0 (stale,
     `dcache-stale` warned), after evicting the line (load 0x10002000) it reads 0x345678; with
     `--quirks=-dcache-stale` the reload reads 0x345678 (still warned); halts with `--halt-on-quirk`.
-- `test-player` (`make test-player`, ~13 s since frames take their real 865800 cycles): boots GIOS -> proj7 headless with `--no-random-ddr` and an
-  `--input-script`. proj7 reads player input only in its UART-RX ISR (isr7.s `ISR_UARX`): keys
+- `test-player` (`make test-player`, ~13 s since frames take their real 865800 cycles): runs vvizard's **built-in
+  default program** (GIOS + draw + isr7 + proj7 + autorun from `<vvizard dir>/../../software`, so the cs150 layout is
+  needed) with only `--no-window --no-random-ddr --no-halt-on-quirk --input-script F --max-insns N`, and checks the
+  four images were loaded from that tree. (`--no-halt-on-quirk`: isr7 has a load-use hit, see the findings below.)
+  proj7 is driven by the `--input-script`. proj7 reads player input only in its UART-RX ISR (isr7.s `ISR_UARX`): keys
   `u i o / j k l / m , .` = up-left, up, up-right / left, centre (no-op), right / down-left, down, down-right;
   orthogonal = 6 px, diagonal = 4 px per key. Each of 12 segments (idle, up, idle, down, left, right, up-left,
   idle, up-right, down-left, down-right, `k`) sends the key 3 times, one byte per PF_FRAME write, then dumps
@@ -197,3 +204,51 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
 - Static scan of the dumps: every `jalr` in gios/proj7 has rd=$31 (0x40001f04 `jalr zero,zero` and the
   mfhi/mthi/mflo/addi hits at 0x40001fdc+ are data words); gios's 12 `lb` read string bytes, so they trip only on
   bytes >= 0x80; no add/sub, mult/div, syscall, lwl/lwr in code.
+
+### Finding: isr7 load-use (Oct 31 2026, software in the deb13 run layout)
+- With the default `--halt-on-quirk`, `./vvizard` (= the old `make run`) stops after 219130 instructions at
+  `[quirk] load-use at pc=0xc0000464 insn=21280001  addi t0,t1,1  reads $t1 loaded by insn at 0xc0000460` (in this
+  run the old and new value were both 0, so the result was the same). `make run-warn` / `--warn-on-quirk` keeps
+  going (31 load-use hits in 5M instructions, all in isr7).
+
+## Command line (`src/main.c`)
+- Parser: the C library's `getopt_long` (glibc and macOS libc; README "Running" has the reasoning). Options are long
+  only (plus `-h`) and use an enum of ids >= 256. Optional values (`--color`, `--trace`, `--random-ddr`,
+  `--halt-on-quirk`, `--warn-on-quirk`) also bind as the next word when it is a valid value (`opt_next()`), since
+  getopt_long only binds them with `=`.
+- Defaults live in the code: `default_app[]` (paths relative to the software tree), `VV_BIOS_REL`, `VV_AUTORUN`,
+  `max_insns = 0`, `opt_quiet_mmio = 1`, `qdet_on = 1` (halt), `opt_irq`, `opt_random_ddr`, color auto. The default
+  program is used when there is no `--load`, no ELF argument and no `--bare`.
+- The software tree defaults to `realpath(<exe dir>/../../software)`; the exe path is `/proc/self/exe` (Linux),
+  `_NSGetExecutablePath` (macOS), else `argv[0]` when it contains a `/`.
+- Quirk lists (`vv_quirk_parse(list, base, dflt, out)`) edit `base` left to right; `no-NAME` = `-NAME`; plain `NAME`
+  adds (it used to start a new set when first). For `--halt-on-quirk`/`--warn-on-quirk` the base and `default` are the
+  emulated set. Each `--quirks` edits the result of the previous one.
+
+## Window cost (status strip and frame pacing), Oct 31 2026
+Measured on the Debian 13 box, `-O3`, Xvfb `DISPLAY=:77` (Mesa llvmpipe), proj7 via GIOS, `--warn-on-quirk
+--random-ddr=1 --max-insns 50000000` (58 PF_FRAME writes), wall time, 2-3 runs each:
+
+| variant | wall | draws | time in draw() |
+|---|---|---|---|
+| window, strip drawn (old code) | 5.62 / 5.70 s | 291 | 0.77-0.79 s (2.7 ms/draw) |
+| window, strip not drawn (temporary patch) | 5.62 / 5.59 s | 299-304 | 0.67 s (2.2 ms/draw) |
+| window, no input polling between draws (temporary patch) | 5.75 / 5.54 s | 290 | 0.77-0.87 s |
+| `--no-window` | 4.77 / 4.61 s | 0 | - |
+| window, new code (status text at 4 Hz) | 5.41 / 5.46 / 5.70 s | | |
+| `--no-window`, new code | 4.44 / 4.51 / 4.65 s | | |
+
+- The window costs ~1 s of 5.6 s (~18%). The strip is ~0.45 ms of each ~2.6 ms redraw, ~0.1 s per run (~2%), within
+  run-to-run noise on wall time; the rest is `grab()` (600 `uc_mem_read`s of a 3200-byte row + byte swizzle),
+  `UpdateTexture` of the 1.9 MB frame and the GL draw/swap.  `user` > `wall` in windowed runs because llvmpipe
+  renders on its own threads.
+- When it's drawn: `draw()` runs from `vv_disp_tick()` (every 4096 instructions it checks the clock and redraws if
+  >= 1/60 s passed, else only `PollInputEvents()`) and on every PixelFeeder frame switch (`vv_disp_pf_write`, not
+  throttled). Nothing formats text or draws per instruction or per 4096-instruction batch: `vv_status_lines()`
+  (snprintf + two guest reads) runs once per draw, now at most 4 times a second (`STATUS_HZ`, `display.c`), and
+  again after the run stops (`vv_disp_status_dirty()`). The input poll between draws (~12k per run) costs nothing
+  measurable.
+- Frame pacing: vvizard never calls `SetTargetFPS` and doesn't set `FLAG_VSYNC_HINT`, so raylib uses swap interval
+  0 and `EndDrawing()` doesn't wait; emulation is never blocked on vsync (on Xvfb). ~52 draws/s here (60 Hz cap plus
+  frame switches). Not measured on macOS: if its GL driver forces vsync on the swap anyway, each draw could block up
+  to 16.7 ms and the uncapped redraw on every PF frame switch could matter much more there.

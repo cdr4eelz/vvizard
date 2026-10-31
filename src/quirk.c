@@ -82,24 +82,30 @@ static int lookup(const char *t) {
     return -1;
 }
 
-int vv_quirk_parse(const char *list, uint32_t base, uint32_t *out) {
+/* A list edits `base` left to right: NAME / +NAME add, -NAME / no-NAME remove, and the keywords
+ * none / all / default (= `dflt`) replace the set so far.  quiet: don't print errors (validation). */
+static int parse_list(const char *list, uint32_t base, uint32_t dflt, uint32_t *out, int quiet) {
     if (!list || !*list) { *out = base; return 0; }
     char *s = strdup(list), *save = NULL;
-    uint32_t m = (list[0] == '-' || list[0] == '+') ? base : 0;
+    uint32_t m = base;
     for (char *t = strtok_r(s, ",", &save); t; t = strtok_r(NULL, ",", &save)) {
         int neg = t[0] == '-'; if (neg || t[0] == '+') t++;
+        else if (!strncmp(t, "no-", 3)) { neg = 1; t += 3; }
         uint32_t bits;
         if (!strcmp(t, "all")) bits = ALL;
-        else if (!strcmp(t, "default")) bits = vv_quirk_default();
+        else if (!strcmp(t, "default")) bits = dflt;
         else if (!strcmp(t, "none")) { m = 0; continue; }
         else { int k = lookup(t);
-            if (k < 0) { vv_eprintf("unknown quirk '%s' (known: all,default,none,%s)\n", t, vv_quirk_names()); free(s); return -1; }
-            bits = 1u << k; }
-        m = neg ? (m & ~bits) : (m | bits);
+            if (k < 0) { if (!quiet) vv_eprintf("unknown quirk '%s' (known: all,default,none,%s)\n", t, vv_quirk_names());
+                         free(s); return -1; }
+            m = neg ? (m & ~(1u << k)) : (m | 1u << k); continue; }
+        m = neg ? (m & ~bits) : bits;        /* keywords set the whole set; -all / no-default remove */
     }
     free(s);
     *out = m; return 0;
 }
+int vv_quirk_parse(const char *list, uint32_t base, uint32_t dflt, uint32_t *out) { return parse_list(list, base, dflt, out, 0); }
+int vv_quirk_list_ok(const char *list) { uint32_t m; return list && *list && !parse_list(list, 0, 0, &m, 1); }
 
 /* ---------------- tiny MIPS disassembler (for the diagnostic only) ---------------- */
 static const char *R[32] = {"zero","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3","t4","t5","t6","t7",

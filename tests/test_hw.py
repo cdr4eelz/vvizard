@@ -10,7 +10,9 @@ VV = os.path.join(os.path.dirname(HERE), "vvizard")
 ENV = dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib"))
 ENV.pop("VVIZARD_QUIRKS", None)
 ENV.pop("NO_COLOR", None)
-BASE = ["--no-window", "--quiet-mmio", "--no-random-ddr", "--no-bios"]
+# Explicit settings (vvizard's own defaults are for the proj7 player: no limit, --halt-on-quirk);
+# a --load replaces the default program set.
+BASE = ["--no-window", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]
 
 
 def run(name, nexp, *extra, isr=False, stdin=None):

@@ -20,6 +20,7 @@ int  vv_disp_key_avail(void);
 int  vv_disp_key_take(void);                   /* -1 if none */
 void vv_disp_key_log(int c);                   /* show a key in the strip's recent-keys ticker */
 int  vv_disp_screenshot(uc_engine *uc, const char *png); /* whole window incl. strip */
+void vv_disp_status_dirty(void);               /* re-read the status lines at the next draw */
 /* Provided by main.c: the two status lines shown in the strip. */
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2);
 #endif

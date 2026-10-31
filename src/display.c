@@ -87,6 +87,9 @@ static void draw_lcd_char(int x0, int y0, uint8_t ch) {
         for (int c = 0; c < 5; c++)
             DrawRectangle(x0 + c * PITCH, y0 + r * PITCH, DOT, DOT, rows[r] >> (4 - c) & 1 ? LCD_ON : LCD_OFF);
 }
+#define STATUS_HZ 4
+static int status_dirty;
+void vv_disp_status_dirty(void) { status_dirty = 1; }
 static void draw_strip(uc_engine *uc) {
     DrawRectangle(0, VV_SCREEN_H, VV_SCREEN_W, VV_STRIP_H, STRIP);
     DrawRectangle(LCD_X - 3, LCD_Y - 3, LCD_W + 6, LCD_H + 6, BEZEL);
@@ -95,12 +98,18 @@ static void draw_strip(uc_engine *uc) {
         draw_lcd_char(LCD_X + PAD + (i % VV_LCD_COLS) * (CH_W + CH_GAP),
                       LCD_Y + PAD + (i / VV_LCD_COLS) * (CH_H + ROW_GAP), vv_lcd_get((unsigned)i));
     int x = LCD_X + LCD_W + 12, w = VV_SCREEN_W - x - 6, y = VV_SCREEN_H + 6;
-    char l1[160], l2[160];
-    vv_status_lines(uc, l1, sizeof l1, l2, sizeof l2);
+    /* The status text (instruction count etc.) is re-formatted at most STATUS_HZ times a second
+     * (and when vv_disp_status_dirty() was called), so the numbers stay readable; drawing it
+     * costs ~0.4 ms per frame either way (NOTES.md "Window cost"). */
+    static char l1[160], l2[160]; static double l_at = -1;
+    double t_now = now();
+    if (status_dirty || l_at < 0 || t_now - l_at >= 1.0 / STATUS_HZ) {
+        vv_status_lines(uc, l1, sizeof l1, l2, sizeof l2); l_at = t_now; status_dirty = 0; }
+    char l2w[sizeof l2]; memcpy(l2w, l2, sizeof l2);
     DrawText(l1, x, y, FS, TXT);
     {   /* second line word by word: PAUSED stands out */
         int wx = x, sp = MeasureText("a", FS);
-        for (char *p = l2; *p; ) {
+        for (char *p = l2w; *p; ) {
             if (*p == ' ') { wx += sp; p++; continue; }
             char *e = strchr(p, ' '), save = 0; if (e) { save = *e; *e = 0; }
             DrawText(p, wx, y + 16, FS, strcmp(p, "PAUSED") ? TXT : WARN);
@@ -115,7 +124,7 @@ static void draw_strip(uc_engine *uc) {
     int kx = x + MeasureText("keys", FS) + 8, kw = x + w - kx;
     DrawRectangle(kx, ty, kw, th, (Color){ 0x16, 0x16, 0x18, 255 });
     BeginScissorMode(kx, ty, kw, th);
-    double t = (now() - kl_last) / 0.12; float slide = t < 1 ? (float)(1 - t) : 0;
+    double t = (t_now - kl_last) / 0.12; float slide = t < 1 ? (float)(1 - t) : 0;
     int right = kx + kw - 4, first = 1;
     unsigned n = kl_n < KL_N ? kl_n : KL_N;
     for (unsigned i = 0; i < n && right > kx; i++) {
@@ -180,7 +189,7 @@ int vv_disp_dump_ppm(uc_engine *uc, const char *path) {
 /* Whole window (frame + strip) as PNG: render offscreen so the read-back is well defined. */
 int vv_disp_screenshot(uc_engine *uc, const char *path) {
     if (!have_window) { vv_eprintf("[disp] --screenshot needs the window\n"); return -1; }
-    grab(uc); UpdateTexture(tex, rgba);
+    grab(uc); UpdateTexture(tex, rgba); status_dirty = 1;
     RenderTexture2D rt = LoadRenderTexture(VV_SCREEN_W, VV_SCREEN_H + VV_STRIP_H);
     BeginTextureMode(rt); render(uc); EndTextureMode();
     Image img = LoadImageFromTexture(rt.texture); ImageFlipVertical(&img);

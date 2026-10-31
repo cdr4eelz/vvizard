@@ -58,9 +58,11 @@ extern int vv_quirk_halted;      /* set once a halt-mode quirk stopped the run *
 
 uint32_t vv_quirk_default(void);    /* the current-hardware set */
 uint32_t vv_quirk_bugs(void);       /* the guest-bug detectors */
-/* Parse a comma list into *out, starting from `base` if the list begins with '-' or '+'.
- * Tokens: default, none, all, NAME, -NAME, +NAME. Returns 0 ok, -1 bad. */
-int  vv_quirk_parse(const char *list, uint32_t base, uint32_t *out);
+/* Parse a comma list into *out.  The list edits `base` left to right: NAME and +NAME add,
+ * -NAME and no-NAME remove; the keywords none, all and default (= `dflt`) replace the set so far
+ * (-all / no-default remove those bits).  Returns 0 ok, -1 bad (message printed). */
+int  vv_quirk_parse(const char *list, uint32_t base, uint32_t dflt, uint32_t *out);
+int  vv_quirk_list_ok(const char *list);   /* 1 if every token is a known keyword / quirk (silent) */
 const char *vv_quirk_names(void);   /* "bal-untaken,load-use,..." */
 const char *vv_quirk_set_str(uint32_t m);  /* names in m, or "none" */
 void vv_quirk_list(FILE *f);        /* --list-quirks table */

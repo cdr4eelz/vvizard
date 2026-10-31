@@ -77,7 +77,7 @@ BUGS = "dcache-stale,tx-busy,rx-overrun,irq-storm,undef-reg"
 
 def run(path, *opts, at=0x40000000, env=ENV):
     r = subprocess.run([VV, "--no-window", "--quiet-mmio", "--no-random-ddr", "--max-insns", "1000",
-                        f"--quiet-quirk={BUGS}", *opts,
+                        "--no-halt-on-quirk", f"--quiet-quirk={BUGS}", *opts,
                         "--load", f"{path}@{at:#x}", "--entry", f"{at:#x}"],
                        stdin=subprocess.DEVNULL, capture_output=True, env=env)
     err = r.stderr.decode(errors="replace")
@@ -128,6 +128,15 @@ def main():
         ("--quirks=all", lambda: check(jalr, 0x40000000, ["--quirks=all"], ["ra=0x40000014"])),
         ("env VVIZARD_QUIRKS=-hilo", lambda: run(hilo, "--expect=t2=15", env=dict(ENV, VVIZARD_QUIRKS="-hilo"))[0] == 0),
         ("env then CLI +hilo", lambda: run(hilo, "--quirks=+hilo", "--expect=t2=0", env=dict(ENV, VVIZARD_QUIRKS="-hilo"))[0] == 0),
+        ("--quirks=no-hilo", lambda: check(hilo, 0x40000000, ["--quirks=no-hilo"], ["t2=15"])),
+        ("plain NAME adds to default", lambda: check(jalr, 0x40000000, ["--quirks=jalr-rd"], ["ra=0x40000014"])
+                                              and check(hilo, 0x40000000, ["--quirks=jalr-rd"], ["t2=0"])),
+        ("--quirks X --quirks Y edits", lambda: check(hilo, 0x40000000, ["--quirks", "none", "--quirks", "hilo"], ["t2=0"])
+                                              and check(hilo, 0x40000000, ["--quirks", "none,hilo,no-hilo"], ["t2=15"])),
+        ("--halt-on-quirk all (space)", lambda: run(prog("quirk/det_lb_neg")[0], "--halt-on-quirk", "all")[0] == 4),
+        ("--color never (space)", lambda: (lambda r: r[0] == 0 and "\x1b" not in r[3])(run(hilo, "--color", "never", "--expect=t2=0"))),
+        ("--help", lambda: (lambda r: r.returncode == 0 and "--bare" in r.stdout and "no-NAME" in r.stdout)(
+            subprocess.run([VV, "--help"], capture_output=True, env=ENV, text=True))),
         ("bad name -> rc 2", lambda: run(hilo, "--quirks=bogus")[0] == 2),
         ("--list-quirks", lambda: subprocess.run([VV, "--list-quirks"], capture_output=True, env=ENV, text=True).stdout.count("\n") == 22),
     ]

@@ -30,35 +30,85 @@ The `Makefile` finds Unicorn and raylib through pkg-config:
     make            # build ./vvizard (objects in build/)
     make fresh      # clean + rebuild
     make clean
-    make run        # boot GIOS and auto-start proj7 (see "make run defaults")
+    make run        # = ./vvizard: boot GIOS and auto-start proj7 (see "Running: defaults and make targets")
     make DEBUG=1    # unoptimized debug build (-O0 -g3 -fno-omit-frame-pointer)
 
 - vvizard itself is built with `-O3 -g` by default (`OPTFLAGS`, or replace `CFLAGS` entirely). `DEBUG=1` selects the
   old debug flags. `build/.flags` records the compile/link flags, and every object is rebuilt when they change, so
   switching between the two never mixes objects. The MIPS assembler settings for the test programs (`T_ASOPTS`) are
   separate and unchanged.
-- `BIOS ?=` defaults to `../../software/gios/gios.inst.bin`, so build GIOS first (`make` in `software/gios`), then
-  `software/proj_app6`. Its absolute path is compiled in as `VV_DEFAULT_BIOS`.
+- The default program comes from the cs150 software tree, so build GIOS first (`make` in `software/gios`), then
+  `software/proj_app7` and `software/draw`.
 - Big-endian is the default CPU mode. Pick one at run time with `--little` or `--big`.
 - A Unicorn in `~/.local` takes priority automatically (PKG_CONFIG_PATH and rpath are set in the Makefile, and
-  `make run` also sets `LD_LIBRARY_PATH`).
+  the `make run*` targets also set `LD_LIBRARY_PATH`).
 
-## make run defaults
-All images are loaded as raw bytes (`--load FILE@ADDR`), not by ELF sections:
-| variable | default | loaded at |
-|---|---|---|
-| `BIOS` | `software/gios/gios.inst.bin` | 0x40000000 (BIOS; the run starts here) |
-| `IMEM_APP` | `software/proj_app7/proj7.inst.bin` | 0x60000000 (I-scratch) |
-| `DMEM_APP` | `software/draw/draw.inst.bin` | 0x50000000 (D-scratch) |
-| `ISR_BIN` | `software/proj_app7/isr7.bin` | 0xC0000000 (ISR BRAM) |
-| `AUTORUN` | `jal 60000000\r` | typed at the GIOS prompt via `--uart-in` |
+## Running: defaults and make targets
+All settings are command-line arguments; the Makefile no longer holds any. **`./vvizard` with no arguments runs the
+proj7 player**, exactly what `make run` used to do. Every option takes `--opt=VALUE` or `--opt VALUE`
+(`./vvizard --help` lists them all).
 
-`ARGS` defaults to `--random-ddr --irq --max-insns 0` (no instruction limit, window on; interrupts are on by default now, `--irq` is kept for old command lines). Override any of these on the
-command line, e.g. `make run ARGS="--no-window --max-insns 200000"`, `make run AUTORUN=` (stay at the GIOS prompt),
-or `make run IMEM_APP=../../software/bench/bench.inst.bin`. `BIN=` replaces all the `--load`/`--entry` arguments.
-`QUIRKS` defaults to `--halt-on-quirk` (see [Hardware quirks](#hardware-quirks---halt-on-quirk)); `make run QUIRKS=` turns it off,
-`make run QUIRKS=--halt-on-quirk=all,-load-use` skips a category, `make run QUIRKS=--warn-on-quirk` logs without stopping.
-`COLOR` (default `auto`) is passed as `--color=$(COLOR)`, e.g. `make run COLOR=never`.
+**Default program.** The software tree SW is `--sw-dir DIR`, else `<directory of the vvizard executable>/../../software`
+(the executable's real path: `/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS), so with the cs150 layout
+`<project>/extern/vvizard/vvizard` + `<project>/software` it works from any working directory. All images are loaded as
+raw bytes:
+
+| image | loaded at |
+|---|---|
+| `SW/gios/gios.inst.bin` | 0x40000000 (BIOS; the run starts here, `--entry 0x40000000`) |
+| `SW/draw/draw.inst.bin` | 0x50000000 (D-scratch) |
+| `SW/proj_app7/isr7.bin` | 0xC0000000 (ISR BRAM) |
+| `SW/proj_app7/proj7.inst.bin` | 0x60000000 (I-scratch) |
+| autorun `jal 60000000\r` | typed at the GIOS prompt (as `--uart-in`) |
+
+If one of these files is missing, vvizard says which and exits 1.
+- **Giving a program replaces the default program**: any `--load FILE@ADDR` or ELF file argument means no default
+  loads and no autorun. The BIOS (`SW/gios/gios.inst.bin`) is still loaded unless a `--load` targets 0x4xxxxxxx, or
+  `--bios FILE` / `--no-bios` says otherwise; a missing BIOS is then only a warning. This keeps every existing command
+  line that names its own program (all the tests) running just that program.
+- `--bare`: only the BIOS, no loads, no autorun (an interactive GIOS prompt).
+- `--uart-in STR` replaces the autorun; `--no-autorun` drops it.
+
+**Default settings** and how to turn each off:
+
+| default | off / change |
+|---|---|
+| unlimited instructions | `--max-insns N` |
+| COP0150 interrupts (`--irq`) | `--no-irq` |
+| random DDR, seed from the time | `--random-ddr=SEED`, `--no-random-ddr` |
+| window, window keys to UART | `--no-window`, `--no-window-keys` |
+| MMIO accesses not logged (`--quiet-mmio`) | `--mmio-log` (= `--no-quiet-mmio`) |
+| `--quirks=default` (current hardware) | `--quirks=LIST`, `--no-quirks` |
+| `--halt-on-quirk` (emulated set) | `--halt-on-quirk=LIST`, `--warn-on-quirk[=LIST]`, `--no-halt-on-quirk` |
+| `--color=auto` | `--color=always`, `--color=never` |
+
+Before this change the built-in defaults were the test-oriented ones (1,000,000 instruction limit, MMIO log on, no
+halting); command lines that relied on them now say so (`--max-insns 1000000 --no-halt-on-quirk --mmio-log`).
+Options are applied left to right, so a later one wins (`--no-halt-on-quirk --halt-on-quirk=all` halts).
+
+**make targets** (all pass `EXTRA=` through, e.g. `make run EXTRA="--no-window --max-insns 200000"`):
+
+| target | runs |
+|---|---|
+| `make run` | `./vvizard` (the defaults above) |
+| `make run-std` | `--quirks=none`: standard MIPS32 (nothing emulated, so nothing to halt on; guest-bug detectors still warn) |
+| `make run-legacy-hw` | `--quirks=+jalr-rd,+lb-sign`: the hardware before fcdda7f |
+| `make run-warn` | `--warn-on-quirk`: log each quirk hit once and keep running |
+| `make run-debug` | `--mmio-log --warn-on-quirk=all`: every MMIO access and GP launch, and all quirks (also non-emulated) |
+| `make run-noirq` | `--no-irq` |
+| `make run-gios` | `--bare`: GIOS prompt only |
+
+The old variables map to arguments: `BIOS=F` -> `--bios F`, `AUTORUN=` -> `--no-autorun`, `HW_QUIRKS=L` -> `--quirks=L`,
+`QUIRKS=` -> `--no-halt-on-quirk`, `COLOR=C` -> `--color=C`, `IMEM_APP=...`/`BIN=...` -> spell the `--load`s out.
+
+**Argument parsing: `getopt_long`.** vvizard keeps the C library's `getopt_long` rather than vendoring a parser.
+It is in glibc and in the macOS (BSD) libc, so it needs nothing extra on Ubuntu, Debian or macOS (unlike glibc-only
+`argp`). It already handles `--opt=VALUE`, `--opt VALUE`, unique-prefix abbreviations and options mixed with file
+arguments. The one gap, `--opt VALUE` for options whose value is optional (`--color`, `--trace`, `--random-ddr`,
+`--halt-on-quirk`, `--warn-on-quirk`), is a 5-line helper in `src/main.c`: it takes the next word only if it is a valid
+value for that option, so `--trace prog.elf` still treats `prog.elf` as a program. A vendored single-file library
+such as cofyc/argparse would add a dependency and a license file without covering more (it has no optional-value
+options and its `--no-` handling is per-flag anyway).
 
 ## Output streams and color (`--color`)
 **stdout carries only the bytes the guest sends on the UART (TX).** Everything vvizard prints for itself goes to
@@ -84,18 +134,19 @@ proj7: `u i o / j k l / m , .` move, space pauses, `d`/`e` clock. `--no-window-k
 
 **Note:** `bench` and `draw` are linked to run at DDR 0x10000000 (`LDSTYLE := inject_cache`). Their raw bytes can be
 placed in the scratchpads, but they won't run correctly from there unless relinked. proj7 (0x60000000) and isr7
-(0xC0000000) are linked for where they're loaded. Also, `DMEM_APP` overwrites the start of D-scratch, which proj7
+(0xC0000000) are linked for where they're loaded. Also, the default `draw.inst.bin` load overwrites the start of D-scratch, which proj7
 uses as its shared memory (the stack is at the top of D-scratch).
 
 ## Usage
-    ./vvizard [opts] [isr.elf ...] [prog.elf]      # entry = last ELF's e_entry
+    ./vvizard [opts] [isr.elf ...] [prog.elf]      # entry = last ELF's e_entry; no program = the default program
+      --bare  --sw-dir DIR  --bios FILE  --no-bios  --uart-in STR  --no-autorun
       --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (default: not preset)
-      --max-insns N (1e6, 0=unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio
-      --little | --big   --bios FILE   --no-bios   --no-window   --no-window-keys   --dump-frame F.ppm   --hold
+      --max-insns N (default 0 = unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio  --mmio-log
+      --little | --big   --window | --no-window   --no-window-keys   --dump-frame F.ppm   --hold
       --dump-lcd   --screenshot F.png
-      --random-ddr[=SEED]   --no-random-ddr   --uart-in STR   --expect REG=VAL
-      --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]
-      --quiet-quirk=LIST   --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N
+      --random-ddr[=SEED]   --no-random-ddr   --expect REG=VAL   --color[=WHEN]
+      --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]   --no-halt-on-quirk
+      --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
 
@@ -123,11 +174,11 @@ but still available to reproduce old hardware. `bal-untaken` (an RTL bug that is
     --no-quirks          standard MIPS32 (same as --quirks=none)
     --list-quirks        print the quirk table (defaults, hardware behaviour, RTL refs), then exit
     VVIZARD_QUIRKS=LIST  environment variable, applied before --quirks
-    make run HW_QUIRKS=LIST   (default: default)
 
-LIST is comma-separated: `default`, `none`, `all`, `NAME`, `-NAME`, `+NAME`. If it starts with `-NAME` or `+NAME`,
-it edits the set so far (the defaults, or VVIZARD_QUIRKS). Otherwise it builds a new set.
-Examples: `--quirks=-load-use`, `--quirks=+jalr-rd,+lb-sign` (old hardware), `--quirks=none,hilo`.
+LIST is comma-separated and edits the set so far (the defaults, then VVIZARD_QUIRKS, then each `--quirks` in order)
+left to right: `NAME` or `+NAME` adds, `-NAME` or `no-NAME` removes, and `none`, `all` and `default` replace the set.
+Examples: `--quirks=no-load-use` (= `-load-use`), `--quirks=jalr-rd,lb-sign` (= `+jalr-rd,+lb-sign`, old hardware),
+`--quirks=none,hilo` (only `hilo`). (Before, a list starting with a plain NAME built a new set; write `none,NAME` for that.)
 `uart-lane` is accepted as an old name for `mmio-lane`.
 
 Quirks, all on by default: `bal-untaken`, `load-use`, `unmapped`, `unmapped-fetch`, `bios-store`, `ddr2`,
@@ -140,15 +191,16 @@ short form.
 **Detection.** `--halt-on-quirk[=LIST]` stops when the guest hits a quirk. It prints the PC, the instruction and
 its disassembly, the quirk name, the hardware behaviour and a register dump, then exits with status **4**. It
 stops *before* the instruction runs. With no LIST, it covers the quirks being emulated. A LIST starting with
-`-NAME` removes from that set, and `all` also reports quirks that aren't emulated (for example, `jalr` with rd
+`-NAME`/`no-NAME` removes from that set (`none,NAME` = only NAME), and `all` also reports quirks that aren't emulated (for example, `jalr` with rd
 != `$31`). `--warn-on-quirk[=LIST]` logs each (quirk, PC) once, tagged `[emulated]` or `[not emulated: standard
 MIPS]`, and keeps running. Both print a `[quirk] summary` of hit counts at exit. The guest-bug detectors (below) always warn unless
-`--quiet-quirk` silences them, and `--halt-on-quirk` also stops on them. `make run` passes
-`QUIRKS=--halt-on-quirk` by default.
+`--quiet-quirk` silences them, and `--halt-on-quirk` also stops on them. **`--halt-on-quirk` is on by default**;
+`--warn-on-quirk` keeps running, `--no-halt-on-quirk` turns detection of emulated quirks off.
 
 **Cost.** With all quirks off and no detection, the extra cost is one branch per instruction. Otherwise each
 instruction costs one 4-byte read and a decode: about 30% slower at -O0 (GIOS+proj7, 20M instructions: 4.4 s
-with `--no-quirks`, 5.8 s by default). Current GIOS, proj7 and isr7 hit no quirks in that run. See QUIRKS.md for the
+with `--no-quirks`, 5.8 s by default). GIOS, proj7 and isr7 of Oct 28 hit no quirks in that run (a later isr7 hits
+`load-use`, NOTES.md "Finding: isr7 load-use"). See QUIRKS.md for the
 evidence and NOTES.md for the emulation design.
 
 ## Memory map (`src/memmap.h` is the single table)
@@ -242,7 +294,7 @@ interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, and 
 halt (exit 4) and go quiet, and checks the stdout/stderr split and `--color`. `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
 `--input-script` UART keys and UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`: one tiny program per
 quirk for detection, with clean counterparts, each quirk on and off against the standard MIPS result, and the CLI and
-environment interface. How to run them and their pass conditions are in NOTES.md.
+environment interface (list syntax incl. `no-NAME`, `--opt VALUE` forms, `--help`). How to run them and their pass conditions are in NOTES.md.
 
 **Test programs are built from assembly.** Every test's machine code is a `.s` file: `tests/*.s` (the programs above),
 `tests/hw/*.s` (the hardware tests, macros in `tests/hw/hw.inc`) and `tests/quirk/det_*.s` / `emu_*.s` (the quirk snippets). `make tests` (a dependency of the test targets) assembles
@@ -270,6 +322,9 @@ underneath:
 - `--screenshot F.png` writes the whole window, strip included, as PNG when the run ends (needs a window; works under `xvfb-run`).
 
 - Frame N starts at `0x10000000 + N<<22`. The visible area is 800×600, rows start 4096 bytes apart, and each pixel is a 32-bit big-endian XRGB word.
+- **Window cost** (measured, see NOTES.md "Window cost"): the window costs ~18% against `--no-window` (50M
+  instructions: 5.6 s vs 4.6 s); the status strip is ~0.4 ms of a ~2.6 ms redraw (~2% of the run). The status text is
+  re-read at most 4 times a second.
 - A PF_FRAME write (0x80000050) switches frames immediately (hardware waits for the end of the scan; details in NOTES.md).
 - Options:
   - `--no-window` runs without a window.
@@ -279,10 +334,11 @@ underneath:
 
 ## Default BIOS (gios)
 proj_app* programs are linked against **gios**: `FIXED_ELF ?= ../gios/gios.elf` in `software/proj_app7/Makefile:5`. With bios150v3 loaded instead, proj7 jumps to address 0 because the two BIOS images put different functions at the same addresses.
-- By default vvizard loads `VV_DEFAULT_BIOS` raw at 0x40000000. The Makefile sets it from `BIOS ?= $(abspath ../../software/gios/gios.inst.bin)`. If the macro is not defined, the path `<exe dir>/../../software/gios/gios.inst.bin` is used.
+- By default vvizard loads `SW/gios/gios.inst.bin` raw at 0x40000000, SW being `--sw-dir` or `<exe dir>/../../software`
+  (resolved at run time; nothing is compiled in).
 - The default BIOS is skipped when any `--load FILE@0x4xxxxxxx` is given. `--bios FILE` overrides the default, and `--no-bios` disables it.
-- If the default file is missing, you get a warning and the run continues.
-- `make run` always passes `--bios $(BIOS)`.
+- If the default file is missing: with the default program that's an error (exit 1); with your own `--load`/ELF it's a
+  warning and the run continues.
 
 ## GPU command interpreter (`src/gpu.c`)
 A write to GP_CODE (0x80000058) runs the GPU on the big-endian command list at that address. It draws into frame `FRAME_BITS(GP_FRAME)` and finishes instantly, so GP_STATE always reads as ready. The GPU-done interrupt (IB_GPU=12) is not raised yet.

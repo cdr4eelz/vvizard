@@ -10,13 +10,13 @@ off. The default set is **the current hardware** (cs150 commit fcdda7f). RTL pat
     ./vvizard --list-quirks              # this list, with defaults and RTL refs, from the binary
     ./vvizard --quirks=LIST ...          # quirks to emulate (default: default)
     ./vvizard --no-quirks ...            # plain MIPS32 (= --quirks=none)
-    VVIZARD_QUIRKS=LIST ./vvizard ...    # applied first; --quirks overrides it
-    make run HW_QUIRKS=LIST              # Makefile default: HW_QUIRKS ?= default
+    VVIZARD_QUIRKS=LIST ./vvizard ...    # applied first; --quirks edits it
+    make run-std / make run-legacy-hw    # --quirks=none / --quirks=+jalr-rd,+lb-sign
 
-LIST is comma-separated: `default`, `none`, `all`, `NAME`, `-NAME`, `+NAME`. If it starts with `-NAME` or `+NAME`,
-it edits the set so far (the defaults, or `VVIZARD_QUIRKS`). Otherwise it builds a new set. Examples:
-- `--quirks=-load-use`: current hardware without the load-use emulation.
-- `--quirks=+jalr-rd,+lb-sign`: hardware before fcdda7f.
+LIST is comma-separated and edits the set so far (the defaults, then `VVIZARD_QUIRKS`, then each `--quirks`) left
+to right: `NAME` or `+NAME` adds, `-NAME` or `no-NAME` removes, `none`, `all` and `default` replace the set. Examples:
+- `--quirks=no-load-use` (or `-load-use`): current hardware without the load-use emulation.
+- `--quirks=jalr-rd,lb-sign` (or `+jalr-rd,+lb-sign`): hardware before fcdda7f.
 - `--quirks=none,hilo`: only `hilo`.
 
 The old name `uart-lane` is accepted for `mmio-lane`.
@@ -26,10 +26,11 @@ The old name `uart-lane` is accepted for `mmio-lane`.
   its disassembly, the quirk name, the hardware behaviour and the registers, then exits with status 4.
 - `--warn-on-quirk[=LIST]` logs each (quirk, PC) once, tagged `[emulated]` or `[not emulated: standard MIPS]`, and
   keeps running.
-- With no LIST, both report the quirks being emulated. `-NAME` removes one from that set, and `all` also reports
+- With no LIST, both report the quirks being emulated. `-NAME`/`no-NAME` removes one from that set (`none,NAME`:
+  only NAME), and `all` also reports
   quirks that aren't emulated, such as the fixed `jalr-rd` and `lb-sign`.
 - Both print a `[quirk] summary` of hit counts at exit.
-- `make run` passes `QUIRKS ?= --halt-on-quirk`.
+- `--halt-on-quirk` is vvizard's default (`--warn-on-quirk` or `--no-halt-on-quirk` to change; `make run-warn`).
 - If an enabled quirk can't be reproduced at a given site, vvizard prints `[quirk] NAME ... NOT emulated (why)`
   once per PC and uses the standard result.
 - The five [guest-bug detectors](#guest-bug-detectors) (`dcache-stale`, `tx-busy`, `rx-overrun`, `irq-storm`,

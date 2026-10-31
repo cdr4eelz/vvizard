@@ -66,12 +66,10 @@ def main():
     script = os.path.join(tmp, "input.txt")
     open(script, "w").write("\n".join(lines) + "\n")
     max_insns = (f + 4) * 900000      # PixelFeeder frame = 865800 cycles
-    cmd = [VV, "--no-window", "--quiet-mmio", "--no-random-ddr",
-           "--bios", f"{SW}/gios/gios.inst.bin", "--uart-in", "jal 60000000\\r",
-           "--input-script", script, "--max-insns", str(max_insns),
-           "--load", f"{SW}/draw/draw.inst.bin@0x50000000",
-           "--load", f"{SW}/proj_app7/isr7.bin@0xC0000000",
-           "--load", f"{SW}/proj_app7/proj7.inst.bin@0x60000000", "--entry", "0x40000000"]
+    # vvizard's built-in default program (= GIOS + draw + isr7 + proj7, autorun 'jal 60000000\r'),
+    # from <exe dir>/../../software; --no-halt-on-quirk: isr7 has load-use hits the default would stop on.
+    cmd = [VV, "--no-window", "--no-random-ddr", "--no-halt-on-quirk",
+           "--input-script", script, "--max-insns", str(max_insns)]
     t0 = time.time()
     r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.PIPE, text=True, env=dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib")))
@@ -79,6 +77,10 @@ def main():
     irq = [l for l in r.stderr.splitlines() if l.startswith("[irq]")]
     print(f"vvizard rc={r.returncode} {emu_t:.2f}s; {irq[0] if irq else 'no [irq] line'}")
     missing = [p for p in dumps if not os.path.exists(p)]
+    loaded = [f"{SW}/{f}" in r.stderr for f in ("gios/gios.inst.bin", "draw/draw.inst.bin",
+                                                 "proj_app7/isr7.bin", "proj_app7/proj7.inst.bin")]
+    if not all(loaded):
+        print(r.stderr[-3000:]); print("FAIL: default program not loaded from", SW, loaded); return 1
     if r.returncode or missing:
         print(r.stderr[-3000:]); print("FAIL: emulator error or missing dumps", missing); return 1
     pos = [locate(p) for p in dumps]

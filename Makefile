@@ -3,7 +3,7 @@ UNICORN_PC := $(HOME)/.local/lib/pkgconfig
 export PKG_CONFIG_PATH := $(UNICORN_PC)$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH))
 
 # VVIZARD: Unicorn-based MIPS emulator for the cs150 project
-# Usage: make [all|clean|fresh|run BIN=path/to/prog.elf [ARGS=...]] [DEBUG=1]
+# Usage: make [all|clean|fresh|test|run|run-<variant>] [DEBUG=1] [EXTRA='vvizard args']
 
 TARGET     := vvizard
 SRC_DIR    := src
@@ -31,35 +31,13 @@ SRCS := $(wildcard $(SRC_DIR)/*.c)
 HDRS := $(wildcard $(SRC_DIR)/*.h)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-BIOS ?= $(abspath ../../software/gios/gios.inst.bin)
-
-SW   := $(abspath ../../software)
-# Raw-byte images (no ELF parsing). GIOS is the BIOS at 0x40000000 (BIOS var above).
-# IMEM_APP -> I-scratch 0x60000000 (bench alternative: IMEM_APP=$(SW)/bench/bench.inst.bin)
-# DMEM_APP -> D-scratch 0x50000000;  ISR_BIN -> ISR BRAM 0xC0000000
-IMEM_APP ?= $(SW)/proj_app7/proj7.inst.bin
-DMEM_APP ?= $(SW)/draw/draw.inst.bin
-ISR_BIN  ?= $(SW)/proj_app7/isr7.bin
-# Default: boot GIOS (AUTORUN types "jal 60000000" at its prompt), random DDR, no limit, window on.
-BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM_APP)@0x60000000 --entry 0x40000000
-# Auto-type the jump to the IMEM app at the GIOS prompt (GIOS ends tokens on space/CR).
-AUTORUN ?= jal 60000000\r
-ARGS ?= --random-ddr --irq --max-insns 0 --quiet-mmio
-# --color: auto (color when stdout is a terminal and NO_COLOR is unset), always or never
-COLOR ?= auto
-# Extra flags appended to ARGS without replacing the defaults, e.g. EXTRA=--trace=100
+# Run settings are vvizard's own command-line arguments (./vvizard --help); with no arguments it
+# runs the proj7 player from <vvizard dir>/../../software.  The run-* targets below are canned
+# alternatives; EXTRA= appends more arguments to any of them, e.g. make run EXTRA=--trace=100
 EXTRA ?=
-# MIPS150 hardware quirks to EMULATE (README "Hardware quirks"; ./vvizard --list-quirks).
-# 'default' = the current hardware (fixed bugs jalr-rd/lb-sign off, bal-untaken on).
-# e.g. HW_QUIRKS=none (standard MIPS32), HW_QUIRKS=-load-use, HW_QUIRKS=+jalr-rd,+lb-sign (old HW).
-# The VVIZARD_QUIRKS environment variable is applied first; HW_QUIRKS overrides it.
-HW_QUIRKS ?= default
-# Stop with a diagnostic when the guest hits one of the emulated quirks.
-# QUIRKS= disables it; e.g. QUIRKS=--halt-on-quirk=-load-use, QUIRKS=--halt-on-quirk=all
-# (also non-emulated ones) or QUIRKS=--warn-on-quirk.
-QUIRKS ?= --halt-on-quirk
+VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
-.PHONY: all clean fresh run FORCE test test-hex test-hw test-player test-quirks tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -122,7 +100,7 @@ refresh-hex: tests
 
 # Flags stamp: rewritten only when the compile/link command changes, so switching DEBUG/CFLAGS rebuilds everything.
 FLAGS_STAMP := $(BUILD_DIR)/.flags
-FLAGS_LINE   = $(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) BIOS=$(BIOS) LINK=$(LDFLAGS) $(UNICORN_LIBS) $(RAYLIB_LIBS)
+FLAGS_LINE   = $(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) LINK=$(LDFLAGS) $(UNICORN_LIBS) $(RAYLIB_LIBS)
 $(FLAGS_STAMP): FORCE | $(BUILD_DIR)
 	@echo '$(subst ','\'',$(FLAGS_LINE))' | cmp -s - $@ || echo '$(subst ','\'',$(FLAGS_LINE))' > $@
 
@@ -132,14 +110,30 @@ $(TARGET): $(OBJS) $(FLAGS_STAMP)
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) -c $< -o $@
 
-# Default BIOS path compiled into main.c (override at run time with --bios / --no-bios)
-$(BUILD_DIR)/main.o: CPPFLAGS += -DVV_DEFAULT_BIOS='"$(BIOS)"'
-
 $(BUILD_DIR):
 	mkdir -p $@
 
+# make run: the built-in defaults (proj7 via GIOS, quirks=default, halt on a quirk hit, IRQs, random DDR)
 run: $(TARGET)
-	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') --quirks=$(HW_QUIRKS) $(QUIRKS) $(if $(COLOR),--color=$(COLOR)) $(ARGS) $(EXTRA) $(BIN)
+	$(VV_RUN) $(EXTRA)
+# standard MIPS32: no quirks emulated (so none to halt on; guest-bug detectors still warn)
+run-std: $(TARGET)
+	$(VV_RUN) --quirks=none $(EXTRA)
+# the hardware before fcdda7f (jalr always linked $31, lb/lh zero-extended)
+run-legacy-hw: $(TARGET)
+	$(VV_RUN) --quirks=+jalr-rd,+lb-sign $(EXTRA)
+# keep running through quirk hits, logging each (quirk, pc) once
+run-warn: $(TARGET)
+	$(VV_RUN) --warn-on-quirk $(EXTRA)
+# debugging: log every MMIO access / GP launch, and warn on all quirks (also non-emulated ones)
+run-debug: $(TARGET)
+	$(VV_RUN) --mmio-log --warn-on-quirk=all $(EXTRA)
+# no interrupts taken
+run-noirq: $(TARGET)
+	$(VV_RUN) --no-irq $(EXTRA)
+# GIOS only: no app loaded, no autorun (type at the GIOS prompt in the window or terminal)
+run-gios: $(TARGET)
+	$(VV_RUN) --bare $(EXTRA)
 
 test-player: $(TARGET)
 	python3 tests/test_player.py
