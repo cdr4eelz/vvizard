@@ -12,7 +12,7 @@ ENV.pop("VVIZARD_QUIRKS", None)
 ENV.pop("NO_COLOR", None)
 # Explicit settings (vvizard's own defaults are for the proj7 player: no limit, --halt-on-quirk);
 # a --load replaces the default program set.
-BASE = ["--no-window", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]
+BASE = ["--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]
 
 
 def run(name, nexp, *extra, isr=False, stdin=None):
@@ -53,12 +53,23 @@ def t_uart_rx_hold(): # one holding register: overwrite (rx-overrun reported, ru
     # stdin (not --uart-in, which waits for each byte to be read) sent back to back (--uart-rx-gap 0)
     r = run("uart_rxover", 2, "--uart-rx-gap", "0", stdin=b"XYZ")
     return r.returncode == 0 and bugs(r) == ["rx-overrun"] and "rx 3 (overrun 2)" in hwline(r)
-def t_pf():           # PF_FRAME latched at the frame end (865800 cycles), Cause bit 13
-    r = run("pf", 5)
+def t_pf():           # PF_FRAME latched at the frame end (828960 cycles), Cause bit 13
+    r = run("pf", 6, "--max-insns", "2000000")   # both frame ends (the 2nd at 1657920 cycles) + break
     return r.returncode == 0 and not bugs(r)
 def t_pf_period():    # --pf-period 0: switches at once (the pf.s 2nd EXPECT then fails: s5 != 0)
     r = run("pf", None, "--pf-period", "0", "--max-insns", "200000", "--expect", "t2=0x10400000")
     return "[expect] $t2 = 0x10400000" in r.err and "PASS" in r.err.split("[expect] $t2")[1].splitlines()[0]
+def t_pf_custom():    # --pf-period 865800 (the old 1040x666 default): frame ends at exactly k x 865800 cycles
+    # (pf.s's own ranges are for 828960, so its EXPECTs fail; the Counts it saved are checked instead)
+    r = run("pf", None, "--pf-period", "865800", "--max-insns", "2000000", "--expect", "s0=865806", "--expect", "s1=1731613")
+    return r.returncode == 0 and "clock emulated (one frame per 865800 cycles): 2 frames" in r.err
+def t_frame_clock():  # --frame-clock=wall: frame ends every 16.5792 ms of host time (2 frames >= 33.16 ms);
+    # bad mode: usage error.  (Timing bounds are loose: only the lower one is exact.)
+    r = run("pf", None, "--frame-clock=wall", "--max-insns", "0")
+    m = re.search(r"^\[frame\] clock wall \(one frame per 16\.5792 ms\): 2 frames in ([0-9.]+) s wall", r.err, re.M)
+    bad = run("pf", None, "--frame-clock=fast")
+    return r.returncode == 0 and "frame-clock=wall" in r.err and bool(m) and 0.033 <= float(m.group(1)) < 10 \
+        and "[expect]" not in r.err and bad.returncode == 2
 def t_timer():        # Count == Compare -> bit 15; Compare write clears it; ISR entry, EPC
     r = run("timer", 5, isr=True)
     return r.returncode == 0 and not bugs(r)
@@ -133,7 +144,7 @@ def t_color():        # auto (not a tty) = off; always: green UART run on stdout
         and "\x1b[1;36mpc\x1b[0m=" in w.err and bad.returncode == 2 and bad.stdout == b""
 
 
-TESTS = [t_uart_tx, t_uart_rx, t_uart_rx_hold, t_pf, t_pf_period, t_timer, t_irq_defer, t_gp_status, t_reset_regs,
+TESTS = [t_uart_tx, t_uart_rx, t_uart_rx_hold, t_pf, t_pf_period, t_pf_custom, t_frame_clock, t_timer, t_irq_defer, t_gp_status, t_reset_regs,
          t_legacy_io, t_tx_busy, t_rx_overrun, t_irq_storm, t_undef_reg, t_dcache_stale,
          t_guest_exit, t_streams, t_color]
 

@@ -387,7 +387,7 @@ These are found by RTL reading. vvizard keeps its standard or simplified behavio
   both CNT_CYCLE and CNT_INST, and COP0 Count also counts instructions. All device timing (UART, PixelFeeder,
   timer) uses this one-cycle-per-instruction clock, so it runs early wherever the hardware stalls.
 - **GPU busy time:** a launch completes at once (all engines ready, Cause bit 12 at the launch).
-- **PixelFeeder frame phase:** frame ends are at multiples of 865800 cycles from reset; the real phase depends on
+- **PixelFeeder frame phase:** frame ends are at multiples of 828960 cycles (`--pf-period`) from the first instruction, or of 16.579 ms of host time with `--frame-clock=wall`; the real phase depends on
   the DVI timing and DDR arbitration.
 - **Interrupt deferral:** `cpu/CPUMIPS.v:114` (DO_ISR) replaces the fetch after the instruction in F, unless that
   instruction could branch or is an `mtc0`, or the previous cycle took a branch (WAS_Branch: the instruction is the

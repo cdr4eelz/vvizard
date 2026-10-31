@@ -73,7 +73,8 @@ If one of these files is missing, vvizard says which and exits 1.
 
 | default | off / change |
 |---|---|
-| unlimited instructions | `--max-insns N` |
+| unlimited instructions | `--max-insns N`, `--max-seconds S` |
+| frame ends every 828960 emulated cycles (`--frame-clock=emulated`) | `--frame-clock=wall`, `--pf-period N` |
 | COP0150 interrupts (`--irq`) | `--no-irq` |
 | random DDR, seed from the time | `--random-ddr=SEED`, `--no-random-ddr` |
 | window, window keys to UART | `--no-window`, `--no-window-keys` |
@@ -143,16 +144,17 @@ uses as its shared memory (the stack is at the top of D-scratch).
     ./vvizard [opts] [isr.elf ...] [prog.elf]      # entry = last ELF's e_entry; no program = the default program
       --bare  --sw-dir DIR  --bios FILE  --no-bios  --uart-in STR  --no-autorun
       --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (default: not preset)
-      --max-insns N (default 0 = unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio  --mmio-log
+      --max-insns N (default 0 = unlimited)  --max-seconds S  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio  --mmio-log
       --little | --big   --window | --no-window   --no-window-keys   --dump-frame F.ppm   --hold
       --dump-lcd   --screenshot F.png
       --random-ddr[=SEED]   --no-random-ddr   --expect REG=VAL   --color[=WHEN]
       --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]   --no-halt-on-quirk
-      --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N   --no-guest-exit
+      --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N   --frame-clock=emulated|wall
+      --no-guest-exit
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
 
-**Exit status:** 0 normal stop (`break`, `--max-insns`, `--until`, window closed, Esc); 1 setup or CPU error; 2 usage;
+**Exit status:** 0 normal stop (`break`, `--max-insns`, `--max-seconds`, `--until`, window closed, Esc); 1 setup or CPU error; 2 usage;
 3 an `--expect` failed; 4 `--halt-on-quirk` stopped; a guest exit-register store: the stored code & 0xFF (see below).
 
 ### Ending a run from guest code
@@ -277,7 +279,7 @@ and drop stores in every quirk setting.
 - **LCD (0x80000100-0x8000017C, `src/lcd.c`):** LCDText2x16.v's 32-character buffer behind `LCDText2x16_MemPort`. Character i (0-15 line 1, 16-31 line 2, left to right) is at `0x80000100 + 4*i` and takes `dina[7:0]` of any store (any byte mask). With `mmio-lane` (the default), that's the lane-placed word, so `sw` and `sb` at +3 (`sh` at +2) write the byte, and `sb` at +0..+2 (`sh` at +0) writes 0x00, as in hardware. Without the quirk the char is the stored value's low byte. Reads return 0 and have no side effects. Reset contents are LCDText2x16's `INIT_TEXT` default, 32 spaces. `--dump-lcd` prints the buffer (text and hex) at exit, and the window shows it in the status strip.
 - **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. Time in vvizard is one cycle per instruction (no stall or cache timing).
 - **PRNG (0x80000080, `src/prng.c`):** PRNG32LFSR.v, a 32-bit Galois LFSR (mask 0x80200003, reset value 0xACE12468) that steps every clock, not per read. A read in cycle c returns state(c-1) (MemMapIO registers `prng_out` once more before `douta`). Any store (any byte lane, also via the 16 KiB alias 0x80004080; 0x80000180 is no longer an alias) reseeds with the full lane-placed store data, and a seed of 0 becomes 1. The first read in the cycle right after a store returns the old value; from the next cycle on reads return the seed, then the seed advanced one step per cycle. Back-to-back reads return consecutive LFSR states. Cycles are counted as instructions (no stall or cache model), so seeded sequences match hardware only while the CPU does not stall, and the unseeded sequence after reset is not aligned with hardware. CNT_RESET does not reset the PRNG.
-- **PixelFeeder:** a PF_FRAME write only queues the frame. It is displayed from the end of the current scan frame (every 865800 cycles: 1040x666 pixels at 40 MHz), when Cause bit 13 latches. PF_FRAME reads return `{4'h1, frame#, 22'b0}` of the frame being displayed, not the last one written, so software that waits for its frame (proj7 `pf_wait`) now really waits.
+- **PixelFeeder:** a PF_FRAME write only queues the frame. It is displayed from the end of the current scan frame (every 828960 cycles: VESA 800x600@60, 1056x628 pixel clocks at 40 MHz = 16.579 ms; or every 16.579 ms of host time with `--frame-clock=wall`), when Cause bit 13 latches. PF_FRAME reads return `{4'h1, frame#, 22'b0}` of the frame being displayed, not the last one written, so software that waits for its frame (proj7 `pf_wait`) now really waits.
 - **GPU:** a GP_CODE write runs the command list at once (`src/gpu.c`; no GPU busy time) and latches Cause bit 12. GP_STATE reads return `{pf_status, gp_status}` in the `graphics.h` `gstate_s` layout: displayed frame in bits 29:24, `gp_fault` in bit 15 (set by a bad opcode, cleared by the next launch), the launched frame in bits 13:8, and all five engines ready (bits 4:0). That is the intended layout; GPU.v as written drops the fault bit and puts the frame in bits 14:9, an RTL bug (see QUIRKS.md "gp-status RTL bug").
 - **Guest exit (0x80000084, vvizard only):** a store ends the run with that exit code; see [Ending a run from guest code](#ending-a-run-from-guest-code).
 - **Other offsets:** logged as MISS-READ or MISS-WRITE (reads 0, stores dropped).
@@ -290,7 +292,7 @@ and drop stores in every quirk setting.
 | UART RX | 10 | a received byte lands (rising edge of RX valid) |
 | UART TX | 11 | TX_READY goes back to 1 after a byte |
 | GPU | 12 | a GP_CODE launch completes (at once in vvizard) |
-| PixelFeeder | 13 | end of each scan frame (865800 cycles) |
+| PixelFeeder | 13 | end of each scan frame (828960 cycles, or 16.579 ms wall time with `--frame-clock=wall`) |
 | RTC | 14 | Count == 0xFFFFFFFF |
 | timer | 15 | Count == Compare (Compare is 0xFFFF at reset, so this fires once ~65536 cycles in) |
 
@@ -308,8 +310,29 @@ programs run without GIOS.
     --legacy-io        the old untimed model: TX always ready, RX bytes on demand with a level-style UARX interrupt,
                        PF_FRAME switches at once, no TX/GPU/PF/timer/RTC interrupts
     --uart-rx-gap N    idle cycles the host leaves between RX bytes (default 4340, one byte time; 0 = back to back)
-    --pf-period N      cycles per scan frame (default 865800; 0 = PF_FRAME writes take effect at once, no bit 13)
+    --pf-period N      cycles per scan frame (default 828960; 0 = PF_FRAME writes take effect at once, no bit 13)
+    --frame-clock=MODE emulated (default): a frame ends every --pf-period cycles; wall: every 16.5792 ms of
+                       host monotonic time (60.317 frames per wall second)
     --no-irq           don't take interrupts (the Cause bits still latch)
+
+**Frame clock.** The hardware scans VESA 800x600@60: 1056x628 pixel clocks at 40 MHz = 663168 clocks = 16.5792 ms
+(60.317 Hz), which is 828960 cycles of the 50 MHz CPU (`VV_PF_PERIOD`, `src/hw.h`). Until Oct 31 2026 the default
+was 865800 (1040x666 at 40 MHz, as the DVI instance in `ml505top.v:184-185` is written; `--pf-period 865800` gives
+the old timing). By default (`--frame-clock=emulated`) frame ends come every 828960 instructions, so every run is
+repeatable and the guest gets the hardware's work per frame, but at vvizard's speed (10-20M instructions/s against
+50M) that is only ~20 frames per wall second and games look slow. `--frame-clock=wall` instead ends a frame (PF_FRAME
+switch, Cause bit 13, window redraw) each time host `CLOCK_MONOTONIC` passes the next 16.5792 ms deadline, checked
+every 1024 instructions (~0.05-0.1 ms). Deadlines missed while the host stalls are skipped, not caught up, so frames
+never burst; the `[frame]` line counts them. The guest then gets ~instr/s / 60 instructions per frame (~290k on the
+Debian box instead of 828960). Only the frame clock changes: Count/Compare, the RTC, the UART and the PRNG still run
+on emulated cycles, so e.g. proj7's mm:ss clock (timer driven) still runs at emulated speed. Wall runs are not
+repeatable (the tests use `--frame-clock=emulated` explicitly). vvizard has no pause of its own; proj7's graphics /
+clock pause (the status strip's PAUSED) is guest state and doesn't stop the PixelFeeder, which keeps scanning on
+hardware too.
+
+The `[frame]` line at exit gives the frame clock, frames scanned, wall time, frames per wall second and the ratio
+to 60.317, instructions per second and per frame. `--max-seconds S` ends a run after S seconds of wall time (e.g. to
+measure that).
 
 The `[hw]` line at exit counts UART bytes sent, lost, received and overrun, frames scanned, the Cause bits latched per
 source, and interrupt storms. Not modelled: GPU busy time, cache and stall timing (so the PixelFeeder frame phase and
@@ -369,7 +392,12 @@ underneath:
 - **Window cost** (measured, see NOTES.md "Window cost"): the window costs ~18% against `--no-window` (50M
   instructions: 5.6 s vs 4.6 s); the status strip is ~0.4 ms of a ~2.6 ms redraw (~2% of the run). The status text is
   re-read at most 4 times a second.
-- A PF_FRAME write (0x80000050) switches frames immediately (hardware waits for the end of the scan; details in NOTES.md).
+- A PF_FRAME write (0x80000050) is shown from the next frame end (as on hardware; details in NOTES.md), and the window
+  is redrawn at every frame end (also when the frame did not change, since the GPU may have drawn into it). With
+  `--frame-clock=emulated` it is also redrawn when nothing drew for 1/60 s of host time; with `--frame-clock=wall` the
+  ~60/s frame ends do the drawing and that timer is only a 0.1 s fallback.
+- **Status strip, line 2** also shows `frames N R/s emul|wall`: frame ends so far and their rate per wall second
+  (re-measured at most 4 times a second).
 - Options:
   - `--no-window` runs without a window.
   - `--dump-frame F.ppm` writes the selected frame to F.ppm when the run ends.

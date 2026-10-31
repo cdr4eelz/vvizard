@@ -13,7 +13,9 @@ int  vv_disp_init(int want_window);           /* 0 ok */
 void vv_disp_pf_write(uc_engine *uc, uint32_t v); /* PF_FRAME write: select + redraw */
 uint32_t vv_disp_frame(void);                  /* current frame# */
 enum { VV_DISP_CLOSED = 1, VV_DISP_ESC = 2 };
-int  vv_disp_tick(uc_engine *uc);              /* periodic ~60Hz; 0, or VV_DISP_CLOSED / VV_DISP_ESC to stop */
+int  vv_disp_tick(uc_engine *uc);              /* every 4096 insns; 0, or VV_DISP_CLOSED / VV_DISP_ESC to stop */
+extern double vv_disp_redraw_period;          /* vv_disp_tick redraws when no draw for this long (s; default 1/60) */
+int  vv_disp_has_window(void);
 int  vv_disp_dump_ppm(uc_engine *uc, const char *path);
 void vv_disp_close(void);
 extern int vv_disp_keys_enabled;               /* window keys -> UART RX (default on) */

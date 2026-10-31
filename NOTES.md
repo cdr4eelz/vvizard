@@ -55,9 +55,9 @@ Status is Unicorn's and only mfc0/mtc0 of Cause/EPC inside the ISR BRAM are patc
 
 
 ## PixelFeeder details
-- A PF_FRAME write (0x80000050) selects the frame using `FRAME_BITS` (`gpcommands.vh:39`): a frame number, or an address with the frame number in bits 27:22. It only sets `frame_next` (PixelFeeder.v:248). The fetch head copies it into `framebits` when it finishes fetching a frame (:271-274) and `irq_frame` follows one cycle later (:247). One frame is 1040x666 pixel clocks at 40 MHz = 17.316 ms = 865800 CPU cycles at 50 MHz (`VV_PF_PERIOD`; `--pf-period`). vvizard puts the frame ends at k x 865800 cycles from reset; the real phase is not modelled. PF_FRAME reads give `{4'h1, framebits_r, 22'b0}` (MemMapIO.v:162), the displayed frame. `--legacy-io` or `--pf-period 0`: immediate, as before.
+- A PF_FRAME write (0x80000050) selects the frame using `FRAME_BITS` (`gpcommands.vh:39`): a frame number, or an address with the frame number in bits 27:22. It only sets `frame_next` (PixelFeeder.v:248). The fetch head copies it into `framebits` when it finishes fetching a frame (:271-274) and `irq_frame` follows one cycle later (:247). One frame is VESA 800x600@60, 1056x628 pixel clocks at 40 MHz (`ml505top.v:176`, `cross/VGA.v:10`) = 663168 clocks = 16.5792 ms (60.317 Hz) = 828960 CPU cycles at 50 MHz (`VV_PF_PERIOD`; `--pf-period`), the user's decision of Oct 31 2026. Before that it was 865800 = 1040x666 at 40 MHz (17.316 ms), the parameters the DVI instance at `ml505top.v:184-185` is actually written with (labelled "VESA 800x600@60Hz" but they are the 72 Hz geometry; the table comment above it gives 1056x628 for 60 Hz). vvizard puts the frame ends at k x 828960 cycles from the first instruction (`--frame-clock=emulated`, default), or at t0 + k x 16.5792 ms of host CLOCK_MONOTONIC time (`--frame-clock=wall`, checked every 1024 instructions, missed deadlines skipped, see README "Frame clock"); the real phase is not modelled. PF_FRAME reads give `{4'h1, framebits_r, 22'b0}` (MemMapIO.v:162), the displayed frame. `--legacy-io` or `--pf-period 0`: immediate, as before.
 - `--dump-frame`, script `dump` events and `--dump-every` dump the displayed frame; script `fN` still counts PF_FRAME writes (with proj7's `pf_wait`, one per displayed frame).
-- The window is redrawn whenever the displayed frame changes and about every 1/60 s of host time, checked every 4096 instructions. Between draws, input is polled at most every 2 ms of host time (`POLL_PERIOD`).
+- The window is redrawn at every frame end (hw.c `pf_frame_end` -> `vv_disp_pf_write`), and from `vv_disp_tick` (every 4096 instructions) when nothing drew for `vv_disp_redraw_period`: 1/60 s, or 0.1 s with `--frame-clock=wall` where the ~60/s frame ends already draw. Between draws, input is polled at most every 2 ms of host time (`POLL_PERIOD`).
 - Pixels are read in plain address order. Real hardware may mirror each group of 4 pixels (`PixelFeeder.v:10,127`); the user chose not to emulate that.
 
 ## GPU details
@@ -98,7 +98,9 @@ Makefile build leaves out (`--no-pad-sections`).
   - `uart_rx_hold` (2, `XYZ` on stdin, `--uart-rx-gap 0`): after ~16000 cycles RX_VALID 1 and RX_DATA 'Z';
     `rx-overrun` warned, `[hw]` overrun 2. `rx_overrun`: the same with `--halt-on-quirk` stops (exit 4).
   - `pf` (5): PF_FRAME 0x10000000; write frame 1, still 0x10000000, bit 13 clear; at bit 13 PF_FRAME reads
-    0x10400000 and Count is 865800..865820; frame 2 shows at 1731600..1731620. `pf_period`: `--pf-period 0` switches
+    0x10400000 and Count is 828960..828980; frame 2 shows at 1657920..1657940 (runs to the `break`: 6 EXPECTs).
+    `pf_custom`: `--pf-period 865800` puts the saved Counts at exactly 865806 / 1731613. `frame_clock`:
+    `--frame-clock=wall` gives 2 frames in >= 33.16 ms of wall time; `--frame-clock=fast` is a usage error. `pf_period`: `--pf-period 0` switches
     at once.
   - `timer` (5, with `tests/hw/isr.s` at 0xC0000180): Compare = Count+1000 sets bit 15 within 12 cycles of the match;
     a Compare write clears it; with Status = IM15|IE the ISR runs once, sees bit 15, EPC is in the program.
@@ -128,9 +130,10 @@ Makefile build leaves out (`--no-pad-sections`).
     (--no-guest-exit)` noted once, `$s0` = 1, stops at max-insns with status 0.
   - Esc has no automated test: `--input-script` only queues UART RX bytes and cannot press a window key.  Checked by
     hand on Xvfb `:77` with `xdotool key --window $(xdotool search --name '^vvizard$') Escape` (see "Ending a run").
-- `test-player` (`make test-player`, ~13 s since frames take their real 865800 cycles): runs vvizard's **built-in
+- `test-player` (`make test-player`, ~13 s since frames take their real 828960 cycles): runs vvizard's **built-in
   default program** (GIOS + draw + isr7 + proj7 + autorun from `<vvizard dir>/../../software`, so the cs150 layout is
-  needed) with only `--no-window --no-random-ddr --no-halt-on-quirk --input-script F --max-insns N`, and checks the
+  needed) with only `--no-window --frame-clock=emulated --no-random-ddr --no-halt-on-quirk --input-script F
+  --max-insns N`, and checks the
   four images were loaded from that tree. (`--no-halt-on-quirk`: isr7 has a load-use hit, see the findings below.)
   proj7 is driven by the `--input-script`. proj7 reads player input only in its UART-RX ISR (isr7.s `ISR_UARX`): keys
   `u i o / j k l / m , .` = up-left, up, up-right / left, centre (no-op), right / down-left, down, down-right;

@@ -5,10 +5,12 @@
 #include "memmap.h"
 #include "display.h"
 #include <stdio.h>
+#include <time.h>
 
 int      vv_legacy_io;
 uint64_t vv_uart_rx_gap = VV_UART_RX_FRAME;
 uint64_t vv_pf_period   = VV_PF_PERIOD;
+int      vv_frame_clock = VV_FRAME_CLOCK_EMULATED;
 uint32_t vv_cur_pc;
 
 static uint64_t now_c;                     /* cycle of the last vv_hw_tick */
@@ -81,9 +83,20 @@ void vv_uart_tx_write(uint8_t c) {
  * A PF_FRAME store only latches frame_next (PixelFeeder.v:248); the fetch head switches framebits to
  * it when it finishes the frame being fetched (PixelFeeder.v:271-274) and fires irq_frame one cycle
  * later (interrupt_r, :247).  PF_FRAME reads return {4'h1, framebits_r, 22'b0} (MemMapIO.v:162), the
- * frame being scanned out, not the last one written.  vvizard puts the frame ends at k * period. */
+ * frame being scanned out, not the last one written.  vvizard puts the frame ends at k * period
+ * (emulated cycles), or with --frame-clock=wall at t0 + k * 16.5792 ms of host CLOCK_MONOTONIC time, t0 =
+ * the first instruction.  Wall mode reads the clock every VV_PF_WALL_CHECK instructions; deadlines missed
+ * while the host was stalled are skipped (counted, no burst of catch-up frames), keeping the k * period phase. */
 static uint32_t pf_cur, pf_next;
-static uint64_t pf_boundary = VV_PF_PERIOD, pf_frames;
+static uint64_t pf_boundary, pf_frames;   /* first frame end set at the first tick (from --pf-period) */
+static uint64_t pf_t0, pf_deadline, pf_t_last, pf_skipped;   /* wall mode, ns */
+uint64_t vv_mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+uint64_t vv_pf_frames(void) { return pf_frames; }
+static void pf_frame_end(uc_engine *uc) {
+    pf_frames++;
+    pf_cur = pf_next; vv_disp_pf_write(uc, pf_cur);   /* select + redraw on every frame end */
+    raise(VV_IP_PF);
+}
 static uint32_t frame_bits(uint32_t f) { return (f >> 28) ? (f >> VV_FSHIFT) & VV_FNMASK : f & VV_FNMASK; }
 void vv_pf_write(uc_engine *uc, uint32_t v) {
     pf_next = frame_bits(v);
@@ -190,11 +203,21 @@ void vv_hw_tick(uc_engine *uc, uint64_t now) {
     /* UART TX: ready again -> IRQ_TX */
     if (tx_irq_due && now >= tx_ready_at) { tx_irq_due = 0; raise(VV_IP_UATX); }
     /* PixelFeeder frame end: latch frame_next, irq_frame */
-    if (vv_pf_period && now >= pf_boundary) {
+    if (!vv_pf_period) return;
+    if (!pf_t0) {   /* first tick: phase origin of both clocks (the wall start also feeds the summary) */
+        pf_t0 = pf_t_last = vv_mono_ns(); pf_deadline = pf_t0 + VV_PF_WALL_NS; pf_boundary = vv_pf_period;
+    }
+    if (vv_frame_clock == VV_FRAME_CLOCK_WALL) {
+        if (now % VV_PF_WALL_CHECK) return;
+        uint64_t t = pf_t_last = vv_mono_ns();
+        if (t < pf_deadline) return;
+        uint64_t late = (t - pf_deadline) / VV_PF_WALL_NS;   /* whole periods missed beyond this one */
+        pf_skipped += late;
+        pf_deadline += (late + 1) * VV_PF_WALL_NS;
+        pf_frame_end(uc);
+    } else if (now >= pf_boundary) {
         while (pf_boundary <= now) pf_boundary += vv_pf_period;
-        pf_frames++;
-        if (pf_cur != pf_next || pf_frames == 1) { pf_cur = pf_next; vv_disp_pf_write(uc, pf_cur); }
-        raise(VV_IP_PF);
+        pf_frame_end(uc);
     }
 }
 
@@ -207,4 +230,17 @@ void vv_hw_summary(void) {
             (unsigned long long)hits_ip[0], (unsigned long long)hits_ip[1], (unsigned long long)hits_ip[2],
             (unsigned long long)hits_ip[3], (unsigned long long)hits_ip[4], (unsigned long long)hits_ip[5],
             (unsigned long long)storms);
+    if (!vv_pf_period || !pf_t0) return;
+    int wall = vv_frame_clock == VV_FRAME_CLOCK_WALL;
+    double el = (double)((wall ? pf_t_last : vv_mono_ns()) - pf_t0) * 1e-9, rt = 1e9 / VV_PF_WALL_NS;
+    double fps = el > 0 ? pf_frames / el : 0.0;
+    char per[48];
+    if (wall) snprintf(per, sizeof per, "%.4f ms", VV_PF_WALL_NS * 1e-6);
+    else snprintf(per, sizeof per, "%llu cycles", (unsigned long long)vv_pf_period);
+    vv_eprintf("[frame] clock %s (one frame per %s): %llu frames in %.3f s wall = %.2f/s (real time %.3f/s, x%.3f); "
+               "%.2fM insns/s, %.0f insns/frame (hardware %u)", wall ? "wall" : "emulated", per,
+               (unsigned long long)pf_frames, el, fps, rt, fps / rt, el > 0 ? now_c / el * 1e-6 : 0.0,
+               pf_frames ? (double)now_c / pf_frames : 0.0, VV_PF_PERIOD);
+    if (wall) vv_eprintf("; %llu deadlines skipped", (unsigned long long)pf_skipped);
+    vv_eprintf("\n");
 }

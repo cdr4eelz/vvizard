@@ -1,6 +1,7 @@
 # pf.s - PixelFeeder (PixelFeeder.v): a PF_FRAME store only latches frame_next; PF_FRAME reads
 # return the frame being scanned, which switches at the end of the frame being fetched
-# (865800 cycles = 1040x666 @ 40 MHz in 50 MHz cycles), when irq_frame sets Cause bit 13.
+# (default --pf-period 828960 cycles = VESA 800x600@60, 1056x628 @ 40 MHz in 50 MHz cycles), when
+# irq_frame sets Cause bit 13.
 # vv-load: 0x40000000
 # vv-isa: -mips32r2
 .include "hw/hw.inc"
@@ -31,7 +32,7 @@ _start:
     lw    $t2, PF_FRAME($t0)
     nop
     EXPECT $t2, 0x10400000       # switched with the interrupt
-    INRANGE $t4, $s0, 865800, 865820
+    INRANGE $t4, $s0, 828960, 828980
     EXPECT $t4, 1
     mtc0  $zero, $13
     li    $t1, 0x10800000        # frame 2: takes effect one frame later
@@ -45,6 +46,6 @@ _start:
     nop
     mfc0  $s1, $9
     nop
-    INRANGE $t4, $s1, 1731600, 1731620
+    INRANGE $t4, $s1, 1657920, 1657940
     EXPECT $t4, 1
     break

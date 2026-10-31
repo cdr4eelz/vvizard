@@ -14,8 +14,17 @@
 #define VV_UART_SYM      (VV_CPU_HZ / VV_UART_BAUD)   /* 434 cycles: SymbolEdgeTime (UAReceive.v:27) */
 #define VV_UART_RX_FRAME (10u * VV_UART_SYM)          /* 4340: start..stop bit, HasByte set on the 10th edge */
 #define VV_UART_TX_BUSY  (11u * VV_UART_SYM - 1u)     /* 4773: BitCount 11 -> ready at BitCount==1 && SymbolEdge */
-/* PixelFeeder: one frame = 1040 x 666 DVI clocks (ml505top.v:184-185) at 40 MHz = 692640 -> 865800 CPU cycles */
-#define VV_PF_PERIOD     (1040u * 666u * (VV_CPU_HZ / 1000000u) / 40u)
+/* PixelFeeder: one frame = VESA 800x600@60 = 1056 x 628 pixel clocks at 40 MHz (ml505top.v:176, cross/VGA.v:10)
+ * = 663168 clocks = 16.5792 ms (60.317 Hz) -> 828960 CPU cycles at 50 MHz (user decision; the DVI instance at
+ * ml505top.v:184-185 is written with 1040 x 666, which gave the old default 865800, --pf-period 865800) */
+#define VV_PF_HTOT       1056u
+#define VV_PF_VTOT       628u
+#define VV_PF_PIX_HZ     40000000u
+#define VV_PF_PERIOD     ((uint32_t)((uint64_t)VV_PF_HTOT * VV_PF_VTOT * VV_CPU_HZ / VV_PF_PIX_HZ))   /* 828960 */
+/* --frame-clock=wall: the same frame in host time, 663168 x 25 ns = 16579200 ns */
+#define VV_PF_WALL_NS    ((uint64_t)VV_PF_HTOT * VV_PF_VTOT * 1000000000ull / VV_PF_PIX_HZ)
+#define VV_PF_WALL_CHECK 1024u      /* wall mode: read the host clock every 1024 instructions (~0.05-0.1 ms) */
+enum { VV_FRAME_CLOCK_EMULATED = 0, VV_FRAME_CLOCK_WALL = 1 };
 
 /* Cause/Status interrupt bits (COP0150.v:43-44: {timer, rtc, pf_frame, gp_done, UATX, UARX} -> 15:10) */
 #define VV_IP_UARX  0x0400u
@@ -29,6 +38,9 @@
 extern int      vv_legacy_io;     /* --legacy-io */
 extern uint64_t vv_uart_rx_gap;   /* --uart-rx-gap: idle cycles the host leaves between RX bytes */
 extern uint64_t vv_pf_period;     /* --pf-period: cycles per scanned frame (0 = PF_FRAME acts at once) */
+extern int      vv_frame_clock;   /* --frame-clock: VV_FRAME_CLOCK_EMULATED (default) or _WALL */
+uint64_t vv_mono_ns(void);        /* host CLOCK_MONOTONIC in ns */
+uint64_t vv_pf_frames(void);      /* frame events (PixelFeeder frame ends) so far */
 extern uint32_t vv_cur_pc;        /* PC of the instruction being executed (for reports) */
 
 void     vv_hw_tick(uc_engine *uc, uint64_t now);   /* advance devices to cycle `now` (every insn) */

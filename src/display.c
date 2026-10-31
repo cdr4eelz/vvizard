@@ -178,16 +178,21 @@ int vv_disp_init(int want_window) {
     return 0;
 }
 void vv_disp_pf_write(uc_engine *uc, uint32_t v) {
-    cur_frame = frame_bits(v);              /* called by hw.c when the PixelFeeder switches frames */
+    cur_frame = frame_bits(v);              /* called by hw.c at every PixelFeeder frame end (and for an
+                                             * immediate PF_FRAME write: --legacy-io, --pf-period 0) */
     draw(uc);
 }
 uint32_t vv_disp_frame(void) { return cur_frame; }
-/* Called every 4096 instructions (main.c): redraw at ~60 Hz; in between, poll window input by host
- * time (POLL_PERIOD) rather than on every call, which at 20-40M instr/s was thousands of polls a second. */
+/* Called every 4096 instructions (main.c): redraw when nothing drew for vv_disp_redraw_period (1/60 s;
+ * with --frame-clock=wall the ~60/s PixelFeeder frame ends draw, so main.c makes this only a fallback);
+ * in between, poll window input by host time (POLL_PERIOD) rather than on every call, which at 20-40M
+ * instr/s was thousands of polls a second. */
+double vv_disp_redraw_period = 1.0 / 60;
+int vv_disp_has_window(void) { return have_window; }
 int vv_disp_tick(uc_engine *uc) {
     if (!have_window) return 0;
     double t = now();
-    if (t - last_draw >= 1.0 / 60) draw(uc);          /* EndDrawing polls events + collects */
+    if (t - last_draw >= vv_disp_redraw_period) draw(uc);          /* EndDrawing polls events + collects */
     else if (t - last_poll >= POLL_PERIOD) { PollInputEvents(); collect_keys(); last_poll = t; }
     if (esc_pressed) { esc_pressed = 0; return VV_DISP_ESC; }
     return WindowShouldClose() ? VV_DISP_CLOSED : 0;

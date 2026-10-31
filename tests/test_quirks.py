@@ -76,7 +76,7 @@ BUGS = "dcache-stale,tx-busy,rx-overrun,irq-storm,undef-reg"
 
 
 def run(path, *opts, at=0x40000000, env=ENV):
-    r = subprocess.run([VV, "--no-window", "--quiet-mmio", "--no-random-ddr", "--max-insns", "1000",
+    r = subprocess.run([VV, "--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--max-insns", "1000",
                         "--no-halt-on-quirk", f"--quiet-quirk={BUGS}", *opts,
                         "--load", f"{path}@{at:#x}", "--entry", f"{at:#x}"],
                        stdin=subprocess.DEVNULL, capture_output=True, env=env)

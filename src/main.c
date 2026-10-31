@@ -355,6 +355,8 @@ static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e,
  * without making Unicorn add a second per-instruction hook. */
 static uint64_t hook_calls;
 static int stopped_max;
+static uint64_t max_wall_ns, run_t0;         /* --max-seconds */
+static int stopped_wall;
 static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     (void)size; (void)u;
     if (stop_req) { uc_emu_stop(uc); return; }   /* guest exit: nothing after the store runs */
@@ -381,6 +383,7 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
         if (vv_quirk_halted) return;
     }
     if ((insn_count & 0xFFF) == 0) {
+        if (max_wall_ns && vv_mono_ns() - run_t0 >= max_wall_ns) { stopped_wall = stop_req = 1; uc_emu_stop(uc); return; }
         vv_term_tick();                      /* flush pending UART text (e.g. a prompt with no newline) */
         int why = vv_disp_tick(uc);
         if (why) { vv_eprintf(why == VV_DISP_ESC ? "[stop] Esc pressed\n" : "[stop] window closed\n"); uc_emu_stop(uc); }
@@ -482,6 +485,15 @@ void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2) {
         snprintf(l2, n2, "graphics %s  clock %s  %X%X:%X%X  proj%u", fl & 1 ? "PAUSED" : "running",
                  fl & 2 ? "PAUSED" : "running", clk >> 12 & 15, clk >> 8 & 15, clk >> 4 & 15, clk & 15, 4 + (magic & 0xF));
     } else snprintf(l2, n2, "graphics -  clock -  (no proj6/7 shared memory at 0x%08x)", VV_SM_BASE_ADDR);
+    /* frame ends (PixelFeeder scans) and their rate per wall second since the last refresh (4 Hz) */
+    static uint64_t f_prev, t_prev; static double fps;
+    uint64_t f = vv_pf_frames(), t = vv_mono_ns();
+    if (t_prev && t - t_prev >= 200000000ull) { fps = (double)(f - f_prev) * 1e9 / (double)(t - t_prev); f_prev = f; t_prev = t; }
+    else if (!t_prev) { f_prev = f; t_prev = t; }
+    size_t k = strlen(l2);
+    if (!vv_legacy_io && vv_pf_period && k < n2)
+        snprintf(l2 + k, n2 - k, "  frames %llu %.1f/s %s", (unsigned long long)f, fps,
+                 vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emul");
 }
 uint64_t vv_insns(void) { return insn_count; }
 static int reg_index(const char *n) {
@@ -553,6 +565,7 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "Run control (defaults: unlimited, interrupts on, random DDR, window with keys):\n"
 "  --max-insns N      stop after N instructions (default 0 = unlimited)\n"
 "  --until ADDR       stop when PC reaches ADDR\n"
+"  --max-seconds S    stop after S seconds of wall time (checked every 4096 instructions)\n"
 "  --irq / --no-irq   take COP0150 interrupts (default on; ISR at 0x%08x)\n"
 "  --random-ddr[=SEED] fill DDR with random data at power-up (default on; seed defaults to time)\n"
 "  --no-random-ddr    start DDR zeroed instead\n"
@@ -565,8 +578,8 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     guest goes on, e.g. into its interrupts-off spin loop)\n"
 "  Esc in the window ends the run like closing it (Esc is not sent to the UART)\n"
 "\n"
-"Exit status: 0 normal stop (break, --max-insns, --until, window closed, Esc), 1 setup or CPU\n"
-"  error, 2 usage, 3 an --expect failed, 4 --halt-on-quirk; a guest exit-register store: the\n"
+"Exit status: 0 normal stop (break, --max-insns, --max-seconds, --until, window closed, Esc), 1\n"
+"  setup or CPU error, 2 usage, 3 an --expect failed, 4 --halt-on-quirk; a guest exit-register store: the\n"
 "  stored code & 0xFF (so guest codes 1-4 look like vvizard's own; the [exit] line tells them\n"
 "  apart), unless an --expect fails (3)\n"
 "\n"
@@ -575,8 +588,15 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     PF_FRAME switches at once, no TX/GP/PF/timer/RTC interrupts\n"
 "  --uart-rx-gap N    idle cycles the host leaves between UART RX bytes (default %u = one byte time;\n"
 "                     0 = back-to-back at 115200 baud)\n"
-"  --pf-period N      cycles per PixelFeeder frame (default %u = 1040x666 @ 40 MHz in 50 MHz cycles;\n"
-"                     0 = PF_FRAME writes take effect at once, no frame interrupt)\n"
+"  --pf-period N      cycles per PixelFeeder frame with --frame-clock=emulated (default %u = VESA\n"
+"                     800x600@60, 1056x628 clocks @ 40 MHz in 50 MHz CPU cycles; 0 = PF_FRAME writes take\n"
+"                     effect at once, no frame interrupt, in either clock mode)\n"
+"  --frame-clock=MODE what times the PixelFeeder frame ends (PF_FRAME switch, Cause bit 13, redraw):\n"
+"                     emulated (default): every --pf-period CPU cycles (1 instruction = 1 cycle);\n"
+"                     deterministic, but at vvizard's speed fewer than 60.3 frames per wall second.\n"
+"                     wall: every 16.5792 ms of host monotonic time (60.317/s, real-time speed); the\n"
+"                     guest gets ~instr/s / 60 instructions per frame instead of 828960, and runs are\n"
+"                     not repeatable.  Deadlines missed while the host stalls are skipped, not caught up.\n"
 "\n"
 "Quirks (LIST: comma list edited left to right: NAME or +NAME adds, -NAME or no-NAME removes,\n"
 "  none / all / default replace the set so far; e.g. --quirks=+jalr-rd,no-load-use, --quirks=none,hilo):\n"
@@ -630,7 +650,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT };
+       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT, O_FRAME_CLOCK, O_MAX_SECONDS };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -657,6 +677,7 @@ int main(int argc, char **argv) {
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"guest-exit",0,0,O_GUEST_EXIT},{"no-guest-exit",0,0,O_NO_GUEST_EXIT},
+        {"frame-clock",1,0,O_FRAME_CLOCK},{"max-seconds",1,0,O_MAX_SECONDS},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
@@ -699,6 +720,13 @@ int main(int argc, char **argv) {
         case O_LEGACY_IO: vv_legacy_io = 1; break;
         case O_RX_GAP: vv_uart_rx_gap = strtoull(optarg, 0, 0); break;
         case O_PF_PERIOD: vv_pf_period = strtoull(optarg, 0, 0); break;
+        case O_FRAME_CLOCK:
+            if (!strcmp(optarg, "wall")) vv_frame_clock = VV_FRAME_CLOCK_WALL;
+            else if (!strcmp(optarg, "emulated")) vv_frame_clock = VV_FRAME_CLOCK_EMULATED;
+            else { vv_eprintf("--frame-clock: expected wall or emulated, not '%s'\n", optarg); return 2; } break;
+        case O_MAX_SECONDS: { char *e; double sec = strtod(optarg, &e);
+            if (*e || sec < 0) { vv_eprintf("--max-seconds: bad value '%s'\n", optarg); return 2; }
+            max_wall_ns = (uint64_t)(sec * 1e9); break; }
         case O_QUIRKS: if (vv_quirk_parse(optarg, emul, qdflt, &emul)) return 2; break;
         case O_NO_QUIRKS: emul = 0; break;
         case O_LIST_QUIRKS: vv_quirk_list(stdout); return 0;
@@ -818,9 +846,13 @@ int main(int argc, char **argv) {
     if (vv_quirk_halt) vv_eprintf("[quirk] halt on: %s\n", vv_quirk_set_str(vv_quirk_halt));
     if (vv_quirk_detect & ~vv_quirk_halt) vv_eprintf("[quirk] warn on: %s\n", vv_quirk_set_str(vv_quirk_detect & ~vv_quirk_halt));
     vv_disp_init(want_window);
-    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s\n", big ? "big" : "little",
-            entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed");
+    /* wall frame clock: the ~60/s frame ends redraw; the vv_disp_tick timer is only a fallback */
+    if (vv_frame_clock == VV_FRAME_CLOCK_WALL && vv_pf_period && !vv_legacy_io) vv_disp_redraw_period = 0.1;
+    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s\n", big ? "big" : "little",
+            entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
+            vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated");
     vv_quirk_decode = vv_quirk_needs_decode();
+    run_t0 = vv_mono_ns();
     err = uc_emu_start(uc, entry, have_stop ? stop_addr : 0xFFFFFFFFull, 0, 0);   /* max_insns: hook_code */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
@@ -829,6 +861,8 @@ int main(int argc, char **argv) {
     if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0 && max_insns && insn_count >= max_insns) err = UC_ERR_OK;
     int at_max = max_insns && (stopped_max || insn_count >= max_insns);
     if (!err && at_max) vv_eprintf("[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
+    if (stopped_wall) { if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0) err = UC_ERR_OK;
+        if (!err) vv_eprintf("[stop] max-seconds %.3f reached\n", max_wall_ns * 1e-9); }
     if (err) vv_eprintf("[stop] uc_emu_start: %s\n", uc_strerror(err));
     if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
@@ -840,7 +874,7 @@ int main(int argc, char **argv) {
     static char exit_state[48];
     if (guest_exited) snprintf(exit_state, sizeof exit_state, "EXITED (guest code %d)", (int32_t)guest_code);
     run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : guest_exited ? exit_state : stop_reason_intr == 18 ? "STOPPED (break)" :
-                at_max ? "STOPPED (max-insns)" : "STOPPED";
+                at_max ? "STOPPED (max-insns)" : stopped_wall ? "STOPPED (max-seconds)" : "STOPPED";
     vv_disp_status_dirty();
     if (shot_path) vv_disp_screenshot(uc, shot_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);
