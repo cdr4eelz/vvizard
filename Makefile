@@ -47,11 +47,11 @@ HW_QUIRKS ?= default
 # (also non-emulated ones) or QUIRKS=--warn-on-quirk.
 QUIRKS ?= --halt-on-quirk
 
-.PHONY: all clean fresh run test test-hex test-player test-quirks tests check-hex refresh-hex
+.PHONY: all clean fresh run test test-hex test-hw test-player test-quirks tests check-hex refresh-hex
 
 all: $(TARGET)
 
-# ---- Test programs: built from assembly (tests/*.s, tests/quirk/*.s) with the MIPS GNU toolchain ----
+# ---- Test programs: built from assembly (tests/*.s, tests/quirk/*.s, tests/hw/*.s) with the MIPS GNU toolchain ----
 # Settings follow cs150 software/makefile.in ASOPTS (+ the -G0 static link of makefile.isr): big-endian
 # o32, -non_shared (no abicalls/PIC), no .pdr, --no-break/--no-trap.  Each .s names its load (= link) address and ISA:
 #   # vv-load: 0x40000000      # vv-isa: -mips1   (hwprobe and the quirk snippets use -mips32r2)
@@ -64,7 +64,7 @@ T_AS    := $(M_PRE)-as
 T_LD    := $(M_PRE)-ld
 T_COPY  := $(M_PRE)-objcopy
 T_ASOPTS := -EB -mabi=32 -non_shared -mno-shared -G0 -mno-pdr --no-break --no-trap --no-pad-sections -Itests
-T_SRCS  := $(filter-out tests/check.inc,$(wildcard tests/*.s tests/quirk/*.s))
+T_SRCS  := $(wildcard tests/*.s tests/quirk/*.s tests/hw/*.s)
 T_BINS  := $(patsubst tests/%.s,$(BUILD_DIR)/tests/%.bin,$(T_SRCS))
 T_HEXS  := $(T_BINS:.bin=.hex)
 vv_field = $(shell sed -n 's/^\# vv-$(1): *//p' $(2) | head -1)
@@ -76,7 +76,7 @@ tests:
 	@echo "tests: no mips-linux-gnu toolchain; the tests use the committed tests/*.hex fallbacks"
 endif
 
-$(BUILD_DIR)/tests/%.o: tests/%.s tests/check.inc
+$(BUILD_DIR)/tests/%.o: tests/%.s tests/check.inc $(wildcard tests/hw/*.inc)
 	@mkdir -p $(dir $@)
 	@echo "  AS    $<"
 	@$(T_AS) $(T_ASOPTS) $(call vv_field,isa,$<) $< -o $@
@@ -132,8 +132,12 @@ test-quirks: $(TARGET) tests
 test-hex: $(TARGET) tests
 	python3 tests/test_hex.py
 
-# All tests (hex programs + hwprobe, quirk detection/emulation, proj7 player via GIOS)
-test: check-hex test-hex test-quirks test-player
+test-hw: $(TARGET) tests
+	python3 tests/test_hw.py
+
+# All tests (hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
+# proj7 player via GIOS)
+test: check-hex test-hex test-hw test-quirks test-player
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
