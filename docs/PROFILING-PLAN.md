@@ -69,7 +69,7 @@ In Unicorn, a range with `begin > end` means the whole address space.
    - `hook_bios_write` has the same effect, but only on BIOS pages.
    - The A/B test is `--profile-no-mem-unmapped`. If it confirms the cost, narrow the hook to the undecoded or unmapped ranges in `src/memmap.h`.
 3. **The `uc_emu_start` count limit adds a second per-instruction hook.** `main` passes `max_insns` as the count. Unicorn's `uc_emu_start` (`uc.c`) then installs its own whole-space `UC_HOOK_CODE` (`hook_count_cb`) whenever count > 0.
-   - `make run` passes `--max-insns 0`, so normal runs don't pay for it. A benchmark run with `--max-insns N` does.
+   - Normal runs leave `--max-insns` at its default of 0 (no limit), so they don't pay for it. A benchmark run with `--max-insns N` does.
    - For benchmarks, stop with `--until ADDR` (the stop address), or measure the difference between the two once.
 4. **Window and status strip: probably not the bottleneck.** The strip is not redrawn per instruction. On every 4096th instruction, `hook_code` calls `vv_term_tick` and then `vv_disp_tick` (`src/display.c`).
    - `vv_disp_tick` calls `now()`. At most every 1/60 s it redraws with `draw`, which runs `grab` (600 `uc_mem_read`s of 3200 B), `UpdateTexture`, `draw_strip` (about 1280 `DrawRectangle`s for the LCD plus a few `DrawText`s), and `EndDrawing`.
@@ -79,7 +79,7 @@ In Unicorn, a range with `begin > end` means the whole address space.
    - If the poll turns out to be expensive, throttle it by time instead of by instruction count.
 5. **Less likely, but count them:**
    - `tlb_fill` runs only on Unicorn TLB misses, which are filled per page.
-   - `mmio_read` / `mmio_write` run only for the 16 KiB MMIO page. `--quiet-mmio` turns off their logging; without it you are measuring the logging.
+   - `mmio_read` / `mmio_write` run only for the 16 KiB MMIO page. Logging is off by default; with `--mmio-log` you are measuring the logging.
    - `vv_gpu_run`: one GP command can fill all 800×600 pixels.
    - `vv_hw_tick` calls `poll()` on stdin at most every 4096 cycles.
 6. **macOS-specific checks before profiling:**
@@ -88,7 +88,7 @@ In Unicorn, a range with `begin > end` means the whole address space.
 
 ### Order of runs
 
-Use the same guest and fixed stop point on each run (`--until` or a fixed `--max-insns`, the same on every machine), with `--quiet-mmio --no-window`. Run the window case last.
+Use the same guest and fixed stop point on each run (`--until` or a fixed `--max-insns`, the same on every machine), with `--no-window` and no `--mmio-log`. Run the window case last.
 
 | run | flags added to `--profile` | isolates |
 |---|---|---|
@@ -104,12 +104,10 @@ Take samply profiles of A and F on both operating systems. Counters are enough f
 
 ## 4. Install and run
 
-Example invocation. `BIOS`, `IMEM`, `DMEM` and `ISR` are the paths the Makefile uses (`../../software/...`):
+With no arguments, `./vvizard` runs the built-in defaults: GIOS, the proj7 player and the autorun command. A profiling run only adds a few flags:
 
 ```
-RUN="./vvizard --bios $BIOS --uart-in 'jal 60000000\r' --random-ddr=1 --irq --quiet-mmio --no-window \
-     --max-insns 20000000 --profile --load $DMEM@0x50000000 --load $ISR@0xC0000000 --load $IMEM@0x60000000 \
-     --entry 0x40000000"
+RUN="./vvizard --no-window --random-ddr=1 --max-insns 20000000 --profile"
 ```
 
 Run the binary directly under samply. `samply record make run` would profile `make`.
