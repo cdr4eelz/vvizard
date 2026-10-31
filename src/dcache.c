@@ -46,4 +46,18 @@ void vv_dc_dma_write(uc_engine *uc, uint32_t a, size_t len) {
         }
     }
 }
+void vv_dc_dma_snapshot(uint32_t lo, uint32_t hi) {
+    for (unsigned i = 0; i < VV_DC_LINES; i++) {
+        if (!line[i].valid) continue;
+        uint32_t la = 0x10000000u | line[i].tag << 13 | i << 5;   /* canonical DDR address of the line */
+        if (la + VV_DC_LINE <= lo || la >= hi) continue;
+        for (unsigned w = 0; w < 8; w++) {
+            if (line[i].stale >> w & 1) continue;
+            int ok = 1; uint32_t v = vv_ram_be32(la + 4 * w, &ok);
+            if (!ok) continue;
+            line[i].data[w] = v;
+            line[i].stale |= (uint8_t)(1u << w); stale_words++;
+        }
+    }
+}
 uint64_t vv_dc_stale_words(void) { return stale_words; }

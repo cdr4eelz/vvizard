@@ -17,4 +17,16 @@ typedef struct {
  * -1 no STOP within the runaway guard or an unreadable address. */
 int vv_gpu_run(uc_engine *uc, uint32_t gp_frame, uint32_t code_addr, int verbose);
 const vv_gpu_stats *vv_gpu_get_stats(void);
+/* Threaded GPU (docs/MULTITHREADING-PLAN.md section 6).  At a launch the emulator walks the list
+ * without storing (vv_gpu_count: same messages and stats as vv_gpu_run; *pixels = pixels the
+ * engines will store, *ncmds = commands incl. STOP) to get the completion cycle, then either hands
+ * the drawing to the worker (vv_gpu_submit: stores into the DDR host buffer) or, when that is
+ * unsafe, draws inline (vv_gpu_draw_uc).  vv_gpu_wait blocks until the worker finished its job. */
+int  vv_gpu_count(uc_engine *uc, uint32_t gp_frame, uint32_t code_addr, int verbose, uint64_t *pixels, int *ncmds);
+void vv_gpu_draw_uc(uc_engine *uc, uint32_t gp_frame, uint32_t code_addr, int ncmds);
+int  vv_gpu_worker_start(void);
+void vv_gpu_submit(uint32_t gp_frame, uint32_t code_addr, int ncmds);
+int  vv_gpu_done(void);
+void vv_gpu_wait(void);
+void vv_gpu_worker_stop(void);
 #endif

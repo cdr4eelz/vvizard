@@ -41,7 +41,7 @@ OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
-.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -151,9 +151,13 @@ test-hex: $(TARGET) tests
 test-hw: $(TARGET) tests
 	python3 tests/test_hw.py
 
+# --threads=on: threaded GPU model, determinism (event traces), player (the rest of make test is --sync)
+test-threads: $(TARGET) tests
+	python3 tests/test_threads.py
+
 # All tests (hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
-# proj7 player via GIOS)
-test: check-hex test-hex test-hw test-quirks test-player
+# proj7 player via GIOS; all --sync), then the threaded-mode tests
+test: check-hex test-hex test-hw test-quirks test-player test-threads
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

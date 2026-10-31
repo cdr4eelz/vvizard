@@ -20,5 +20,10 @@ int  vv_dc_load(uint32_t a, uint32_t *old);
 void vv_dc_store(uint32_t a, unsigned size, uint32_t v);
 /* GPU (DMA) write of len bytes at canonical a, BEFORE the bytes change in DDR. */
 void vv_dc_dma_write(uc_engine *uc, uint32_t a, size_t len);
+/* Threaded GPU launch (the worker writes DDR without telling the cache): snapshot every valid line
+ * overlapping canonical [lo, hi) as if the GPU wrote all of it.  A word the GPU then leaves alone
+ * stays equal to DDR, so the detector (which reports only cached != DDR) stays quiet for it; a load
+ * while the worker is still drawing can miss a stale word (false negative, accepted). */
+void vv_dc_dma_snapshot(uint32_t lo, uint32_t hi);
 uint64_t vv_dc_stale_words(void);           /* words made stale so far */
 #endif

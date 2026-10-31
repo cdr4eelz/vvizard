@@ -4,6 +4,7 @@
 #include "quirk.h"
 #include "memmap.h"
 #include "display.h"
+#include "gpu.h"
 #include <stdio.h>
 #include <time.h>
 #include <stdarg.h>
@@ -129,8 +130,31 @@ void vv_gp_launched(uint32_t gp_frame, int rc) {
     VV_EVT("gp-done rc %d", rc);
     if (!vv_legacy_io) raise(VV_IP_GP);
 }
+int vv_gp_async;
+static int gp_busy, gp_worker, gp_rc; static uint64_t gp_done_at, gp_dropped;
+int vv_gp_busy(void) { return gp_busy; }
+int vv_gp_try_launch(void) {
+    if (!gp_busy) return 1;
+    gp_dropped++;
+    VV_EVT("gp-drop busy for %llu more cycles", (unsigned long long)(gp_done_at - now_c));
+    vv_quirk_report(VV_Q_GP_BUSY, vv_cur_pc, "GP_CODE store while the GPU is busy (%llu more cycles): HW drops the launch (GraphicsProcessor.v T_START needs GP_ready); GP_WAIT() first",
+                    (unsigned long long)(gp_done_at - now_c));
+    return 0;
+}
+void vv_gp_start(uint32_t gp_frame, int rc, uint64_t pixels, int ncmds, int worker) {
+    gp_rframe = frame_bits(gp_frame); gp_fault = 0; gp_launches++;
+    gp_busy = 1; gp_worker = worker; gp_rc = rc;
+    gp_done_at = now_c + pixels / 4 + 32u * (uint64_t)(ncmds > 0 ? ncmds : 1);
+    VV_EVT("gp-busy until %llu (%llu pixels, %d cmds)", (unsigned long long)gp_done_at, (unsigned long long)pixels, ncmds);
+}
+static void gp_complete(void) {             /* the ready rising edge (irq_gp_done) */
+    if (gp_worker) vv_gpu_wait();           /* (normally finished long ago) */
+    gp_busy = 0; gp_fault = gp_rc < -1;
+    VV_EVT("gp-done rc %d", gp_rc);
+    raise(VV_IP_GP);
+}
 uint32_t vv_gp_status_word(void) {
-    return (pf_cur & 0x3Fu) << 24 | gp_fault << 15 | (gp_rframe & 0x3Fu) << 8 | 0x1Fu;
+    return (pf_cur & 0x3Fu) << 24 | gp_fault << 15 | (gp_rframe & 0x3Fu) << 8 | (gp_busy ? 0u : 0x1Fu);
 }
 
 /* ---------------- COP0 register access ---------------- */
@@ -194,6 +218,7 @@ void vv_hw_tick(uc_engine *uc, uint64_t now) {
         if ((uint32_t)(0xFFFFFFFFu - c0 - 1u) < span) raise(VV_IP_RTC);
     }
     if (vv_legacy_io) return;
+    if (gp_busy && now >= gp_done_at) gp_complete();
     /* UART RX: land the byte being received, then start the next host byte */
     if (rx_busy && now >= rx_land) {
         if (rx_has) {
@@ -244,6 +269,8 @@ void vv_hw_summary(void) {
             (unsigned long long)hits_ip[0], (unsigned long long)hits_ip[1], (unsigned long long)hits_ip[2],
             (unsigned long long)hits_ip[3], (unsigned long long)hits_ip[4], (unsigned long long)hits_ip[5],
             (unsigned long long)storms);
+    if (vv_gp_async) vv_eprintf("[hw] GPU (threaded): %llu launches, %llu dropped while busy (gp-busy)\n",
+                                (unsigned long long)gp_launches, (unsigned long long)gp_dropped);
     if (!vv_pf_period || !pf_t0) return;
     int wall = vv_frame_clock == VV_FRAME_CLOCK_WALL;
     double el = (double)((wall ? pf_t_last : vv_mono_ns()) - pf_t0) * 1e-9, rt = 1e9 / VV_PF_WALL_NS;

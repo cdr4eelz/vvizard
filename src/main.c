@@ -24,6 +24,7 @@
 #include "prng.h"
 #include "lcd.h"
 #include "hw.h"
+#include "dcache.h"
 
 /* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
  * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
@@ -82,6 +83,7 @@ static uint64_t max_insns;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
 static int trace_left = -1;
+static int ddr_executed;                         /* the guest fetched from DDR (threaded GPU: draw inline) */
 /* Guest exit register (VV_OW_GUEST_EXIT, 0x80000084): a store ends the run right after the store
  * instruction; the process exits with code & 0xFF.  --no-guest-exit drops the store (FPGA behaviour). */
 static int opt_guest_exit = 1, guest_exited, stop_req;   /* stop_req: hook_code stops before the next insn */
@@ -318,7 +320,27 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
             /* hook_code stops before the next insn runs */
         }
         break;
-    case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
+    case VV_OW_GP_GCODE:  gp_code = v;
+        if (vv_gp_async) {   /* threaded: busy until the completion cycle (hw.c); drawn by the worker */
+            if (!vv_gp_try_launch()) break;                /* busy: dropped (gp-busy) */
+            gp_launches++;
+            VV_EVT("gp-launch #%u code 0x%08x frame 0x%08x", gp_launches, gp_code, gp_frame);
+            uint64_t pix; int nc;
+            int n = vv_gpu_count(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1, &pix, &nc);
+            /* Host stores do not drop Unicorn's translated code; once the guest has executed from
+             * DDR, draw inline with uc_mem_write instead (same timing). */
+            int worker = !ddr_executed;
+            if (worker) {
+                uint32_t fb = VV_FRAME0 + (((gp_frame >> 28) ? (gp_frame >> VV_FSHIFT) & VV_FNMASK : gp_frame & VV_FNMASK) << VV_FSHIFT);
+                vv_dc_dma_snapshot(fb, fb + (1u << VV_FSHIFT));   /* D-cache lines over the target frame */
+                vv_gpu_submit(gp_frame, gp_code, nc);
+            } else vv_gpu_draw_uc(uc, gp_frame, gp_code, nc);
+            vv_gp_start(gp_frame, n, pix, nc, worker);
+            if (!opt_quiet_mmio) vv_eprintf("[gpu] launch #%u code@0x%08x frame=0x%08x -> %d cmds (%llu pixels, %s)\n", gp_launches, gp_code, gp_frame, n,
+                                         (unsigned long long)pix, worker ? "worker" : "inline");
+            break;
+        }
+        gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
         VV_EVT("gp-launch #%u code 0x%08x frame 0x%08x", gp_launches, gp_code, gp_frame);
         { int n = vv_gpu_run(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1);
           vv_gp_launched(gp_frame, n);                 /* GP status frame/fault + irq_gp_done (Cause bit 12) */
@@ -365,6 +387,7 @@ static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e,
         }
         return false;
     }
+    if (fetch && (pa >> 28) == 0x1) ddr_executed = 1;
     e->paddr = pa & ~0xFFFull;                   /* page granularity; offset kept by Unicorn */
     e->perms = region_for((uint32_t)va)->prot;
     return true;
@@ -646,9 +669,12 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
-"  --threads=on|off   on (default): with a window, the emulator runs on its own thread and the\n"
-"                     main thread draws (frame copied at each frame end); off = --sync = --threads=1:\n"
-"                     one thread, as before\n"
+"  --threads=on|off   on (default): GPU command lists are drawn by a worker thread and, with a\n"
+"                     window, the emulator runs on its own thread while the main thread draws (frame\n"
+"                     copied at each frame end).  The GPU is then busy (GP_STATE ready bits 0) until\n"
+"                     launch + pixels/4 + 32 x commands cycles, Cause bit 12 rises at that edge, and a\n"
+"                     GP_CODE store while busy is dropped (gp-busy).  off = --sync = --threads=1: one\n"
+"                     thread, GPU completes inside the store (ready always 1), as before\n"
 "  --color[=WHEN]     WHEN: auto (default), always (= bare --color) or never.  stdout carries only\n"
 "                     the guest's UART output and stderr everything else; with color, UART text is\n"
 "                     bold green and stderr [tags] / register names are highlighted (stderr only\n"
@@ -887,10 +913,16 @@ int main(int argc, char **argv) {
     vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
             vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
-            !opt_threads ? "off (--sync)" : vv_disp_has_window() ? "on (emulator + display)" : "on (no window: emulator only)");
+            !opt_threads ? "off (--sync)" : vv_legacy_io ? (vv_disp_has_window() ? "on (emulator + display; GPU synchronous: --legacy-io)" : "on (no window, --legacy-io: one thread)")
+            : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)");
     vv_quirk_decode = vv_quirk_needs_decode();
     run_t0 = vv_mono_ns();
     emu_entry = entry; emu_until = have_stop ? stop_addr : 0xFFFFFFFFull;   /* max_insns: hook_code */
+    /* threaded GPU: headless too (the ready bit and gp-busy exist without a window) */
+    if (opt_threads && !vv_legacy_io) {
+        if (vv_gpu_worker_start()) vv_eprintf("[run] cannot start the GPU worker thread; GPU stays synchronous\n");
+        else vv_gp_async = 1;
+    }
     pthread_t emu_tid; pthread_attr_t ta;
     int threaded_disp = opt_threads && vv_disp_has_window();
     if (threaded_disp) {                       /* emulator thread; raylib stays on this one */
@@ -902,6 +934,7 @@ int main(int argc, char **argv) {
     }
     if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
     else err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    vv_gpu_worker_stop();                      /* finish a draw in flight; one thread from here on */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
     /* (Unicorn 2.1.1 MIPS reported UC_ERR_EXCEPTION when uc_emu_start's own count limit hit, with no

@@ -81,6 +81,13 @@ uint32_t vv_uart_rx_read(void);                     /* RX_DATA read: data + Data
 void     vv_pf_write(uc_engine *uc, uint32_t v);    /* PF_FRAME store */
 uint32_t vv_pf_frame(void);                         /* frame being scanned out (framebits_r) */
 void     vv_gp_launched(uint32_t gp_frame, int rc); /* after a GP_CODE launch (rc < -1: bad opcode fault) */
+/* Threaded GPU (--threads=on, not --legacy-io; docs/MULTITHREADING-PLAN.md section 6): GP_STATE
+ * ready bits read 0 from the launch until cycle launch + pixels/4 + 32 * commands; then (after
+ * waiting for the worker if it is still drawing) they rise and Cause bit 12 is latched. */
+extern int vv_gp_async;
+int      vv_gp_try_launch(void);                    /* 0: GPU busy, launch dropped (gp-busy) */
+void     vv_gp_start(uint32_t gp_frame, int rc, uint64_t pixels, int ncmds, int worker);
+int      vv_gp_busy(void);
 uint32_t vv_gp_status_word(void);                   /* GP_STATE (0x8000005C) read value */
 void     vv_hw_summary(void);
 /* provided by main.c: the host side of the serial line */

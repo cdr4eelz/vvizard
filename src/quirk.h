@@ -16,7 +16,7 @@
 #include <stdio.h>
 
 /* id, name, default (1 = current hardware has it), bug (1 = guest-bug detector: reported as a warning
- * by default), hardware behaviour (shown in diagnostics).  For tx-busy, rx-overrun, irq-storm and
+ * by default), hardware behaviour (shown in diagnostics).  For tx-busy, gp-busy, rx-overrun, irq-storm and
  * undef-reg the hardware behaviour is always modelled (src/hw.c; --legacy-io turns off the UART
  * timing); only dcache-stale has an emulation switch. */
 #define VV_QUIRK_TABLE \
@@ -40,6 +40,7 @@
     Q(TX_BUSY, "tx-busy", 1, 1, "a UART TX_DATA store while TX is busy (TX_READY=0 for 4773 cycles after the previous byte) is lost (cpu/MemMapIO.v:101, base_io/UATransmit.v:30)") \
     Q(RX_OVERRUN, "rx-overrun", 1, 1, "UART RX holds one byte: a byte that lands before the previous one was read overwrites it (base_io/UAReceive.v:103-107)") \
     Q(IRQ_STORM, "irq-storm", 1, 1, "the ISR returns (re-enables Status.IE, or runs eret) while the Cause bit that caused the interrupt is still set and enabled: COP0150 interrupts again right away (cpu/COP0150.v:56,91)") \
+    Q(GP_BUSY, "gp-busy", 1, 1, "a GP_CODE store while the GPU is busy (GP_STATE gp_ready=0) is dropped: GraphicsProcessor starts only on GP_ready && GP_vcode (gpu/GraphicsProcessor.v T_START, cpu/MemMapIO.v gp_vcode); wait with GP_WAIT() (software/common/graphics.h).  Only with --threads=on: the --sync GPU is always ready") \
     Q(UNDEF_REG, "undef-reg", 1, 1, "an instruction reads a GPR never written since reset: the register file is distributed RAM without reset (0 after FPGA configuration, stale after a reset); vvizard no longer presets $sp (innerds/RegFile.v:38-41)")
 
 enum {
@@ -56,14 +57,14 @@ extern int vv_quirk_halted;      /* set once a halt-mode quirk stopped the run *
 #define vv_quirk_on(id)  ((vv_quirk_emul >> (id)) & 1u)
 #define vv_quirk_active() (vv_quirk_emul | vv_quirk_detect)
 /* Which quirks need the per-instruction decode (vv_quirk_post / vv_quirk_pre in the code hook).
- * Not needed: tx-busy and rx-overrun (detected in the UART model, src/hw.c), irq-storm (Status.IE
+ * Not needed: tx-busy, gp-busy and rx-overrun (detected in the UART model, src/hw.c), irq-storm (Status.IE
  * edge in irq_step; its eret case is vv_quirk_pre_lite, which reads only ISR instructions) and
  * unmapped-fetch (tlb_fill).  Their emulation switches do nothing per instruction either, nor does
  * undef-reg's (the register file model has no switch).  Everything else, emulated or detected,
  * is decoded in pre(): undef-reg and dcache-stale detection, load-use, mmio-lane detection (its
  * emulation is in mmio_write, but pre() counts its hits), and the other emulated quirks. */
 #define VV_Q_BIT(id) (1u << VV_Q_##id)
-#define VV_Q_NODECODE_DET  (VV_Q_BIT(TX_BUSY) | VV_Q_BIT(RX_OVERRUN) | VV_Q_BIT(IRQ_STORM) | VV_Q_BIT(UNMAPPED_FETCH))
+#define VV_Q_NODECODE_DET  (VV_Q_BIT(TX_BUSY) | VV_Q_BIT(GP_BUSY) | VV_Q_BIT(RX_OVERRUN) | VV_Q_BIT(IRQ_STORM) | VV_Q_BIT(UNMAPPED_FETCH))
 #define VV_Q_NODECODE_EMUL (VV_Q_NODECODE_DET | VV_Q_BIT(UNDEF_REG))
 #define vv_quirk_needs_decode() \
     (((vv_quirk_emul & ~VV_Q_NODECODE_EMUL) | (vv_quirk_detect & ~VV_Q_NODECODE_DET)) != 0)

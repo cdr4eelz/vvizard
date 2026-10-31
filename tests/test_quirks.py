@@ -138,7 +138,7 @@ def main():
         ("--help", lambda: (lambda r: r.returncode == 0 and "--bare" in r.stdout and "no-NAME" in r.stdout)(
             subprocess.run([VV, "--help"], capture_output=True, env=ENV, text=True))),
         ("bad name -> rc 2", lambda: run(hilo, "--quirks=bogus")[0] == 2),
-        ("--list-quirks", lambda: subprocess.run([VV, "--list-quirks"], capture_output=True, env=ENV, text=True).stdout.count("\n") == 22),
+        ("--list-quirks", lambda: subprocess.run([VV, "--list-quirks"], capture_output=True, env=ENV, text=True).stdout.count("\n") == 23),
     ]
     for label, fn in cases:
         ok = fn(); total += 1; fails += not ok
