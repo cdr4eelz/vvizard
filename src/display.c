@@ -1,5 +1,6 @@
 /* display.c - PixelFeeder frame viewer (raylib) + PPM dump, with a status strip under the
  * 800x600 frame: the 2x16 LCD (src/lcd.c), a status line and a recent-keys ticker. */
+#include "term.h"
 #include "display.h"
 #include "memmap.h"
 #include "lcd.h"
@@ -141,11 +142,15 @@ static void draw(uc_engine *uc) {
     collect_keys();                         /* EndDrawing polled; queues reset next poll */
     last_draw = now();
 }
+static void raylib_log(int level, const char *fmt, va_list ap) {   /* raylib logs to stdout by default */
+    (void)level; vv_eprintf("[raylib] "); vv_veprintf(fmt, ap); vv_eprintf("\n");
+}
 int vv_disp_init(int want_window) {
     if (!want_window) return 0;
+    SetTraceLogCallback(raylib_log);
     SetTraceLogLevel(LOG_WARNING);
     InitWindow(VV_SCREEN_W, VV_SCREEN_H + VV_STRIP_H, "vvizard");
-    if (!IsWindowReady()) { fprintf(stderr, "[disp] cannot open window; continuing headless\n"); return -1; }
+    if (!IsWindowReady()) { vv_eprintf("[disp] cannot open window; continuing headless\n"); return -1; }
     Image img = { rgba, VV_SCREEN_W, VV_SCREEN_H, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
     tex = LoadTextureFromImage(img);
     SetExitKey(KEY_NULL);                   /* Esc goes to UART, not window close */
@@ -169,19 +174,19 @@ int vv_disp_dump_ppm(uc_engine *uc, const char *path) {
     fprintf(f, "P6\n%d %d\n255\n", VV_SCREEN_W, VV_SCREEN_H);
     for (int i = 0; i < VV_SCREEN_W * VV_SCREEN_H; i++) fwrite(rgba + 4*i, 1, 3, f);
     fclose(f);
-    fprintf(stderr, "[disp] dumped frame %u (0x%08x) to %s\n", cur_frame, VV_FRAME0 + (cur_frame << VV_FSHIFT), path);
+    vv_eprintf("[disp] dumped frame %u (0x%08x) to %s\n", cur_frame, VV_FRAME0 + (cur_frame << VV_FSHIFT), path);
     return 0;
 }
 /* Whole window (frame + strip) as PNG: render offscreen so the read-back is well defined. */
 int vv_disp_screenshot(uc_engine *uc, const char *path) {
-    if (!have_window) { fprintf(stderr, "[disp] --screenshot needs the window\n"); return -1; }
+    if (!have_window) { vv_eprintf("[disp] --screenshot needs the window\n"); return -1; }
     grab(uc); UpdateTexture(tex, rgba);
     RenderTexture2D rt = LoadRenderTexture(VV_SCREEN_W, VV_SCREEN_H + VV_STRIP_H);
     BeginTextureMode(rt); render(uc); EndTextureMode();
     Image img = LoadImageFromTexture(rt.texture); ImageFlipVertical(&img);
     int ok = ExportImage(img, path);
     UnloadImage(img); UnloadRenderTexture(rt);
-    fprintf(stderr, "[disp] screenshot %s %s\n", path, ok ? "written" : "FAILED");
+    vv_eprintf("[disp] screenshot %s %s\n", path, ok ? "written" : "FAILED");
     return ok ? 0 : -1;
 }
 void vv_disp_close(void) { if (have_window) { UnloadTexture(tex); CloseWindow(); have_window = 0; } }

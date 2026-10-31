@@ -9,6 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VV = os.path.join(os.path.dirname(HERE), "vvizard")
 ENV = dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib"))
 ENV.pop("VVIZARD_QUIRKS", None)
+ENV.pop("NO_COLOR", None)
 BASE = ["--no-window", "--quiet-mmio", "--no-random-ddr", "--no-bios"]
 
 
@@ -105,8 +106,24 @@ def t_dcache_stale():  # stale line after a GPU write: HW (default) reads the ol
         and halted(h, "dcache-stale")
 
 
+# ---- C: output streams and --color ----
+def t_streams():      # stdout = guest UART bytes only (also with --trace-regs); vvizard's own text on stderr
+    r = run("uart_tx", 6, "--trace-regs", "--color=never")
+    return r.returncode == 0 and r.stdout == b"AB" and "[trace]" in r.err and "[run]" in r.err \
+        and "---- registers" in r.err and "\x1b" not in r.err
+def t_color():        # auto (not a tty) = off; always: green UART run on stdout, [tags]/register names on stderr
+    a = run("uart_tx", 6)
+    w = run("uart_tx", 6, "--color")
+    green = re.fullmatch(rb"\x1b\[1;(?:32|38;5;46)mAB\x1b\[0m", w.stdout)
+    bad = run("uart_tx", None, "--color=sometimes")
+    return a.stdout == b"AB" and "\x1b" not in a.err and w.returncode == 0 and bool(green) \
+        and "\x1b[1;31m[stop]\x1b[0m" in w.err and "\x1b[1;36mzero\x1b[0m=" in w.err \
+        and "\x1b[1;36mpc\x1b[0m=" in w.err and bad.returncode == 2 and bad.stdout == b""
+
+
 TESTS = [t_uart_tx, t_uart_rx, t_uart_rx_hold, t_pf, t_pf_period, t_timer, t_irq_defer, t_gp_status, t_reset_regs,
-         t_legacy_io, t_tx_busy, t_rx_overrun, t_irq_storm, t_undef_reg, t_dcache_stale]
+         t_legacy_io, t_tx_busy, t_rx_overrun, t_irq_storm, t_undef_reg, t_dcache_stale,
+         t_streams, t_color]
 
 
 def main():

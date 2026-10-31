@@ -1,4 +1,5 @@
 /* hw.c - cycle-timed MIPS150 devices (see hw.h).  `now` = CPU cycles = instructions executed. */
+#include "term.h"
 #include "hw.h"
 #include "quirk.h"
 #include "memmap.h"
@@ -71,7 +72,7 @@ void vv_uart_tx_write(uint8_t c) {
                         c, (unsigned long long)(tx_ready_at - now_c));
         return;
     }
-    putchar(c); fflush(stdout); tx_sent++;
+    vv_uart_out(c); tx_sent++;                 /* stdout = the serial line only (term.c) */
     if (!vv_legacy_io) { tx_ready_at = now_c + VV_UART_TX_BUSY; tx_irq_due = 1; }
 }
 
@@ -196,8 +197,8 @@ void vv_hw_tick(uc_engine *uc, uint64_t now) {
 }
 
 void vv_hw_summary(void) {
-    if (vv_legacy_io) { fprintf(stderr, "[hw] --legacy-io: untimed UART, instant PF_FRAME, UARX-only interrupts\n"); return; }
-    fprintf(stderr, "[hw] cycles %llu: UART tx %llu (lost %llu) rx %llu (overrun %llu); frames scanned %llu; "
+    if (vv_legacy_io) { vv_eprintf("[hw] --legacy-io: untimed UART, instant PF_FRAME, UARX-only interrupts\n"); return; }
+    vv_eprintf("[hw] cycles %llu: UART tx %llu (lost %llu) rx %llu (overrun %llu); frames scanned %llu; "
             "Cause IP latched: uarx %llu uatx %llu gp %llu pf %llu rtc %llu timer %llu; irq storms %llu\n",
             (unsigned long long)now_c, (unsigned long long)tx_sent, (unsigned long long)tx_lost,
             (unsigned long long)rx_bytes, (unsigned long long)rx_overruns, (unsigned long long)pf_frames,

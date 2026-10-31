@@ -13,5 +13,5 @@ void     vv_lcd_reset(void);                  /* fill from INIT_TEXT */
 void     vv_lcd_write(unsigned idx, uint8_t ch);
 uint8_t  vv_lcd_get(unsigned idx);
 uint64_t vv_lcd_writes(void);                 /* number of LCD stores so far */
-void     vv_lcd_dump(FILE *f);                /* "[lcd] 1|...|" text + hex, both lines */
+void     vv_lcd_dump(void);                   /* stderr: "[lcd] 1|...|" text + hex, both lines */
 #endif

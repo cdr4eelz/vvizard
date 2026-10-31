@@ -3,7 +3,7 @@ UNICORN_PC := $(HOME)/.local/lib/pkgconfig
 export PKG_CONFIG_PATH := $(UNICORN_PC)$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH))
 
 # VVIZARD: Unicorn-based MIPS emulator for the cs150 project
-# Usage: make [all|clean|fresh|run BIN=path/to/prog.elf [ARGS=...]]
+# Usage: make [all|clean|fresh|run BIN=path/to/prog.elf [ARGS=...]] [DEBUG=1]
 
 TARGET     := vvizard
 SRC_DIR    := src
@@ -11,7 +11,15 @@ BUILD_DIR  := build
 
 CC         := gcc
 CPPFLAGS   ?= -I$(SRC_DIR)
-CFLAGS     ?= -std=gnu99 -Wall -Wextra -O0 -g3 -fno-omit-frame-pointer
+# Host (vvizard) build: optimized by default; make DEBUG=1 builds the old unoptimized debug flavour.
+# (The MIPS test programs use T_ASOPTS below, unaffected.)  Objects rebuild when the flags change.
+DEBUG      ?= 0
+ifeq ($(DEBUG),1)
+OPTFLAGS   ?= -O0 -g3 -fno-omit-frame-pointer
+else
+OPTFLAGS   ?= -O3 -g
+endif
+CFLAGS     ?= -std=gnu99 -Wall -Wextra $(OPTFLAGS)
 
 UNICORN_CFLAGS := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config --cflags unicorn)
 UNICORN_LIBS   := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config --libs unicorn) -Wl,-rpath,$(HOME)/.local/lib
@@ -37,6 +45,8 @@ BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM
 # Auto-type the jump to the IMEM app at the GIOS prompt (GIOS ends tokens on space/CR).
 AUTORUN ?= jal 60000000\r
 ARGS ?= --random-ddr --irq --max-insns 0 --quiet-mmio
+# --color: auto (color when stdout is a terminal and NO_COLOR is unset), always or never
+COLOR ?= auto
 # Extra flags appended to ARGS without replacing the defaults, e.g. EXTRA=--trace=100
 EXTRA ?=
 # MIPS150 hardware quirks to EMULATE (README "Hardware quirks"; ./vvizard --list-quirks).
@@ -49,7 +59,7 @@ HW_QUIRKS ?= default
 # (also non-emulated ones) or QUIRKS=--warn-on-quirk.
 QUIRKS ?= --halt-on-quirk
 
-.PHONY: all clean fresh run test test-hex test-hw test-player test-quirks tests check-hex refresh-hex
+.PHONY: all clean fresh run FORCE test test-hex test-hw test-player test-quirks tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -110,10 +120,16 @@ endif
 refresh-hex: tests
 	@for h in $(T_HEXS); do cp $$h tests/$${h#$(BUILD_DIR)/tests/}; done; echo "refresh-hex: $(words $(T_HEXS)) files"
 
-$(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) $^ -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
+# Flags stamp: rewritten only when the compile/link command changes, so switching DEBUG/CFLAGS rebuilds everything.
+FLAGS_STAMP := $(BUILD_DIR)/.flags
+FLAGS_LINE   = $(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) BIOS=$(BIOS) LINK=$(LDFLAGS) $(UNICORN_LIBS) $(RAYLIB_LIBS)
+$(FLAGS_STAMP): FORCE | $(BUILD_DIR)
+	@echo '$(subst ','\'',$(FLAGS_LINE))' | cmp -s - $@ || echo '$(subst ','\'',$(FLAGS_LINE))' > $@
 
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) | $(BUILD_DIR)
+$(TARGET): $(OBJS) $(FLAGS_STAMP)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJS) -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
+
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) -c $< -o $@
 
 # Default BIOS path compiled into main.c (override at run time with --bios / --no-bios)
@@ -123,7 +139,7 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 run: $(TARGET)
-	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') --quirks=$(HW_QUIRKS) $(QUIRKS) $(ARGS) $(EXTRA) $(BIN)
+	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') --quirks=$(HW_QUIRKS) $(QUIRKS) $(if $(COLOR),--color=$(COLOR)) $(ARGS) $(EXTRA) $(BIN)
 
 test-player: $(TARGET)
 	python3 tests/test_player.py

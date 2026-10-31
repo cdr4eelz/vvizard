@@ -1,6 +1,7 @@
 /* gpu.c - GraphicsProcessor command interpreter (instant completion).
  * Evidence: hardware/src/gpu/gpcommands.vh, GraphicsProcessor.v, RectangleEngine.v,
  * ScanLineRunner.v, FrameFiller.v; software/common/graphics.h. */
+#include "term.h"
 #include "gpu.h"
 #include "memmap.h"
 #include "loader.h"
@@ -145,7 +146,7 @@ int vv_gpu_run(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose) {
             continue;
         }
         if (op != VV_GOP_LINE && op != VV_GOP_ELIP && op != VV_GOP_RECT) {
-            fprintf(stderr, "[gpu] fault: bad opcode %u (0x%08x) at 0x%08x\n", op, inst, pc - 4);
+            vv_eprintf("[gpu] fault: bad opcode %u (0x%08x) at 0x%08x\n", op, inst, pc - 4);
             st.faults++; st.cmds += n;
             return -2;                         /* GP_fault (GraphicsProcessor.v:188-189) */
         }
@@ -157,9 +158,9 @@ int vv_gpu_run(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose) {
         if (!ok) break;
         if (op == VV_GOP_RECT) do_rect(uc, x0, y0, x1, y1, color, fill);
         else                   do_elip(uc, x0, y0, x1, y1, color, fill);
-        if (verbose > 1) fprintf(stderr, "[gpu] op%u (%d,%d)-(%d,%d) c=%07x f=%08x\n", op, x0, y0, x1, y1, color, fill);
+        if (verbose > 1) vv_eprintf("[gpu] op%u (%d,%d)-(%d,%d) c=%07x f=%08x\n", op, x0, y0, x1, y1, color, fill);
     }
     st.faults++; st.cmds += n;
-    fprintf(stderr, "[gpu] fault: command list at 0x%08x ended without STOP (%d cmds)\n", code, n);
+    vv_eprintf("[gpu] fault: command list at 0x%08x ended without STOP (%d cmds)\n", code, n);
     return -1;
 }

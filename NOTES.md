@@ -98,6 +98,10 @@ Makefile build leaves out (`--no-pad-sections`).
   - `legacy_io`: `uart_txbusy` prints `AB` with TX_READY 1 and `pf` switches at once under `--legacy-io`.
   - `tx_busy`: `uart_txbusy` prints only `A`, warns `tx-busy`, `[hw]` lost 1; halts with `--halt-on-quirk`; silent
     with `--quiet-quirk=tx-busy`.
+  - `streams`: `uart_tx` with `--trace-regs --color=never`: stdout is exactly `AB` while `[trace]`, `[run]` and
+    the register dump are on stderr, with no escape codes. `color`: auto (stdout not a terminal, `NO_COLOR` unset)
+    leaves both plain; bare `--color` (= always) gives stdout `ESC[1;32m` or `ESC[1;38;5;46m`, `AB`, `ESC[0m`, and
+    stderr `[stop]` in red and register names (`zero`, `pc`) highlighted; `--color=sometimes` exits 2.
   - `irq_storm` / `irq_storm_eret` (5): the ISR returns twice with the timer bit pending (via `jr`+`mtc0 Status`, or
     after an `eret`): 3 entries, `irq-storm` warned (`eret with Cause` for the second), `[hw]` irq storms 2; halts
     with `--halt-on-quirk`.

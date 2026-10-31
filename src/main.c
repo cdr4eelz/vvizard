@@ -10,6 +10,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <time.h>
+#include "term.h"
 #include "memmap.h"
 #include "loader.h"
 #include "display.h"
@@ -113,10 +114,10 @@ static void run_event(uc_engine *uc, vv_event *e) {
     if (e->is_dump) vv_disp_dump_ppm(uc, e->arg);
     else for (char *c = e->arg; *c; c++) {
         size_t n = (sq_tail + 1) % sizeof script_q;
-        if (n == sq_head) { fprintf(stderr, "[script] RX queue full\n"); break; }
+        if (n == sq_head) { vv_eprintf("[script] RX queue full\n"); break; }
         script_q[sq_tail] = *c; sq_tail = n; vv_disp_key_log((unsigned char)*c);
     }
-    fprintf(stderr, "[script] %c%llu %s %s (insn %llu, frame %llu)\n", e->is_frame ? 'f' : 'i',
+    vv_eprintf("[script] %c%llu %s %s (insn %llu, frame %llu)\n", e->is_frame ? 'f' : 'i',
             (unsigned long long)e->when, e->is_dump ? "dump" : "key", e->is_dump ? e->arg : "", 
             (unsigned long long)insn_count, (unsigned long long)pf_writes);
 }
@@ -136,7 +137,7 @@ static int load_script(const char *path) {
         int n = sscanf(line, " %63s %15s %899[^\n]", w, act, arg);
         if (n <= 0) continue;
         if (n < 2 || (w[0] != 'f' && w[0] != 'i') || (strcmp(act, "key") && strcmp(act, "dump"))) {
-            fprintf(stderr, "%s:%d: bad line\n", path, ln); fclose(f); return -1; }
+            vv_eprintf("%s:%d: bad line\n", path, ln); fclose(f); return -1; }
         for (char *e = arg + strlen(arg); e > arg && (e[-1] == ' ' || e[-1] == '\r'); ) *--e = 0;
         events = realloc(events, (nevents + 1) * sizeof *events);
         vv_event *e = &events[nevents++];
@@ -224,7 +225,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     uint32_t v = 0;
     if (w >= VV_MMIO_REG_SPAN) {                /* LCD window reads 0; elsewhere HW reads 32'dx */
         if (!opt_quiet_mmio && (w < VV_OW_LCD_BASE || w >= VV_OW_LCD_END))
-            fprintf(stderr, "[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
+            vv_eprintf("[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
         w = 0xFFFFFFFFu;                        /* no register: v stays 0 */
     }
     switch (w) {
@@ -238,13 +239,13 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
     case 0xFFFFFFFFu: break;
     default:
-        if (!opt_quiet_mmio) fprintf(stderr, "[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
+        if (!opt_quiet_mmio) vv_eprintf("[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
     }
     /* Sub-word reads (e.g. lbu OB_UARX_DATA = +3 on big-endian): Unicorn hands us the
      * byte offset; return the matching lane of the 32-bit big-endian word. */
     if (size < 4) { unsigned lane = off & 3; v = (v >> (8 * (4 - size - lane))) & ((1u << (8 * size)) - 1); }
     if (!opt_quiet_mmio && w != VV_OW_UATX_READY && w != VV_OW_UARX_VALID)
-        fprintf(stderr, "[mmio] R off=0x%04x size=%u -> 0x%08x\n", (unsigned)off, size, v);
+        vv_eprintf("[mmio] R off=0x%04x size=%u -> 0x%08x\n", (unsigned)off, size, v);
     return v;
 }
 static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val, void *u) {
@@ -257,9 +258,9 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     if (w >= VV_MMIO_REG_SPAN) {                /* registers decode only at addra[11:6]==0 */
         if (w < VV_OW_LCD_END) {                /* LCDText2x16_MemPort: addra[11:5]==2, wdata = dina[7:0] */
             vv_lcd_write((w - VV_OW_LCD_BASE) >> 2, (uint8_t)v);
-            if (!opt_quiet_mmio) fprintf(stderr, "[mmio] W off=0x%04x size=%u <- 0x%08x (LCD[%u] = 0x%02x)\n",
+            if (!opt_quiet_mmio) vv_eprintf("[mmio] W off=0x%04x size=%u <- 0x%08x (LCD[%u] = 0x%02x)\n",
                                          (unsigned)off, size, v, (unsigned)(w - VV_OW_LCD_BASE) >> 2, v & 0xFF);
-        } else if (!opt_quiet_mmio) fprintf(stderr, "[mmio] MISS-WRITE off=0x%04x size=%u <- 0x%08x (dropped)\n", (unsigned)off, size, v);
+        } else if (!opt_quiet_mmio) vv_eprintf("[mmio] MISS-WRITE off=0x%04x size=%u <- 0x%08x (dropped)\n", (unsigned)off, size, v);
         return;
     }
     switch (w) {
@@ -279,11 +280,11 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
         { int n = vv_gpu_run(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1);
           vv_gp_launched(gp_frame, n);                 /* GP status frame/fault + irq_gp_done (Cause bit 12) */
-          if (!opt_quiet_mmio) fprintf(stderr, "[gpu] launch #%u code@0x%08x frame=0x%08x -> %d cmds\n", gp_launches, gp_code, gp_frame, n); }
+          if (!opt_quiet_mmio) vv_eprintf("[gpu] launch #%u code@0x%08x frame=0x%08x -> %d cmds\n", gp_launches, gp_code, gp_frame, n); }
         break;
     default: break;
     }
-    if (!opt_quiet_mmio) fprintf(stderr, "[mmio] W off=0x%04x size=%u <- 0x%08x\n", (unsigned)off, size, v);
+    if (!opt_quiet_mmio) vv_eprintf("[mmio] W off=0x%04x size=%u <- 0x%08x\n", (unsigned)off, size, v);
 }
 
 static int stop_reason_intr = -1;
@@ -332,17 +333,21 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
         else if (!vv_quirk_halted) vv_quirk_pre(uc, (uint32_t)addr);
         if (vv_quirk_halted) return;
     } else if (opt_irq) irq_step(uc, (uint32_t)addr);
-    if ((insn_count & 0xFFF) == 0 && vv_disp_tick(uc)) { fprintf(stderr, "[stop] window closed\n"); uc_emu_stop(uc); }
+    if ((insn_count & 0xFFF) == 0) {
+        vv_term_tick();                      /* flush pending UART text (e.g. a prompt with no newline) */
+        if (vv_disp_tick(uc)) { vv_eprintf("[stop] window closed\n"); uc_emu_stop(uc); }
+    }
     if (opt_trace && trace_left != 0) {
         uint32_t insn = 0; unsigned char b[4];
         uint32_t ca = vv_canon((uint32_t)addr);
         if (ca != 0xFFFFFFFFu && (ca >> 28) != 0x8 && !uc_mem_read(uc, ca, b, 4)) insn = b[0]<<24|b[1]<<16|b[2]<<8|b[3];
-        fprintf(stderr, "[trace] %8llu pc=0x%08x insn=%08x", (unsigned long long)insn_count, (uint32_t)addr, insn);
+        vv_eprintf("[trace] %8llu pc=0x%08x insn=%08x", (unsigned long long)insn_count, (uint32_t)addr, insn);
         if (opt_trace_regs) { /* GPRs changed by the PREVIOUS instruction (debug aid) */
             for (int i = 1; i < 32; i++) { uint32_t v; uc_reg_read(uc, UC_MIPS_REG_0 + i, &v);
-                if (v != prev_regs[i]) { fprintf(stderr, " | r%d=%08x", i, v); prev_regs[i] = v; } }
+                if (v != prev_regs[i]) { char n[8], b[32]; snprintf(n, sizeof n, "r%d", i);
+                    vv_eprintf(" | %s=%08x", vv_creg(n, b, sizeof b), v); prev_regs[i] = v; } }
         }
-        fputc('\n', stderr);
+        vv_eprintf("\n");
         if (trace_left > 0) trace_left--;
     }
 }
@@ -354,20 +359,20 @@ static void hook_intr(uc_engine *uc, uint32_t intno, void *u) {
      * (pc reported here is not reliable inside the hook; Unicorn may show 0). */
     const char *nm = intno == 18 ? "BREAK" : intno == 17 ? "SYSCALL" : intno == 8 ? "EXT_INTERRUPT" :
                      intno == 12 ? "AdEL" : intno == 13 ? "AdES" : intno == 20 ? "RI" : "?";
-    fprintf(stderr, "[stop] CPU exception intno=%u (%s) pc=0x%08x\n", intno, nm, pc);
+    vv_eprintf("[stop] CPU exception intno=%u (%s) pc=0x%08x\n", intno, nm, pc);
     uc_emu_stop(uc);
 }
 static bool hook_unmapped(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int64_t v, void *u) {
     (void)uc; (void)u;
     if (vv_quirk_halted) return false;
-    fprintf(stderr, "[fault] unmapped %s at 0x%08x size %d val 0x%llx\n",
+    vv_eprintf("[fault] unmapped %s at 0x%08x size %d val 0x%llx\n",
             t == UC_MEM_FETCH_UNMAPPED ? "fetch" : t == UC_MEM_WRITE_UNMAPPED ? "write" : "read",
             (uint32_t)a, sz, (long long)v);
     return false;
 }
 static void hook_bios_write(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int64_t v, void *u) {
     (void)uc; (void)t; (void)u;
-    fprintf(stderr, "[warn] data write to BIOS 0x%08x size %d val 0x%llx (HW drops this; %s)\n", (uint32_t)a, sz, (long long)v,
+    vv_eprintf("[warn] data write to BIOS 0x%08x size %d val 0x%llx (HW drops this; %s)\n", (uint32_t)a, sz, (long long)v,
             vv_quirk_on(VV_Q_BIOS_STORE) ? "dropped: bios-store quirk on" : "kept: bios-store quirk off");
 }
 
@@ -391,7 +396,7 @@ static int fill_ddr_random(uc_engine *uc, uint32_t base, uint32_t size) {
         uint32_t n = size - off < CHUNK ? size - off : CHUNK;
         for (uint32_t i = 0; i < (n + 7) / 8; i++) buf[i] = splitmix64(&st);
         uc_err e = uc_mem_write(uc, base + off, buf, n);
-        if (e) { fprintf(stderr, "random-ddr @0x%08x: %s\n", base + off, uc_strerror(e)); return 1; }
+        if (e) { vv_eprintf("random-ddr @0x%08x: %s\n", base + off, uc_strerror(e)); return 1; }
     }
     return 0;
 }
@@ -399,17 +404,17 @@ static int fill_ddr_random(uc_engine *uc, uint32_t base, uint32_t size) {
 static const char *gpr[32] = {"zero","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3","t4","t5","t6","t7",
     "s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
 static void dump_regs(uc_engine *uc) {
-    uint32_t v;
-    fprintf(stderr, "---- registers (insns=%llu) ----\n", (unsigned long long)insn_count);
-    for (int i = 0; i < 32; i++) {
+    uint32_t v; char b[32];
+    vv_eprintf("---- registers (insns=%llu) ----\n", (unsigned long long)insn_count);
+    for (int i = 0; i < 32; i++) {                /* "%4s=" with the name highlighted (term.c) */
         uc_reg_read(uc, UC_MIPS_REG_0 + i, &v);
-        fprintf(stderr, "%4s=%08x%s", gpr[i], v, (i % 4 == 3) ? "\n" : "  ");
+        vv_eprintf("%*s%s=%08x%s", 4 - (int)strlen(gpr[i]), "", vv_creg(gpr[i], b, sizeof b), v, (i % 4 == 3) ? "\n" : "  ");
     }
-    uc_reg_read(uc, UC_MIPS_REG_PC, &v); fprintf(stderr, "  pc=%08x  ", v);
-    uc_reg_read(uc, UC_MIPS_REG_HI, &v); fprintf(stderr, "hi=%08x  ", v);
-    uc_reg_read(uc, UC_MIPS_REG_LO, &v); fprintf(stderr, "lo=%08x  ", v);
-    uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &v); fprintf(stderr, "c0_status=%08x  ", v);
-    fprintf(stderr, "\n"); /* Unicorn 2.1 exposes no Cause/EPC/Count reg ids */
+    uc_reg_read(uc, UC_MIPS_REG_PC, &v); vv_eprintf("  %s=%08x  ", vv_creg("pc", b, sizeof b), v);
+    uc_reg_read(uc, UC_MIPS_REG_HI, &v); vv_eprintf("%s=%08x  ", vv_creg("hi", b, sizeof b), v);
+    uc_reg_read(uc, UC_MIPS_REG_LO, &v); vv_eprintf("%s=%08x  ", vv_creg("lo", b, sizeof b), v);
+    uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &v); vv_eprintf("%s=%08x  ", vv_creg("c0_status", b, sizeof b), v);
+    vv_eprintf("\n"); /* Unicorn 2.1 exposes no Cause/EPC/Count reg ids */
 }
 void vv_dump_regs(uc_engine *uc) { dump_regs(uc); }
 
@@ -442,8 +447,8 @@ static int reg_index(const char *n) {
     char *e; long k = strtol(n, &e, 10); return (*e == 0 && k >= 0 && k < 32) ? (int)k : -1;
 }
 
-static void usage(const char *p) {
-    fprintf(stderr,
+static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: stderr */
+    fprintf(f,
 "usage: %s [options] [isr.elf ...] [prog.elf]  (entry = last ELF)\n"
 "  --load FILE@ADDR   load raw binary (repeatable); FILE may also be an ELF\n"
 "  --entry ADDR       start PC (default: ELF entry, else 0x%08x)\n"
@@ -489,7 +494,12 @@ static void usage(const char *p) {
 "  --warn-on-quirk[=LIST] same detection, but log each (quirk, pc) once and keep running\n"
 "                     (the guest-bug detectors dcache-stale, tx-busy, rx-overrun, irq-storm, undef-reg\n"
 "                     always warn unless silenced; --halt-on-quirk stops on them too)\n"
-"  --quiet-quirk=LIST don't report these categories at all\n", p, VV_PC_BOOT,
+"  --quiet-quirk=LIST don't report these categories at all\n"
+"  --color[=WHEN]     WHEN: auto (default), always (= bare --color) or never.  stdout carries only\n"
+"                     the guest's UART output and stderr everything else; with color, UART text is\n"
+"                     bold green and stderr [tags] / register names are highlighted (stderr only\n"
+"                     when it is a terminal, or with always).  auto: on iff stdout is a terminal\n"
+"                     and NO_COLOR is unset (and TERM is not dumb)\n", p, VV_PC_BOOT,
     VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, VV_UART_RX_FRAME, VV_PF_PERIOD, vv_quirk_names());
 }
 
@@ -504,11 +514,11 @@ int main(int argc, char **argv) {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
         {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},{"input-script",1,0,'S'},{"irq",0,0,'I'},{"dump-every",1,0,'E'},{"dump-prefix",1,0,'P'},
         {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"quirks",1,0,'J'},{"no-quirks",0,0,'O'},{"list-quirks",0,0,'Y'},{"dump-lcd",0,0,'C'},{"screenshot",1,0,'G'},{"help",0,0,'h'},
-        {"legacy-io",0,0,'y'},{"uart-rx-gap",1,0,'g'},{"pf-period",1,0,'p'},{"no-irq",0,0,'n'},{"quiet-quirk",1,0,'k'},{0,0,0,0}};
-    int c;
+        {"legacy-io",0,0,'y'},{"uart-rx-gap",1,0,'g'},{"pf-period",1,0,'p'},{"no-irq",0,0,'n'},{"quiet-quirk",1,0,'k'},{"color",2,0,'c'},{0,0,0,0}};
+    int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default();
     const char *qenv = getenv("VVIZARD_QUIRKS"), *qcli = NULL, *qdet = NULL, *qquiet = NULL; int qdet_on = 0, qwarn = 0;
-    if (qenv && vv_quirk_parse(qenv, emul, &emul)) { fprintf(stderr, "bad VVIZARD_QUIRKS\n"); return 2; }
+    if (qenv && vv_quirk_parse(qenv, emul, &emul)) { vv_eprintf("bad VVIZARD_QUIRKS\n"); return 2; }
     while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) switch (c) {
         case 'l': if (nloads < 32) loads[nloads++] = optarg; break;
         case 'e': entry = strtoul(optarg, 0, 0); have_entry = 1; break;
@@ -545,8 +555,12 @@ int main(int argc, char **argv) {
         case 'Y': vv_quirk_list(stdout); return 0;
         case 'C': dump_lcd = 1; break;
         case 'G': shot_path = optarg; break;
-        default: usage(argv[0]); return c == 'h' ? 0 : 2;
+        case 'c': if ((color = vv_color_parse(optarg)) < 0) {
+                      vv_eprintf("--color: expected always, never or auto, not '%s'\n", optarg); return 2; } break;
+        case 'h': usage(stdout, argv[0]); return 0;
+        default: usage(stderr, argv[0]); return 2;
     }
+    vv_term_init(color);
     if (qcli && vv_quirk_parse(qcli, emul, &emul)) return 2;
     vv_quirk_emul = emul;
     uint32_t det = 0, quiet = 0;
@@ -561,23 +575,23 @@ int main(int argc, char **argv) {
     uc_engine *uc; uc_err err;
     guest_big = big; vv_lcd_reset();
     if ((err = uc_open(UC_ARCH_MIPS, UC_MODE_MIPS32 | (big ? UC_MODE_BIG_ENDIAN : UC_MODE_LITTLE_ENDIAN), &uc))) {
-        fprintf(stderr, "uc_open: %s\n", uc_strerror(err)); return 1; }
+        vv_eprintf("uc_open: %s\n", uc_strerror(err)); return 1; }
     /* Bypass MIPS kseg0/kseg1/kseg2 + TLB: identity-ish translation via our TLB hook. */
-    if ((err = uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL))) { fprintf(stderr, "tlb mode: %s\n", uc_strerror(err)); return 1; }
+    if ((err = uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL))) { vv_eprintf("tlb mode: %s\n", uc_strerror(err)); return 1; }
     for (size_t i = 0; i < NREG; i++) {
         const vv_region *r = &regions[i];
         err = r->kind == VV_MMIO ? uc_mmio_map(uc, r->base, r->size, mmio_read, NULL, mmio_write, NULL)
                                  : uc_mem_map(uc, r->base, r->size, UC_PROT_ALL);
-        if (err) { fprintf(stderr, "map %s @0x%08x: %s\n", r->name, r->base, uc_strerror(err)); return 1; }
+        if (err) { vv_eprintf("map %s @0x%08x: %s\n", r->name, r->base, uc_strerror(err)); return 1; }
     }
     /* VOID page (quirks unmapped/unmapped-fetch/unaligned/lwlr): reads 0, stores are undone */
-    if ((err = uc_mem_map(uc, VV_VOID_PA, 0x1000, UC_PROT_ALL))) { fprintf(stderr, "map VOID: %s\n", uc_strerror(err)); return 1; }
+    if ((err = uc_mem_map(uc, VV_VOID_PA, 0x1000, UC_PROT_ALL))) { vv_eprintf("map VOID: %s\n", uc_strerror(err)); return 1; }
     /* Random DDR before any ELF/--load/BIOS goes in, so images overwrite where they land (as on HW). */
     if (opt_random_ddr) {
         if (!ddr_seed_given) ddr_seed = (uint64_t)time(NULL);
         for (size_t i = 0; i < NREG; i++)
             if (!strcmp(regions[i].name, "DDR")) {
-                fprintf(stderr, "[ddr] random fill %u MiB, seed=%llu (repeat with --random-ddr=%llu)\n",
+                vv_eprintf("[ddr] random fill %u MiB, seed=%llu (repeat with --random-ddr=%llu)\n",
                         regions[i].size / VV_MiB, (unsigned long long)ddr_seed, (unsigned long long)ddr_seed);
                 if (fill_ddr_random(uc, regions[i].base, regions[i].size)) return 1;
             }
@@ -616,24 +630,24 @@ int main(int argc, char **argv) {
         }
         if (access(bp, R_OK) == 0) {
             if (vv_load_raw(uc, bp, VV_PC_BOOT)) return 1;
-            fprintf(stderr, "[bios] loaded %s at 0x%08x\n", bp, VV_PC_BOOT);
-        } else if (bios_path) { fprintf(stderr, "[bios] cannot read %s\n", bp); return 1; }
-        else fprintf(stderr, "[bios] warning: default BIOS %s not found; continuing without BIOS\n", bp);
+            vv_eprintf("[bios] loaded %s at 0x%08x\n", bp, VV_PC_BOOT);
+        } else if (bios_path) { vv_eprintf("[bios] cannot read %s\n", bp); return 1; }
+        else vv_eprintf("[bios] warning: default BIOS %s not found; continuing without BIOS\n", bp);
     }
     for (int i = 0; i < nloads; i++) {
         char *s = strdup(loads[i]), *at = strrchr(s, '@');
         if (vv_is_elf(s) && !at) { uint32_t e; if (vv_load_elf(uc, s, &e, big)) return 1;
             if (!have_entry && !have_elf_entry) { entry = e; have_elf_entry = 1; } free(s); continue; }
-        if (!at) { fprintf(stderr, "--load needs FILE@ADDR\n"); return 2; }
+        if (!at) { vv_eprintf("--load needs FILE@ADDR\n"); return 2; }
         *at = 0; if (vv_load_raw(uc, s, strtoul(at + 1, 0, 0))) return 1; free(s);
     }
     if (have_sp) { uc_reg_write(uc, UC_MIPS_REG_SP, &sp); vv_quirk_reg_defined(29); }
     vv_quirk_init(uc);
-    fprintf(stderr, "[quirk] emulating: %s\n", vv_quirk_set_str(vv_quirk_emul));
-    if (vv_quirk_halt) fprintf(stderr, "[quirk] halt on: %s\n", vv_quirk_set_str(vv_quirk_halt));
-    if (vv_quirk_detect & ~vv_quirk_halt) fprintf(stderr, "[quirk] warn on: %s\n", vv_quirk_set_str(vv_quirk_detect & ~vv_quirk_halt));
+    vv_eprintf("[quirk] emulating: %s\n", vv_quirk_set_str(vv_quirk_emul));
+    if (vv_quirk_halt) vv_eprintf("[quirk] halt on: %s\n", vv_quirk_set_str(vv_quirk_halt));
+    if (vv_quirk_detect & ~vv_quirk_halt) vv_eprintf("[quirk] warn on: %s\n", vv_quirk_set_str(vv_quirk_detect & ~vv_quirk_halt));
     vv_disp_init(want_window);
-    fprintf(stderr, "[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s\n", big ? "big" : "little",
+    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s\n", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed");
     err = uc_emu_start(uc, entry, have_stop ? stop_addr : 0xFFFFFFFFull, 0, max_insns);
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
@@ -641,15 +655,15 @@ int main(int argc, char **argv) {
     /* Unicorn 2.1.1 MIPS reports UC_ERR_EXCEPTION when the uc_emu_start count limit hits
      * (no hook_intr fired); treat that as the normal max-insns stop. */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0 && max_insns && insn_count >= max_insns) err = UC_ERR_OK;
-    if (!err && max_insns && insn_count >= max_insns) fprintf(stderr, "[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
-    if (err) fprintf(stderr, "[stop] uc_emu_start: %s\n", uc_strerror(err));
-    if (opt_irq) fprintf(stderr, "[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
+    if (!err && max_insns && insn_count >= max_insns) vv_eprintf("[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
+    if (err) vv_eprintf("[stop] uc_emu_start: %s\n", uc_strerror(err));
+    if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
     vv_hw_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
-    if (dump_lcd) vv_lcd_dump(stderr);
+    if (dump_lcd) vv_lcd_dump();
     run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : stop_reason_intr == 18 ? "STOPPED (break)" :
                 (max_insns && insn_count >= max_insns) ? "STOPPED (max-insns)" : "STOPPED";
     if (shot_path) vv_disp_screenshot(uc, shot_path);
@@ -659,9 +673,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < nexp; i++) {
         char *s = strdup(expects[i]), *eq = strchr(s, '=');
         int r = eq ? (*eq = 0, reg_index(s)) : -1;
-        if (r < 0) { fprintf(stderr, "bad --expect %s\n", expects[i]); return 2; }
+        if (r < 0) { vv_eprintf("bad --expect %s\n", expects[i]); return 2; }
         uint32_t want = strtoul(eq + 1, 0, 0), got; uc_reg_read(uc, UC_MIPS_REG_0 + r, &got);
-        fprintf(stderr, "[expect] $%s = 0x%08x (want 0x%08x) %s\n", s, got, want, got == want ? "PASS" : "FAIL");
+        vv_eprintf("[expect] $%s = 0x%08x (want 0x%08x) %s\n", s, got, want, got == want ? "PASS" : "FAIL");
         if (got != want) rc = 3;
         free(s);
     }

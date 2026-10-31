@@ -11,6 +11,7 @@
  *   - skipping the insn (PC := pc+4) when the hardware treats it as a nop (not in a delay slot);
  *   - the load-use swap: the insn after a load gets the OLD rt while it runs, then the loaded value.
  * Cost with nothing pending: one 4-byte read + decode per instruction. */
+#include "term.h"
 #include "quirk.h"
 #include "memmap.h"
 #include "hw.h"
@@ -92,7 +93,7 @@ int vv_quirk_parse(const char *list, uint32_t base, uint32_t *out) {
         else if (!strcmp(t, "default")) bits = vv_quirk_default();
         else if (!strcmp(t, "none")) { m = 0; continue; }
         else { int k = lookup(t);
-            if (k < 0) { fprintf(stderr, "unknown quirk '%s' (known: all,default,none,%s)\n", t, vv_quirk_names()); free(s); return -1; }
+            if (k < 0) { vv_eprintf("unknown quirk '%s' (known: all,default,none,%s)\n", t, vv_quirk_names()); free(s); return -1; }
             bits = 1u << k; }
         m = neg ? (m & ~bits) : (m | bits);
     }
@@ -164,13 +165,13 @@ static void report(int cat, uint32_t pc, uint32_t insn, const char *detail) {
     /* warnings: once per (category, pc); rx-overrun happens between instructions: once per run */
     if (!halt && !seen_add(cat, cat == VV_Q_RX_OVERRUN ? 0 : pc)) return;
     char d[64]; disasm(pc, insn, d, sizeof d);
-    fprintf(stderr, "[quirk] %s at pc=0x%08x insn=%08x  %-28s %s (insn #%llu)%s\n", qname[cat], pc, insn, d, detail,
+    vv_eprintf("[quirk] %s at pc=0x%08x insn=%08x  %-28s %s (insn #%llu)%s\n", qname[cat], pc, insn, d, detail,
             (unsigned long long)(vv_insns() - rep_back),
             halt ? "" : qbug[cat] ? " [guest bug]" : vv_quirk_on(cat) ? " [emulated]" : " [not emulated: standard MIPS]");
     if (!halt) return;
-    fprintf(stderr, "[quirk] HW: %s\n", qdesc[cat]);
+    vv_eprintf("[quirk] HW: %s\n", qdesc[cat]);
     vv_dump_regs(g_uc);
-    fprintf(stderr, "[stop] --halt-on-quirk: %s (use --halt-on-quirk=-%s to skip this category%s)\n", qname[cat], qname[cat],
+    vv_eprintf("[stop] --halt-on-quirk: %s (use --halt-on-quirk=-%s to skip this category%s)\n", qname[cat], qname[cat],
             qbug[cat] ? "; it still warns" : "");
     vv_quirk_halted = 1;
     uc_emu_stop(g_uc);
@@ -196,17 +197,17 @@ static void not_emulated(int cat, uint32_t pc, uint32_t insn, const char *why) {
     qnoemu[cat]++;
     if (!seen_add(cat + 32, pc)) return;
     char d[64]; disasm(pc, insn, d, sizeof d);
-    fprintf(stderr, "[quirk] %s at pc=0x%08x insn=%08x  %-28s NOT emulated (%s); standard MIPS result used\n",
+    vv_eprintf("[quirk] %s at pc=0x%08x insn=%08x  %-28s NOT emulated (%s); standard MIPS result used\n",
             qname[cat], pc, insn, d, why);
 }
 void vv_quirk_summary(void) {
     int any = 0;
     for (int i = 0; i < VV_Q_COUNT; i++) if (qhits[i] || qnoemu[i]) {
-        if (!any++) fprintf(stderr, "[quirk] summary (dynamic hits):");
-        fprintf(stderr, " %s=%llu", qname[i], (unsigned long long)qhits[i]);
-        if (qnoemu[i]) fprintf(stderr, "(%llu not emulated)", (unsigned long long)qnoemu[i]);
+        if (!any++) vv_eprintf("[quirk] summary (dynamic hits):");
+        vv_eprintf(" %s=%llu", qname[i], (unsigned long long)qhits[i]);
+        if (qnoemu[i]) vv_eprintf("(%llu not emulated)", (unsigned long long)qnoemu[i]);
     }
-    if (any) fputc('\n', stderr); else fprintf(stderr, "[quirk] summary: no quirks hit\n");
+    if (any) vv_eprintf("\n"); else vv_eprintf("[quirk] summary: no quirks hit\n");
 }
 
 /* ---------------- helpers ---------------- */

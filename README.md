@@ -31,7 +31,12 @@ The `Makefile` finds Unicorn and raylib through pkg-config:
     make fresh      # clean + rebuild
     make clean
     make run        # boot GIOS and auto-start proj7 (see "make run defaults")
+    make DEBUG=1    # unoptimized debug build (-O0 -g3 -fno-omit-frame-pointer)
 
+- vvizard itself is built with `-O3 -g` by default (`OPTFLAGS`, or replace `CFLAGS` entirely). `DEBUG=1` selects the
+  old debug flags. `build/.flags` records the compile/link flags, and every object is rebuilt when they change, so
+  switching between the two never mixes objects. The MIPS assembler settings for the test programs (`T_ASOPTS`) are
+  separate and unchanged.
 - `BIOS ?=` defaults to `../../software/gios/gios.inst.bin`, so build GIOS first (`make` in `software/gios`), then
   `software/proj_app6`. Its absolute path is compiled in as `VV_DEFAULT_BIOS`.
 - Big-endian is the default CPU mode. Pick one at run time with `--little` or `--big`.
@@ -53,6 +58,25 @@ command line, e.g. `make run ARGS="--no-window --max-insns 200000"`, `make run A
 or `make run IMEM_APP=../../software/bench/bench.inst.bin`. `BIN=` replaces all the `--load`/`--entry` arguments.
 `QUIRKS` defaults to `--halt-on-quirk` (see [Hardware quirks](#hardware-quirks---halt-on-quirk)); `make run QUIRKS=` turns it off,
 `make run QUIRKS=--halt-on-quirk=all,-load-use` skips a category, `make run QUIRKS=--warn-on-quirk` logs without stopping.
+`COLOR` (default `auto`) is passed as `--color=$(COLOR)`, e.g. `make run COLOR=never`.
+
+## Output streams and color (`--color`)
+**stdout carries only the bytes the guest sends on the UART (TX).** Everything vvizard prints for itself goes to
+**stderr**: `[stop]`, `[quirk]`, `[irq]`, `[hw]`, `[mmio]`, `[trace]`, register dumps, summaries, load messages,
+errors, and raylib's log (prefixed `[raylib]`). So `./vvizard ... >uart.txt` captures only the serial output, and
+`2>/dev/null` hides vvizard's diagnostics. (`--help` and `--list-quirks` print to stdout, since you asked for them.)
+UART text is flushed at each newline, every byte when stdout is a terminal, before any stderr output (so a
+`2>&1` log keeps its order), and every 4096 instructions (so a prompt with no newline shows up).
+
+`--color[=WHEN]` with WHEN = `auto` (the default), `always` (also bare `--color`) or `never`:
+- `auto` turns color on when stdout is a terminal, unless `NO_COLOR` is set (non-empty) or `TERM=dumb`.
+- With color on, UART text on stdout is bold phosphor green (xterm-256 color 46 when `TERM` has `256color` or
+  `COLORTERM` is set, else bold green). The color is reset at each line end, before any stderr output, at exit, and on
+  SIGINT/SIGTERM/SIGHUP/SIGQUIT.
+- stderr is highlighted only when color is on **and** stderr is a terminal (with `always`, it's highlighted regardless).
+  The leading `[tag]` of each line gets a per-category color (`[stop]` red, `[quirk]` yellow, `[irq]` magenta,
+  `[hw]` cyan, `[mmio]` blue, ...), `[guest bug]` / `PASS` / `FAIL` markers are colored, and register names in
+  register dumps (`zero`, `t0`, `pc`, `hi`, ...) and `--trace-regs` lines are highlighted.
 
 **Keyboard:** with the window focused, typed keys go to UART RX: printable ASCII as-is, Enter -> `\r`, Backspace -> 0x08,
 Tab -> `\t`, Esc -> 0x1b (Esc no longer closes the window; use the close button). Terminal stdin still works too.
@@ -153,7 +177,7 @@ The registers no longer repeat every 0x100: 0x80000108 is LCD char 2, not UART T
 are not the PRNG. `ADDR[27:14]` is still not decoded, so the whole 16 KiB map repeats (0x80004008 is UART TX data).
 This is plain address decode, not a quirk: the `unmapped` quirk covers undecoded nibbles only, and MMIO misses read 0
 and drop stores in every quirk setting.
-- **UART TX:** a write to TX_DATA (offset 0x08) sends byte [7:0] of the written word to stdout. With `mmio-lane` (the default), that's the lane-placed word, so only `sw` and `sb` at +0xB send the byte. TX_READY reads 0 for 4773 cycles after an accepted byte (start + 8 data + stop at 115200 baud, 50 MHz), and a TX_DATA write while it is 0 is **lost**, as in MemMapIO.v (the `tx-busy` guest bug). When it goes back to 1, Cause bit 11 latches.
+- **UART TX:** a write to TX_DATA (offset 0x08) sends byte [7:0] of the written word to stdout (the only thing written to stdout; see [Output streams](#output-streams-and-color---color)). With `mmio-lane` (the default), that's the lane-placed word, so only `sw` and `sb` at +0xB send the byte. TX_READY reads 0 for 4773 cycles after an accepted byte (start + 8 data + stop at 115200 baud, 50 MHz), and a TX_DATA write while it is 0 is **lost**, as in MemMapIO.v (the `tx-busy` guest bug). When it goes back to 1, Cause bit 11 latches.
 - **UART RX:** host bytes come from `--uart-in` first, then due `--input-script` bytes, then window keystrokes, then stdin (polled without blocking). Each byte lands 4340 cycles after its start bit, in a single holding register: RX_VALID is 1 while a byte is held (and 0 while the next one is being shifted in), an RX_DATA read returns it and clears RX_VALID, and a byte that lands before the last one was read overwrites it (the `rx-overrun` guest bug). Each landed byte latches Cause bit 10.
 - **LCD (0x80000100-0x8000017C, `src/lcd.c`):** LCDText2x16.v's 32-character buffer behind `LCDText2x16_MemPort`. Character i (0-15 line 1, 16-31 line 2, left to right) is at `0x80000100 + 4*i` and takes `dina[7:0]` of any store (any byte mask). With `mmio-lane` (the default), that's the lane-placed word, so `sw` and `sb` at +3 (`sh` at +2) write the byte, and `sb` at +0..+2 (`sh` at +0) writes 0x00, as in hardware. Without the quirk the char is the stored value's low byte. Reads return 0 and have no side effects. Reset contents are LCDText2x16's `INIT_TEXT` default, 32 spaces. `--dump-lcd` prints the buffer (text and hex) at exit, and the window shows it in the status strip.
 - **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. Time in vvizard is one cycle per instruction (no stall or cache timing).
@@ -215,7 +239,7 @@ a read miss, never flushed or snooped. By default vvizard also returns the stale
 (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-hw` runs `tests/test_hw.py`:
 `tests/hw/*.s` checks UART TX timing, the RX edge and holding register, the PixelFeeder frame latch, the timer and
 interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, and makes every guest-bug detector warn,
-halt (exit 4) and go quiet. `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
+halt (exit 4) and go quiet, and checks the stdout/stderr split and `--color`. `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
 `--input-script` UART keys and UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`: one tiny program per
 quirk for detection, with clean counterparts, each quirk on and off against the standard MIPS result, and the CLI and
 environment interface. How to run them and their pass conditions are in NOTES.md.
