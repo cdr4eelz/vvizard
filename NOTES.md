@@ -345,3 +345,22 @@ Checked unchanged (stdout, stderr, exit code, frame dumps byte for byte): every 
 input script with key presses and `--dump-every`), a 150M-instruction scripted run and a windowed `--screenshot`.
 The only difference found is the documented summary count of a silenced undef-reg / dcache-stale when nothing
 else needs the decode.
+
+## Frame clock: frames per wall second (Oct 31 2026)
+proj7 via GIOS (built-in default program), window, `--warn-on-quirk --random-ddr=1 --max-seconds 10`, `taskset -c 0-3`,
+-O3, one 10 s run each; numbers from the `[frame]` / `[irq]` lines. Real time = 60.317 frames/s.
+
+| machine | --frame-clock | frames/s (x real time) | M instr/s | instr/frame | PF_FRAME writes / frames scanned | GP launches |
+|---|---|---|---|---|---|---|
+| Debian 13 box, Xvfb :77 | emulated (default) | 21.50 (x0.356, lags 2.8x) | 17.84 | 829564 | 216 / 215 | 216 |
+| | wall | 60.28 (x0.999) | 17.31 | 287216 | 602 / 603 | 603 |
+| UBU24, DISPLAY=:0 | emulated (default) | 13.50 (x0.224, lags 4.5x) | 11.21 | 830214 | 136 / 135 | 136 |
+| | wall | 60.29 (x1.000) | 9.31 | 154412 | 601 / 603 | 602 |
+
+- Wall mode holds 60.3 frames/s with no skipped deadlines. proj7 writes PF_FRAME (and launches the GPU) once per
+  scanned frame in both modes, so with 150-290k instructions per frame instead of the hardware's 828960 it still
+  finishes each frame's work in time and drops none.
+- Wall mode costs instructions/s (UBU24 -17%, Debian -3%): proj7 now draws ~60 frames a second instead of 13-21, so
+  the GPU (instant, on the emulator thread) and the per-frame redraw run ~3-4x as often.
+- Only the frame clock is wall time: Count/Compare, the RTC and the UART still count instructions, so proj7's
+  timer-driven mm:ss clock advanced ~3 s in a 10 s wall run on Debian (173M cycles = 3.5 s at 50 MHz).
