@@ -1,5 +1,6 @@
 /* dcache.c - see dcache.h */
 #include "dcache.h"
+#include "memmap.h"
 #include <string.h>
 
 static struct {
@@ -30,7 +31,7 @@ void vv_dc_store(uint32_t a, unsigned size, uint32_t v) {
     line[i].data[w] = (line[i].data[w] & ~m) | ((v << sh) & m);   /* still differs in the other bytes */
 }
 void vv_dc_dma_write(uc_engine *uc, uint32_t a, size_t len) {
-    if (!len) return;
+    (void)uc; if (!len) return;
     uint32_t end = a + (uint32_t)len;                       /* exclusive */
     for (uint32_t la = a & ~(VV_DC_LINE - 1); la < end; la += VV_DC_LINE) {
         if (!hit(la)) continue;
@@ -38,9 +39,9 @@ void vv_dc_dma_write(uc_engine *uc, uint32_t a, size_t len) {
         for (unsigned w = 0; w < 8; w++) {
             uint32_t wa = la + 4 * w;
             if (wa + 4 <= a || wa >= end || (line[i].stale >> w & 1)) continue;
-            uint8_t b[4];
-            if (uc_mem_read(uc, wa, b, 4)) continue;
-            line[i].data[w] = (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
+            int ok = 1; uint32_t v = vv_ram_be32(wa, &ok);     /* (before the GPU's uc_mem_write) */
+            if (!ok) continue;
+            line[i].data[w] = v;
             line[i].stale |= (uint8_t)(1u << w); stale_words++;
         }
     }

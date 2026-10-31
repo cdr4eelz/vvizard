@@ -20,8 +20,10 @@ static uint32_t fbase;
 const vv_gpu_stats *vv_gpu_get_stats(void) { return &st; }
 
 static uint32_t rd_word(uc_engine *uc, uint32_t a, int *ok) {
-    uint8_t b[4];
-    if (uc_mem_read(uc, vv_canon(a), b, 4)) { *ok = 0; return 0; }
+    uint8_t b[4]; uint32_t c = vv_canon(a); int in_ram = 1;
+    uint32_t v = vv_ram_be32(c, &in_ram);                  /* RAM: straight from the host buffer */
+    if (in_ram) return v;
+    if (uc_mem_read(uc, c, b, 4)) { *ok = 0; return 0; }   /* (MMIO etc.: as before) */
     return (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
 }
 /* Write a horizontal span [x0,x1] on row y, clipped to the 800x600 screen. */

@@ -19,12 +19,13 @@ static uc_engine *g_uc;
  * not masked by Status.IM, COP0150.v:52-53).  A Cause write keeps {wd[31:16], next_ip & wd[15:10],
  * wd[9:0]}: IP bits can only be cleared, never set (COP0150.v:91).  A Compare write clears IP15.
  * Reset: Count 0, Compare 0xFFFF, Status 0, Cause 0, EPC 0. */
-static uint32_t cause, status, epc, compare = 0xFFFFu, cnt0_val;
+uint32_t vv_hw_cause_ip;
+static uint32_t status, epc, compare = 0xFFFFu, cnt0_val;
 static uint64_t cnt0_at;                   /* cycle at which Count == cnt0_val */
 static uint64_t hits_ip[6];
 static void raise(uint32_t ip) {
     if (vv_legacy_io && ip != VV_IP_UARX) return;
-    cause |= ip;
+    vv_hw_cause_ip |= ip;
     for (int b = 0; b < 6; b++) if (ip >> (10 + b) & 1) hits_ip[b]++;
 }
 static uint32_t count_at(uint64_t t) { return cnt0_val + (uint32_t)(t - cnt0_at); }
@@ -108,13 +109,14 @@ uint32_t vv_gp_status_word(void) {
 
 /* ---------------- COP0 register access ---------------- */
 uint32_t vv_hw_cause(void) {
-    return vv_legacy_io ? (cause & ~VV_IP_UARX) | (vv_host_rx_avail(0) ? VV_IP_UARX : 0) : cause;
+    return vv_legacy_io ? (vv_hw_cause_ip & ~VV_IP_UARX) | (vv_host_rx_avail(0) ? VV_IP_UARX : 0) : vv_hw_cause_ip;
 }
 uint32_t vv_hw_status(void) { return status; }
 void vv_hw_set_status(uint32_t st) { status = st; }
 uint32_t vv_hw_epc(void) { return epc; }
 void vv_hw_set_epc(uint32_t v) { epc = v; }
-static int      isr_active; static uint32_t isr_uncleared, isr_entry_pc; static uint64_t storms;
+int vv_hw_isr_active;
+static uint32_t isr_uncleared, isr_entry_pc; static uint64_t storms;
 uint32_t vv_cop0_read(unsigned rd) {
     switch (rd) {
     case 9:  return count_at(now_c);
@@ -128,24 +130,24 @@ uint32_t vv_cop0_read(unsigned rd) {
 void vv_cop0_write(unsigned rd, uint32_t v) {
     switch (rd) {
     case 9:  cnt0_val = v; cnt0_at = now_c + 1; break;
-    case 11: compare = v; cause &= ~VV_IP_TIMER; isr_uncleared &= ~VV_IP_TIMER; break;
+    case 11: compare = v; vv_hw_cause_ip &= ~VV_IP_TIMER; isr_uncleared &= ~VV_IP_TIMER; break;
     case 12: status = v; break;
-    case 13: cause = (v & ~VV_IP_ALL) | (cause & v & VV_IP_ALL); isr_uncleared &= cause; break;
+    case 13: vv_hw_cause_ip = (v & ~VV_IP_ALL) | (vv_hw_cause_ip & v & VV_IP_ALL); isr_uncleared &= vv_hw_cause_ip; break;
     default: break;                        /* EPC and the rest: ignored by COP0150 */
     }
 }
 int vv_hw_irq_request(uint32_t st) { return (st & 1u) && (st & vv_hw_cause() & VV_IP_ALL); }
-int vv_hw_in_isr(void) { return isr_active; }
+int vv_hw_in_isr(void) { return vv_hw_isr_active; }
 void vv_hw_isr_enter(uint32_t pc, uint32_t st) {
     epc = pc; status = st & ~1u;
-    isr_active = 1; isr_entry_pc = pc;
+    vv_hw_isr_active = 1; isr_entry_pc = pc;
     isr_uncleared = vv_hw_cause() & st & VV_IP_ALL;   /* the enabled, pending bits that caused entry */
 }
 /* irq-storm: the ISR returns (re-enables Status.IE, or runs eret) while a Cause bit that caused the
  * entry is still set and still enabled: COP0150 requests the interrupt again (taken two instructions later). */
 void vv_hw_isr_exit_check(uint32_t st, uint32_t pc, const char *how) {
-    if (!isr_active) return;
-    if (st & 1u) isr_active = 0;
+    if (!vv_hw_isr_active) return;
+    if (st & 1u) vv_hw_isr_active = 0;
     uint32_t b = isr_uncleared & vv_hw_cause() & st & VV_IP_ALL;
     if (!b) return;
     storms++;

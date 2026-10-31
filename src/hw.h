@@ -44,6 +44,14 @@ int      vv_hw_irq_request(uint32_t status);        /* ie & |(im & ip) (COP0150.
 void     vv_hw_isr_enter(uint32_t pc, uint32_t status);
 void     vv_hw_isr_exit_check(uint32_t status, uint32_t pc, const char *how);   /* irq-storm detector */
 int      vv_hw_in_isr(void);
+extern uint32_t vv_hw_cause_ip;     /* the Cause latch (IP bits 15:10 and the rest) */
+extern int      vv_hw_isr_active;   /* entered an ISR, not returned yet (irq-storm detector) */
+/* 0 when no interrupt can be requested and there is no ISR exit to check: nothing latched in Cause
+ * and not in an ISR (--legacy-io: Cause also reflects the host RX level, so always 1).  Lets
+ * irq_step (main.c) skip reading Status for most instructions. */
+static inline int vv_hw_irq_possible(void) {
+    return vv_legacy_io || (vv_hw_cause_ip & VV_IP_ALL) || vv_hw_isr_active;
+}
 /* UART */
 uint32_t vv_uart_tx_ready(void);
 void     vv_uart_tx_write(uint8_t c);

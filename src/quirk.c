@@ -10,7 +10,8 @@
  *     lwl/lwr/swl/swr), restored afterwards;
  *   - skipping the insn (PC := pc+4) when the hardware treats it as a nop (not in a delay slot);
  *   - the load-use swap: the insn after a load gets the OLD rt while it runs, then the loaded value.
- * Cost with nothing pending: one 4-byte read + decode per instruction. */
+ * Cost with nothing pending: one 4-byte read from the host RAM buffer + decode per instruction;
+ * GPRs are read (uc_reg_read) only when the decoded instruction needs them. */
 #include "term.h"
 #include "quirk.h"
 #include "memmap.h"
@@ -21,7 +22,7 @@
 #include <string.h>
 
 uint32_t vv_quirk_emul, vv_quirk_detect, vv_quirk_halt;
-int vv_quirk_halted;
+int vv_quirk_halted, vv_quirk_decode;
 
 static const char *qname[VV_Q_COUNT] = {
 #define Q(id, n, def, bug, d) n,
@@ -220,10 +221,9 @@ void vv_quirk_summary(void) {
 static uint32_t gr(uc_engine *uc, unsigned r) { uint32_t v = 0; if (r) uc_reg_read(uc, UC_MIPS_REG_0 + r, &v); return v; }
 static void sr(uc_engine *uc, unsigned r, uint32_t v) { if (r) uc_reg_write(uc, UC_MIPS_REG_0 + r, &v); }
 static uint32_t fetch(uc_engine *uc, uint32_t a) {
-    unsigned char b[4]; uint32_t c = vv_canon(a);
+    (void)uc; int ok;
     /* undecoded / MMIO: HW fetches 0 (and reading MMIO here would have side effects) */
-    if (c == 0xFFFFFFFFu || (c >> 28) == 0x8 || uc_mem_read(uc, c, b, 4)) return 0;
-    return (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3];
+    return vv_ram_be32(vv_canon_inl(a), &ok);
 }
 
 /* Registers read by insn i (bitmask of GPRs), for the load-use check. */
@@ -358,6 +358,13 @@ static int redirect(uc_engine *uc, int cat, uint32_t pc, uint32_t i, unsigned rs
     return 1;
 }
 
+/* The 4 bytes a dropped store must leave in place (restored by post_fix with uc_mem_write, which
+ * also drops any translated code there).  Not RAM: as uc_mem_read, leave b alone. */
+static void save_word(uc_engine *uc, uint32_t c, uint8_t b[4]) {
+    const uint8_t *p = vv_ram(c, 4);
+    if (p) memcpy(b, p, 4); else (void)uc_mem_read(uc, c, b, 4);
+}
+
 static int known_special(unsigned fn) {
     static const uint64_t ok = (1ull<<0)|(1ull<<2)|(1ull<<3)|(1ull<<4)|(1ull<<6)|(1ull<<7)|(1ull<<8)|(1ull<<9)|
         (1ull<<12)|(1ull<<13)|(0xFull<<16)|(0xFull<<24)|(0xFFull<<32)|(1ull<<42)|(1ull<<43);
@@ -392,7 +399,8 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
             if (E(LOAD_USE)) { sr(uc, r, L.old); P.lu = 1; P.lu_r = r; P.lu_new = L.newv; P.active = 1; }
         }
     }
-    uint32_t ld_old = (P.lu && rt == P.lu_r) ? P.lu_new : gr(uc, rt);   /* rt before this insn */
+    uint32_t ld_old = 0;                                 /* rt before this insn (used by loads only) */
+    if ((op >> 3) == 4) ld_old = (P.lu && rt == P.lu_r) ? P.lu_new : gr(uc, rt);
 
     if (op == 0) {
         if (fn == 9) {                                   /* jalr */
@@ -526,12 +534,12 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
         if (ANY(DDR2) && ev(VV_Q_DDR2, pc, i, "%s 0x%08x; HW %s", store ? "store to" : "load from", a,
                             store ? "drops it (not running from BIOS)" : "returns stale D-cache data")) return;
         if (E(DDR2)) {
-            if (store) { P.mem = 1; P.active = 1; P.maddr = c & ~3u; uc_mem_read(uc, P.maddr, P.mbytes, 4); }
+            if (store) { P.mem = 1; P.active = 1; P.maddr = c & ~3u; save_word(uc, P.maddr, P.mbytes); }
             else not_emulated(VV_Q_DDR2, pc, i, "load via the I-cache path returns DDR data");
         }
     } else if (store && (c >> 28) == 0x4) {              /* BIOS store */
         if (ANY(BIOS_STORE) && ev(VV_Q_BIOS_STORE, pc, i, "store to 0x%08x (val 0x%08x); HW drops it", a, gr(uc, rt))) return;
-        if (E(BIOS_STORE)) { P.mem = 1; P.active = 1; P.maddr = c & ~3u; uc_mem_read(uc, P.maddr, P.mbytes, 4); }
+        if (E(BIOS_STORE)) { P.mem = 1; P.active = 1; P.maddr = c & ~3u; save_word(uc, P.maddr, P.mbytes); }
     } else if (store && mmio && size < 4 && (a & 3) + size != 4) {
         uint32_t v = gr(uc, rt) & ((1u << (8 * size)) - 1), placed = v << (8 * (4 - size - (a & 3)));
         if (ANY(MMIO_LANE) && ev(VV_Q_MMIO_LANE, pc, i, "%s to MMIO 0x%08x (val 0x%x); HW delivers 0x%08x%s", size == 1 ? "sb" : "sh",
@@ -543,9 +551,8 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
     if (size && !(a & (size - 1)) && c != 0xFFFFFFFFu && (c >> 28) == 0x1 && ((a >> 28) == 0x1 || (a >> 28) == 0x3)) {
         if (store) vv_dc_store(c, size, gr(uc, rt));
         else {
-            uint32_t old, cur; uint8_t b[4];
-            if (vv_dc_load(c & ~3u, &old) && !uc_mem_read(uc, c & ~3u, b, 4) &&
-                old != (cur = (uint32_t)b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3])) {
+            uint32_t old, cur; int ok = 1;
+            if (vv_dc_load(c & ~3u, &old) && (cur = vv_ram_be32(c & ~3u, &ok), ok) && old != cur) {
                 unsigned sh = 8 * (4 - size - (a & 3));
                 uint32_t v = size == 4 ? old : (old >> sh) & ((1u << (8 * size)) - 1);
                 if (op == 0x20 && (v & 0x80u) && !E(LB_SIGN)) v |= 0xFFFFFF00u;          /* lb  */
@@ -560,6 +567,16 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
         P.lbchk = 1; P.lb_rt = rt; P.lb_mask = op == 0x20 ? 0xFFu : 0xFFFFu; P.active = 1;
     }
     if (!store && rt) { P.ld = 1; P.ld_rt = rt; P.ld_old = ld_old; P.active = 1; }
+}
+
+void vv_quirk_pre_lite(uc_engine *uc, uint32_t pc) {
+    g_uc = uc; q_last_pc = pc;
+    if (vv_quirk_halted || !vv_hw_in_isr()) return;
+    if (fetch(uc, pc) == 0x42000018u) {                  /* eret: same check as in vv_quirk_pre() */
+        uint32_t st = vv_hw_status();
+        if (!E(COP0)) uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
+        vv_hw_isr_exit_check(st, pc, "eret");
+    }
 }
 
 void vv_quirk_fetch(uc_engine *uc, uint32_t va, const char *why) {

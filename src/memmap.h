@@ -71,4 +71,34 @@ typedef struct {
 #define VV_FNMASK         0x3Fu
 #define VV_PC_BOOT        0x40000000u
 #define VV_PC_ISR         0xC0000180u
+
+/* Decode table, one entry per ADDR[31:28] (built by main.c from the two tables above; aliases
+ * included): canonical base, alias mask (size-1) and, for RAM, the host buffer Unicorn maps with
+ * uc_mem_map_ptr, so host code reads guest RAM without uc_mem_read.  Guest RAM holds the guest's
+ * byte order (big-endian by default).  Host WRITES still go through uc_mem_write: it invalidates
+ * translated code in the written range, a plain store into the buffer would not. */
+typedef struct {
+    uint8_t *host;        /* RAM buffer at `base` (NULL: MMIO or undecoded) */
+    uint32_t base, mask;  /* canonical base, size-1 */
+    uint8_t  ok;          /* decoded nibble */
+} vv_nibble;
+extern vv_nibble vv_nib[16];
+/* Canonical address of a (hardware top-nibble decode), 0xFFFFFFFF if undecoded. */
+static inline uint32_t vv_canon_inl(uint32_t a) {
+    const vv_nibble *t = &vv_nib[a >> 28];
+    return t->ok ? t->base | (a & t->mask) : 0xFFFFFFFFu;
+}
+/* Host pointer to n bytes of RAM at CANONICAL address c, or NULL when [c, c+n) is not inside one
+ * RAM region (MMIO, undecoded, past the end): where uc_mem_read would fail or reach MMIO. */
+static inline uint8_t *vv_ram(uint32_t c, uint32_t n) {
+    const vv_nibble *t = &vv_nib[c >> 28];
+    if (!t->host || (c & ~t->mask) != t->base || (uint64_t)(c & t->mask) + n > (uint64_t)t->mask + 1) return 0;
+    return t->host + (c & t->mask);
+}
+/* Big-endian 32-bit word at canonical c from RAM; *ok = 0 (and 0 returned) when not RAM. */
+static inline uint32_t vv_ram_be32(uint32_t c, int *ok) {
+    const uint8_t *b = vv_ram(c, 4);
+    if (!b) { *ok = 0; return 0; }
+    return (uint32_t)b[0] << 24 | (uint32_t)b[1] << 16 | (uint32_t)b[2] << 8 | b[3];
+}
 #endif

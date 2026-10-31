@@ -15,7 +15,8 @@ static int have_window;
 static uint32_t cur_frame;              /* displayed frame (reset 0); hw.c switches it at frame end */
 static Texture2D tex;
 static uint8_t rgba[VV_SCREEN_W * VV_SCREEN_H * 4];
-static double last_draw;
+static double last_draw, last_poll;
+#define POLL_PERIOD (1.0 / 500)             /* input poll between draws: at most every 2 ms host time */
 
 static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec * 1e-9; }
 
@@ -24,11 +25,14 @@ static uint32_t frame_bits(uint32_t f) { return (f >> 28) ? (f >> VV_FSHIFT) & V
 
 /* Plain address order (no x^3 swizzle), per user decision. */
 static void grab(uc_engine *uc) {
-    static uint8_t row[VV_SCREEN_W * 4];
+    static uint8_t rowbuf[VV_SCREEN_W * 4];
     uint32_t base = VV_FRAME0 + (cur_frame << VV_FSHIFT);
     for (int y = 0; y < VV_SCREEN_H; y++) {
         uint8_t *o = rgba + (size_t)y * VV_SCREEN_W * 4;
-        if (uc_mem_read(uc, base + (uint32_t)y * VV_ROW_PITCH, row, sizeof row)) {
+        uint32_t a = base + (uint32_t)y * VV_ROW_PITCH;
+        const uint8_t *row = vv_ram(a, sizeof rowbuf);     /* DDR host buffer, no copy */
+        if (!row && !uc_mem_read(uc, a, rowbuf, sizeof rowbuf)) row = rowbuf;
+        if (!row) {
             for (int i = 0; i < VV_SCREEN_W * 4; i++) { o[i] = 0; }
             continue;
         }
@@ -149,7 +153,7 @@ static void draw(uc_engine *uc) {
     UpdateTexture(tex, rgba);
     BeginDrawing(); render(uc); EndDrawing();
     collect_keys();                         /* EndDrawing polled; queues reset next poll */
-    last_draw = now();
+    last_draw = last_poll = now();
 }
 static void raylib_log(int level, const char *fmt, va_list ap) {   /* raylib logs to stdout by default */
     (void)level; vv_eprintf("[raylib] "); vv_veprintf(fmt, ap); vv_eprintf("\n");
@@ -171,10 +175,13 @@ void vv_disp_pf_write(uc_engine *uc, uint32_t v) {
     draw(uc);
 }
 uint32_t vv_disp_frame(void) { return cur_frame; }
+/* Called every 4096 instructions (main.c): redraw at ~60 Hz; in between, poll window input by host
+ * time (POLL_PERIOD) rather than on every call, which at 20-40M instr/s was thousands of polls a second. */
 int vv_disp_tick(uc_engine *uc) {
     if (!have_window) return 0;
-    if (now() - last_draw >= 1.0 / 60) draw(uc);      /* EndDrawing polls events + collects */
-    else { PollInputEvents(); collect_keys(); }
+    double t = now();
+    if (t - last_draw >= 1.0 / 60) draw(uc);          /* EndDrawing polls events + collects */
+    else if (t - last_poll >= POLL_PERIOD) { PollInputEvents(); collect_keys(); last_poll = t; }
     return WindowShouldClose();
 }
 int vv_disp_dump_ppm(uc_engine *uc, const char *path) {

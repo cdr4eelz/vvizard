@@ -55,6 +55,19 @@ extern uint32_t vv_quirk_halt;   /* bit per quirk: reporting it stops the run (-
 extern int vv_quirk_halted;      /* set once a halt-mode quirk stopped the run */
 #define vv_quirk_on(id)  ((vv_quirk_emul >> (id)) & 1u)
 #define vv_quirk_active() (vv_quirk_emul | vv_quirk_detect)
+/* Which quirks need the per-instruction decode (vv_quirk_post / vv_quirk_pre in the code hook).
+ * Not needed: tx-busy and rx-overrun (detected in the UART model, src/hw.c), irq-storm (Status.IE
+ * edge in irq_step; its eret case is vv_quirk_pre_lite, which reads only ISR instructions) and
+ * unmapped-fetch (tlb_fill).  Their emulation switches do nothing per instruction either, nor does
+ * undef-reg's (the register file model has no switch).  Everything else, emulated or detected,
+ * is decoded in pre(): undef-reg and dcache-stale detection, load-use, mmio-lane detection (its
+ * emulation is in mmio_write, but pre() counts its hits), and the other emulated quirks. */
+#define VV_Q_BIT(id) (1u << VV_Q_##id)
+#define VV_Q_NODECODE_DET  (VV_Q_BIT(TX_BUSY) | VV_Q_BIT(RX_OVERRUN) | VV_Q_BIT(IRQ_STORM) | VV_Q_BIT(UNMAPPED_FETCH))
+#define VV_Q_NODECODE_EMUL (VV_Q_NODECODE_DET | VV_Q_BIT(UNDEF_REG))
+#define vv_quirk_needs_decode() \
+    (((vv_quirk_emul & ~VV_Q_NODECODE_EMUL) | (vv_quirk_detect & ~VV_Q_NODECODE_DET)) != 0)
+extern int vv_quirk_decode;      /* vv_quirk_needs_decode(), set before the run */
 
 uint32_t vv_quirk_default(void);    /* the current-hardware set */
 uint32_t vv_quirk_bugs(void);       /* the guest-bug detectors */
@@ -70,6 +83,9 @@ void vv_quirk_list(FILE *f);        /* --list-quirks table */
  * pre(): decode the insn about to execute at pc (report, set up emulation; may skip it). */
 int  vv_quirk_post(uc_engine *uc, uint32_t pc);   /* 1: PC redirected (emulated branch); insn at pc not run */
 void vv_quirk_pre(uc_engine *uc, uint32_t pc);
+/* Instead of post/pre when no quirk needs the decode but some detector is on: only the eret
+ * irq-storm check (inside an ISR) and the last-PC note for unmapped-fetch reports. */
+void vv_quirk_pre_lite(uc_engine *uc, uint32_t pc);
 void vv_quirk_cancel(void);         /* PC was redirected (IRQ entry): drop pending state */
 /* TLB fill hook on an instruction fetch that hardware would decode as 0. */
 void vv_quirk_fetch(uc_engine *uc, uint32_t va, const char *why);

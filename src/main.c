@@ -10,6 +10,10 @@
 #include <libgen.h>
 #include <limits.h>
 #include <time.h>
+#include <sys/mman.h>
+#ifndef MAP_ANON
+#define MAP_ANON MAP_ANONYMOUS
+#endif
 #include "term.h"
 #include "memmap.h"
 #include "loader.h"
@@ -58,11 +62,16 @@ static const vv_region *region_for(uint32_t a) {
     return NULL;
 }
 /* Reproduce the hardware top-nibble decode: any address in a nibble folds onto
- * base | (addr & (size-1)).  Returns 0xFFFFFFFF for undecoded nibbles. */
-uint32_t vv_canon(uint32_t a) {
-    const vv_region *r = region_for(a);
-    return r ? r->base | (a & (r->size - 1)) : 0xFFFFFFFFu;
+ * base | (addr & (size-1)).  Returns 0xFFFFFFFF for undecoded nibbles.  vv_nib[] is region_for()
+ * evaluated once per nibble (init_nib); RAM entries also get their host buffer (main). */
+vv_nibble vv_nib[16];
+static void init_nib(void) {
+    for (unsigned n = 0; n < 16; n++) {
+        const vv_region *r = region_for(n << 28);
+        vv_nib[n] = r ? (vv_nibble){ NULL, r->base, r->size - 1, 1 } : (vv_nibble){ NULL, 0, 0, 0 };
+    }
 }
+uint32_t vv_canon(uint32_t a) { return vv_canon_inl(a); }
 
 /* ---------------- state ---------------- */
 static int opt_trace, opt_quiet_mmio, opt_trace_regs;
@@ -164,11 +173,8 @@ static int fix_rt = -1; static uint32_t fix_val;
 static uint32_t last_pc = NOPC, last2_pc = NOPC, last3_pc = NOPC;   /* the last three insns run */
 static uint64_t irq_count;
 static uint32_t prev_status;
-static uint32_t read_insn(uc_engine *uc, uint32_t a) {
-    unsigned char b[4]; uint32_t c = vv_canon(a);
-    if (c == 0xFFFFFFFFu || (c >> 28) == 0x8 || uc_mem_read(uc, c, b, 4)) return 0;   /* no MMIO side effects */
-    return b[0]<<24|b[1]<<16|b[2]<<8|b[3];
-}
+/* The word at a as the hardware fetches it: 0 for undecoded / MMIO (and no MMIO side effects). */
+static uint32_t read_insn(uc_engine *uc, uint32_t a) { (void)uc; int ok; return vv_ram_be32(vv_canon_inl(a), &ok); }
 static int is_mtc0(uint32_t i) { return (i >> 21) == 0x204; }   /* 010000 00100 (CPUMIPS.v:113) */
 static int is_branch(uint32_t i) {
     unsigned op = i >> 26, fn = i & 0x3F;
@@ -194,6 +200,15 @@ static void irq_step(uc_engine *uc, uint32_t pc) {
                 else vv_hw_set_epc(v);
             }
         }
+    }
+    /* Fast path: no Cause IP bit latched and not inside an ISR.  Then no interrupt can be requested
+     * (vv_hw_irq_request needs Status & Cause & IP) and the IE-edge check below has nothing to do
+     * (vv_hw_isr_exit_check returns at once outside an ISR; prev_status is set again at ISR entry
+     * before it matters), so Status need not be read. */
+    if (!vv_hw_irq_possible()) {
+        if (vv_quirk_halted) return;
+        last3_pc = last2_pc; last2_pc = last_pc; last_pc = pc;
+        return;
     }
     uint32_t st;
     if (cop0) st = vv_hw_status(); else uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
@@ -317,14 +332,27 @@ static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e,
     return true;
 }
 
+/* --max-insns: counts code-hook calls exactly as uc_emu_start's count limit did (Unicorn's own
+ * count hook ran first on every instruction, so the N+1st call stops before anything else runs),
+ * without making Unicorn add a second per-instruction hook. */
+static uint64_t hook_calls;
+static int stopped_max;
 static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     (void)size; (void)u;
+    if (max_insns && ++hook_calls > max_insns) { stopped_max = 1; uc_emu_stop(uc); return; }
     insn_count++;
     vv_cur_pc = (uint32_t)addr;
     vv_hw_tick(uc, insn_count);              /* devices advance one cycle (UART, PixelFeeder, timer) */
     if (vv_quirk_halted) { uc_emu_stop(uc); return; }
     if (nevents) run_due_events(uc, 0);
-    if (vv_quirk_active()) {                 /* emulated quirks and/or --halt-on-quirk / --warn-on-quirk */
+    if (!vv_quirk_decode) {                  /* no quirk needs the per-instruction decode (quirk.h) */
+        uint64_t irqs = irq_count;
+        if (opt_irq) irq_step(uc, (uint32_t)addr);
+        if (vv_quirk_active()) {             /* device-side detectors only: eret irq-storm check */
+            if (irqs == irq_count && !vv_quirk_halted) vv_quirk_pre_lite(uc, (uint32_t)addr);
+            if (vv_quirk_halted) return;
+        }
+    } else {                                 /* emulated quirks and/or decode-based detectors */
         if (vv_quirk_halted) { uc_emu_stop(uc); return; }
         if (vv_quirk_post(uc, (uint32_t)addr)) { insn_count--; return; }   /* fix up the previous insn; emulated branch */
         uint64_t irqs = irq_count;
@@ -332,15 +360,13 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
         if (irqs != irq_count) vv_quirk_cancel();   /* redirected to the ISR: insn at addr not run */
         else if (!vv_quirk_halted) vv_quirk_pre(uc, (uint32_t)addr);
         if (vv_quirk_halted) return;
-    } else if (opt_irq) irq_step(uc, (uint32_t)addr);
+    }
     if ((insn_count & 0xFFF) == 0) {
         vv_term_tick();                      /* flush pending UART text (e.g. a prompt with no newline) */
         if (vv_disp_tick(uc)) { vv_eprintf("[stop] window closed\n"); uc_emu_stop(uc); }
     }
     if (opt_trace && trace_left != 0) {
-        uint32_t insn = 0; unsigned char b[4];
-        uint32_t ca = vv_canon((uint32_t)addr);
-        if (ca != 0xFFFFFFFFu && (ca >> 28) != 0x8 && !uc_mem_read(uc, ca, b, 4)) insn = b[0]<<24|b[1]<<16|b[2]<<8|b[3];
+        uint32_t insn = read_insn(uc, (uint32_t)addr);
         vv_eprintf("[trace] %8llu pc=0x%08x insn=%08x", (unsigned long long)insn_count, (uint32_t)addr, insn);
         if (opt_trace_regs) { /* GPRs changed by the PREVIOUS instruction (debug aid) */
             for (int i = 1; i < 32; i++) { uint32_t v; uc_reg_read(uc, UC_MIPS_REG_0 + i, &v);
@@ -388,16 +414,13 @@ static uint64_t splitmix64(uint64_t *x) {
     return z ^ (z >> 31);
 }
 
-static int fill_ddr_random(uc_engine *uc, uint32_t base, uint32_t size) {
-    enum { CHUNK = 1u << 20 };
-    static uint64_t buf[CHUNK / 8];
+/* Same bytes as the old 1 MiB uc_mem_write chunks of host-order uint64s, generated straight into
+ * the host buffer (nothing has been translated yet, so no code cache to invalidate). */
+static int fill_ddr_random(uint32_t base, uint32_t size) {
+    uint8_t *p = vv_ram(base, size);
+    if (!p || size % 8) { vv_eprintf("random-ddr @0x%08x: not a host-mapped RAM region\n", base); return 1; }
     uint64_t st = ddr_seed;
-    for (uint32_t off = 0; off < size; off += CHUNK) {
-        uint32_t n = size - off < CHUNK ? size - off : CHUNK;
-        for (uint32_t i = 0; i < (n + 7) / 8; i++) buf[i] = splitmix64(&st);
-        uc_err e = uc_mem_write(uc, base + off, buf, n);
-        if (e) { vv_eprintf("random-ddr @0x%08x: %s\n", base + off, uc_strerror(e)); return 1; }
-    }
+    for (uint32_t off = 0; off < size; off += 8) { uint64_t v = splitmix64(&st); memcpy(p + off, &v, 8); }
     return 0;
 }
 
@@ -693,10 +716,20 @@ int main(int argc, char **argv) {
         vv_eprintf("uc_open: %s\n", uc_strerror(err)); return 1; }
     /* Bypass MIPS kseg0/kseg1/kseg2 + TLB: identity-ish translation via our TLB hook. */
     if ((err = uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL))) { vv_eprintf("tlb mode: %s\n", uc_strerror(err)); return 1; }
+    /* RAM regions are host buffers (uc_mem_map_ptr) so the hooks read guest memory directly
+     * (vv_ram, memmap.h).  mmap: page aligned and zeroed like uc_mem_map's own RAM (macOS: MAP_ANON). */
+    init_nib();
+    void *ram_buf[NREG] = { 0 };
     for (size_t i = 0; i < NREG; i++) {
         const vv_region *r = &regions[i];
-        err = r->kind == VV_MMIO ? uc_mmio_map(uc, r->base, r->size, mmio_read, NULL, mmio_write, NULL)
-                                 : uc_mem_map(uc, r->base, r->size, UC_PROT_ALL);
+        if (r->kind == VV_MMIO) err = uc_mmio_map(uc, r->base, r->size, mmio_read, NULL, mmio_write, NULL);
+        else {
+            void *m = mmap(NULL, r->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (m == MAP_FAILED) { vv_eprintf("map %s: cannot allocate %u bytes\n", r->name, r->size); return 1; }
+            ram_buf[i] = m;
+            err = uc_mem_map_ptr(uc, r->base, r->size, UC_PROT_ALL, m);
+            for (unsigned n = 0; !err && n < 16; n++) if (vv_nib[n].ok && vv_nib[n].base == r->base) vv_nib[n].host = m;
+        }
         if (err) { vv_eprintf("map %s @0x%08x: %s\n", r->name, r->base, uc_strerror(err)); return 1; }
     }
     /* VOID page (quirks unmapped/unmapped-fetch/unaligned/lwlr): reads 0, stores are undone */
@@ -708,7 +741,7 @@ int main(int argc, char **argv) {
             if (!strcmp(regions[i].name, "DDR")) {
                 vv_eprintf("[ddr] random fill %u MiB, seed=%llu (repeat with --random-ddr=%llu)\n",
                         regions[i].size / VV_MiB, (unsigned long long)ddr_seed, (unsigned long long)ddr_seed);
-                if (fill_ddr_random(uc, regions[i].base, regions[i].size)) return 1;
+                if (fill_ddr_random(regions[i].base, regions[i].size)) return 1;
             }
     }
     uc_hook h;
@@ -756,13 +789,15 @@ int main(int argc, char **argv) {
     vv_disp_init(want_window);
     vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s\n", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed");
-    err = uc_emu_start(uc, entry, have_stop ? stop_addr : 0xFFFFFFFFull, 0, max_insns);
+    vv_quirk_decode = vv_quirk_needs_decode();
+    err = uc_emu_start(uc, entry, have_stop ? stop_addr : 0xFFFFFFFFull, 0, 0);   /* max_insns: hook_code */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
-    /* Unicorn 2.1.1 MIPS reports UC_ERR_EXCEPTION when the uc_emu_start count limit hits
-     * (no hook_intr fired); treat that as the normal max-insns stop. */
+    /* (Unicorn 2.1.1 MIPS reported UC_ERR_EXCEPTION when uc_emu_start's own count limit hit, with no
+     * hook_intr; hook_code's uc_emu_stop returns OK, but keep treating that as the max-insns stop.) */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0 && max_insns && insn_count >= max_insns) err = UC_ERR_OK;
-    if (!err && max_insns && insn_count >= max_insns) vv_eprintf("[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
+    int at_max = max_insns && (stopped_max || insn_count >= max_insns);
+    if (!err && at_max) vv_eprintf("[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
     if (err) vv_eprintf("[stop] uc_emu_start: %s\n", uc_strerror(err));
     if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
@@ -772,7 +807,7 @@ int main(int argc, char **argv) {
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
     if (dump_lcd) vv_lcd_dump();
     run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : stop_reason_intr == 18 ? "STOPPED (break)" :
-                (max_insns && insn_count >= max_insns) ? "STOPPED (max-insns)" : "STOPPED";
+                at_max ? "STOPPED (max-insns)" : "STOPPED";
     vv_disp_status_dirty();
     if (shot_path) vv_disp_screenshot(uc, shot_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);
@@ -788,5 +823,6 @@ int main(int argc, char **argv) {
         free(s);
     }
     uc_close(uc);
+    for (size_t i = 0; i < NREG; i++) if (ram_buf[i]) munmap(ram_buf[i], regions[i].size);
     return rc;
 }
