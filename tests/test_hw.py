@@ -12,7 +12,7 @@ ENV.pop("VVIZARD_QUIRKS", None)
 ENV.pop("NO_COLOR", None)
 # Explicit settings (vvizard's own defaults are for the proj7 player: no limit, --halt-on-quirk);
 # a --load replaces the default program set.
-BASE = ["--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]
+BASE = ["--sync", "--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]
 
 
 def run(name, nexp, *extra, isr=False, stdin=None):

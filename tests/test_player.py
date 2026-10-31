@@ -68,7 +68,7 @@ def main():
     max_insns = (f + 4) * 900000      # PixelFeeder frame = 828960 cycles (--pf-period default)
     # vvizard's built-in default program (= GIOS + draw + isr7 + proj7, autorun 'jal 60000000\r'),
     # from <exe dir>/../../software; --no-halt-on-quirk: isr7 has load-use hits the default would stop on.
-    cmd = [VV, "--no-window", "--frame-clock=emulated", "--no-random-ddr", "--no-halt-on-quirk",
+    cmd = [VV, "--sync", "--no-window", "--frame-clock=emulated", "--no-random-ddr", "--no-halt-on-quirk",
            "--input-script", script, "--max-insns", str(max_insns)]
     t0 = time.time()
     r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

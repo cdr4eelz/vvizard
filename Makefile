@@ -20,6 +20,10 @@ else
 OPTFLAGS   ?= -O3 -g
 endif
 CFLAGS     ?= -std=gnu99 -Wall -Wextra $(OPTFLAGS)
+# pthreads (docs/MULTITHREADING-PLAN.md): always linked; --sync / --threads=1 just starts none.
+# make TSAN=1: ThreadSanitizer build (Linux; compile and link).
+TSAN       ?= 0
+THREAD_FLAGS := -pthread$(if $(filter 1,$(TSAN)), -fsanitize=thread)
 
 UNICORN_CFLAGS := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config --cflags unicorn)
 UNICORN_LIBS   := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config --libs unicorn) -Wl,-rpath,$(HOME)/.local/lib
@@ -100,15 +104,15 @@ refresh-hex: tests
 
 # Flags stamp: rewritten only when the compile/link command changes, so switching DEBUG/CFLAGS rebuilds everything.
 FLAGS_STAMP := $(BUILD_DIR)/.flags
-FLAGS_LINE   = $(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) LINK=$(LDFLAGS) $(UNICORN_LIBS) $(RAYLIB_LIBS)
+FLAGS_LINE   = $(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) LINK=$(LDFLAGS) $(UNICORN_LIBS) $(RAYLIB_LIBS)
 $(FLAGS_STAMP): FORCE | $(BUILD_DIR)
 	@echo '$(subst ','\'',$(FLAGS_LINE))' | cmp -s - $@ || echo '$(subst ','\'',$(FLAGS_LINE))' > $@
 
 $(TARGET): $(OBJS) $(FLAGS_STAMP)
-	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJS) -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
+	$(CC) $(CFLAGS) $(THREAD_FLAGS) $(LDFLAGS) $(OBJS) -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
 
 $(BUILD_DIR):
 	mkdir -p $@

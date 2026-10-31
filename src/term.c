@@ -5,6 +5,20 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <pthread.h>
+
+/* One recursive lock for stdout and stderr (docs/MULTITHREADING-PLAN.md section 7): the emulator
+ * thread writes UART bytes and its messages, the display thread raylib's log lines; err_bol and the
+ * stdout color/dirty state are shared.  Uncontended (and never taken) in a --sync run's hot path. */
+static pthread_mutex_t io_mx;
+static pthread_once_t io_once = PTHREAD_ONCE_INIT;
+static void io_init(void) {
+    pthread_mutexattr_t a; pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&io_mx, &a); pthread_mutexattr_destroy(&a);
+}
+void vv_term_lock(void) { pthread_once(&io_once, io_init); pthread_mutex_lock(&io_mx); }
+void vv_term_unlock(void) { pthread_mutex_unlock(&io_mx); }
 
 int vv_color_out, vv_color_err;
 static int out_tty;                           /* stdout is a terminal: flush every byte */
@@ -22,7 +36,7 @@ int vv_color_parse(const char *s) {
 }
 
 static void at_exit(void) {
-    vv_uart_flush();
+    vv_uart_flush();               /* (all threads joined by now) */
     if (vv_color_err && !err_bol) fputs(RESET, stderr);
     fflush(stderr);
 }
@@ -56,14 +70,17 @@ void vv_term_init(int mode) {
 }
 
 void vv_uart_flush(void) {
+    vv_term_lock();
     if (out_active) { fputs(RESET, stdout); out_active = 0; out_dirty = 1; }
     if (out_dirty) { fflush(stdout); out_dirty = 0; }
+    vv_term_unlock();
 }
 /* Flush buffered UART text but stay in the colored run (a run ends at a line end, stderr output or exit). */
 static void out_flush(void) { if (out_dirty) { fflush(stdout); out_dirty = 0; } }
-void vv_term_tick(void) { out_flush(); }
+void vv_term_tick(void) { vv_term_lock(); out_flush(); vv_term_unlock(); }
 
 void vv_uart_out(int c) {
+    vv_term_lock();
     if (vv_color_out) {
         if (c == '\n' || c == '\r') {            /* reset before line ends so nothing bleeds */
             if (out_active) { fputs(RESET, stdout); out_active = 0; }
@@ -71,6 +88,7 @@ void vv_uart_out(int c) {
     }
     putc(c, stdout); out_dirty = 1;
     if (out_tty || c == '\n') out_flush();
+    vv_term_unlock();
 }
 
 /* ---- stderr ---- */
@@ -111,16 +129,18 @@ static void err_colored(const char *s) {
     }
 }
 void vv_veprintf(const char *fmt, va_list ap) {
+    vv_term_lock();
     vv_uart_flush();                             /* keep stdout/stderr interleaving in order */
     char sb[1024], *b = sb; va_list aq; va_copy(aq, ap);
     int n = vsnprintf(sb, sizeof sb, fmt, ap);
-    if (n < 0) { va_end(aq); return; }
+    if (n < 0) { va_end(aq); vv_term_unlock(); return; }
     if ((size_t)n >= sizeof sb && (b = malloc(n + 1))) vsnprintf(b, n + 1, fmt, aq);
     else if (!b) b = sb;
     va_end(aq);
     if (vv_color_err) err_colored(b);
     else { fputs(b, stderr); if (n) err_bol = b[strlen(b) - 1] == '\n'; }
     if (b != sb) free(b);
+    vv_term_unlock();
 }
 void vv_eprintf(const char *fmt, ...) { va_list ap; va_start(ap, fmt); vv_veprintf(fmt, ap); va_end(ap); }
 

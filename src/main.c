@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <time.h>
 #include <sys/mman.h>
+#include <pthread.h>
 #ifndef MAP_ANON
 #define MAP_ANON MAP_ANONYMOUS
 #endif
@@ -328,6 +329,17 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     if (!opt_quiet_mmio) vv_eprintf("[mmio] W off=0x%04x size=%u <- 0x%08x\n", (unsigned)off, size, v);
 }
 
+/* --threads (docs/MULTITHREADING-PLAN.md): with a window, uc_emu_start runs on an emulator thread
+ * and the main thread draws (display.c); --sync / --threads=1 keeps everything on one thread. */
+static int opt_threads = 1;
+static uc_err emu_err;
+static uint32_t emu_entry; static uint64_t emu_until;
+static void *emu_thread(void *a) {
+    uc_engine *uc = a;
+    emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    vv_disp_emu_done();
+    return NULL;
+}
 static int stop_reason_intr = -1;
 static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *u) {
     (void)uc; (void)t; (void)u;
@@ -634,6 +646,9 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
+"  --threads=on|off   on (default): with a window, the emulator runs on its own thread and the\n"
+"                     main thread draws (frame copied at each frame end); off = --sync = --threads=1:\n"
+"                     one thread, as before\n"
 "  --color[=WHEN]     WHEN: auto (default), always (= bare --color) or never.  stdout carries only\n"
 "                     the guest's UART output and stderr everything else; with color, UART text is\n"
 "                     bold green and stderr [tags] / register names are highlighted (stderr only\n"
@@ -661,7 +676,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT, O_FRAME_CLOCK, O_MAX_SECONDS, O_EVENT_TRACE };
+       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT, O_FRAME_CLOCK, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -689,6 +704,7 @@ int main(int argc, char **argv) {
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"guest-exit",0,0,O_GUEST_EXIT},{"no-guest-exit",0,0,O_NO_GUEST_EXIT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
+        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
@@ -738,6 +754,12 @@ int main(int argc, char **argv) {
         case O_MAX_SECONDS: { char *e; double sec = strtod(optarg, &e);
             if (*e || sec < 0) { vv_eprintf("--max-seconds: bad value '%s'\n", optarg); return 2; }
             max_wall_ns = (uint64_t)(sec * 1e9); break; }
+        case O_THREADS:
+            if (!strcmp(optarg, "on") || !strcmp(optarg, "auto")) opt_threads = 1;
+            else if (!strcmp(optarg, "off")) opt_threads = 0;
+            else if (is_uint(optarg) && strtoul(optarg, 0, 0) >= 1) opt_threads = strtoul(optarg, 0, 0) > 1;
+            else { vv_eprintf("--threads: expected on, off or a count (1 = off), not '%s'\n", optarg); return 2; } break;
+        case O_SYNC: opt_threads = 0; break;
         case O_EVENT_TRACE:
             if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
             setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
@@ -862,12 +884,24 @@ int main(int argc, char **argv) {
     vv_disp_init(want_window);
     /* wall frame clock: the ~60/s frame ends redraw; the vv_disp_tick timer is only a fallback */
     if (vv_frame_clock == VV_FRAME_CLOCK_WALL && vv_pf_period && !vv_legacy_io) vv_disp_redraw_period = 0.1;
-    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s\n", big ? "big" : "little",
+    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
-            vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated");
+            vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
+            !opt_threads ? "off (--sync)" : vv_disp_has_window() ? "on (emulator + display)" : "on (no window: emulator only)");
     vv_quirk_decode = vv_quirk_needs_decode();
     run_t0 = vv_mono_ns();
-    err = uc_emu_start(uc, entry, have_stop ? stop_addr : 0xFFFFFFFFull, 0, 0);   /* max_insns: hook_code */
+    emu_entry = entry; emu_until = have_stop ? stop_addr : 0xFFFFFFFFull;   /* max_insns: hook_code */
+    pthread_t emu_tid; pthread_attr_t ta;
+    int threaded_disp = opt_threads && vv_disp_has_window();
+    if (threaded_disp) {                       /* emulator thread; raylib stays on this one */
+        pthread_attr_init(&ta);
+        pthread_attr_setstacksize(&ta, 64u << 20);   /* (macOS secondary threads default to 512 KiB) */
+        vv_disp_threaded = 1;
+        if (pthread_create(&emu_tid, &ta, emu_thread, uc)) { vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n"); vv_disp_threaded = threaded_disp = 0; }
+        pthread_attr_destroy(&ta);
+    }
+    if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
+    else err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
     /* (Unicorn 2.1.1 MIPS reported UC_ERR_EXCEPTION when uc_emu_start's own count limit hit, with no

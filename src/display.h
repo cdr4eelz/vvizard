@@ -24,6 +24,12 @@ int  vv_disp_key_take(void);                   /* -1 if none */
 void vv_disp_key_log(int c);                   /* show a key in the strip's recent-keys ticker */
 int  vv_disp_screenshot(uc_engine *uc, const char *png); /* whole window incl. strip */
 void vv_disp_status_dirty(void);               /* re-read the status lines at the next draw */
+/* Threaded display (docs/MULTITHREADING-PLAN.md): set vv_disp_threaded (window open) before the
+ * emulator thread starts; main then runs vv_disp_main_loop() until the emulator calls
+ * vv_disp_emu_done(), joins it and clears vv_disp_threaded (screenshot / hold run as before). */
+extern int vv_disp_threaded;
+void vv_disp_main_loop(void);
+void vv_disp_emu_done(void);
 /* Provided by main.c: the two status lines shown in the strip. */
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2);
 #endif

@@ -16,6 +16,10 @@ void vv_uart_out(int c);                      /* one guest UART TX byte -> stdou
 void vv_uart_flush(void);                     /* end the colored run and flush stdout */
 void vv_term_tick(void);                      /* periodic: flush stdout if bytes are pending */
 
+/* stdout/stderr lock (recursive): vv_uart_out, vv_eprintf etc. take it; hold it around several
+ * vv_eprintf calls that make one line (raylib's log callback). */
+void vv_term_lock(void);
+void vv_term_unlock(void);
 void vv_eprintf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vv_veprintf(const char *fmt, va_list ap);
 /* Register name for a register table: "name" wrapped in the register highlight when active. */
