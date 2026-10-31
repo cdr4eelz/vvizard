@@ -8,7 +8,10 @@
  *   BRAMs (BIOS/ISR/I-scratch/D-scratch): addr[13:2] => 16 KiB, repeats every 16 KiB.
  *   DDR: {4'h0, addr[27:0]} => nibbles 0x1,0x2,0x3 all hit the SAME DDR (0x1 data,
  *        0x2 inst/I-cache, 0x3 both). Modelled as one 256 MiB buffer.
- *   MMIO: MemMapIO addra = addr[13:2], decodes only addra[5:0] => repeats every 0x100.
+ *   MMIO: MemMapIO addra = addr[13:2] => the 16 KiB map repeats every 0x4000 (addr[27:14]
+ *        ignored). The registers answer only when addra[11:6]==0 (0x80000000-0x800000FC,
+ *        compared on addra[5:0]); the LCD text buffer is addra[11:5]==2 (0x80000100-0x8000017C);
+ *        the rest of the 16 KiB reads 0 here (HW: 32'dx) and drops stores.
  * We reproduce this with a UC_HOOK_TLB_FILL (vaddr -> canonical paddr) in UC_TLB_VIRTUAL mode.
  */
 #ifndef VV_MEMMAP_H
@@ -35,7 +38,7 @@ typedef struct {
     X("BIOS",  0x4, 0x40000000u,  16*VV_KiB,   7, VV_RAM ) /* HW: data-RO; writes logged */ \
     X("DSCR",  0x5, 0x50000000u,  16*VV_KiB,   7, VV_RAM ) /* D-scratch == SM_BASE_ADDR shared mem */ \
     X("ISCR",  0x6, 0x60000000u,  16*VV_KiB,   7, VV_RAM ) /* I-scratch */ \
-    X("MMIO",  0x8, 0x80000000u,   4*VV_KiB,   3, VV_MMIO) /* MemMapIO, aliases every 0x100 */ \
+    X("MMIO",  0x8, 0x80000000u,  16*VV_KiB,   3, VV_MMIO) /* MemMapIO addra[11:0], aliases every 16 KiB */ \
     X("ISR",   0xC, 0xC0000000u,  16*VV_KiB,   7, VV_RAM ) /* isr_mem; PC_ISR=0xC0000180 */
 
 /* Extra nibbles that alias onto another region's canonical base. */
@@ -57,6 +60,10 @@ typedef struct {
 #define VV_OW_GP_GCODE    0x0058u
 #define VV_OW_GP_STATE    0x005Cu
 #define VV_OW_RANDOM32    0x0080u   /* PRNG32LFSR: read value / write seed (src/prng.c) */
+#define VV_MMIO_DECODE    0x3FFCu   /* word offset within the map: addra[11:0] << 2 */
+#define VV_MMIO_REG_SPAN  0x0100u   /* registers: addra[11:6]==0 only (no 0x100 aliases) */
+#define VV_OW_LCD_BASE    0x0100u   /* LCD char i at 0x80000100 + 4*i, i = 0..31 (src/lcd.h) */
+#define VV_OW_LCD_END     0x0180u
 #define VV_SM_BASE_ADDR   0x50000000u   /* shared6.h: plain RAM in D-scratch */
 #define VV_GPTEMP         0x12003000u   /* graphics.h GP command buffer (DDR) */
 #define VV_FRAME0         0x10000000u   /* frame N at 0x10000000 + N<<FSHIFT */

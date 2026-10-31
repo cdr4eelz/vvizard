@@ -12,6 +12,7 @@
  *   - the load-use swap: the insn after a load gets the OLD rt while it runs, then the loaded value.
  * Cost with nothing pending: one 4-byte read + decode per instruction. */
 #include "quirk.h"
+#include "memmap.h"
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -472,7 +473,8 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
     } else if (store && mmio && size < 4 && (a & 3) + size != 4) {
         uint32_t v = gr(uc, rt) & ((1u << (8 * size)) - 1), placed = v << (8 * (4 - size - (a & 3)));
         if (ANY(MMIO_LANE) && ev(VV_Q_MMIO_LANE, pc, i, "%s to MMIO 0x%08x (val 0x%x); HW delivers 0x%08x%s", size == 1 ? "sb" : "sh",
-                                 a, v, placed, ((c & 0xFC) == 0x08) ? ", UART sends 0x00" : "")) return;
+                                 a, v, placed, (c & VV_MMIO_DECODE) == VV_OW_UATX_DATA ? ", UART sends 0x00" :
+                                 ((c & VV_MMIO_DECODE) & ~0x7Fu) == VV_OW_LCD_BASE ? ", LCD char gets 0x00" : "")) return;
         /* emulated in main.c mmio_write() */
     }
     if (!store && (op == 0x20 || op == 0x21) && ANY(LB_SIGN) && rt) {

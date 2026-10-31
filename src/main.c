@@ -16,6 +16,7 @@
 #include "gpu.h"
 #include "quirk.h"
 #include "prng.h"
+#include "lcd.h"
 
 /* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
  * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
@@ -86,10 +87,10 @@ static int rx_avail(void) {
 }
 static int rx_take(void) {
     if (!rx_avail()) return 0;
-    if (uart_in && *uart_in) return (unsigned char)*uart_in++;
+    if (uart_in && *uart_in) { int c = (unsigned char)*uart_in++; vv_disp_key_log(c); return c; }
     if (sq_head != sq_tail) { int c = (unsigned char)script_q[sq_head]; sq_head = (sq_head + 1) % sizeof script_q; return c; }
-    if (vv_disp_key_avail()) return vv_disp_key_take();
-    int c = stdin_peek; stdin_peek = -1; return c;
+    if (vv_disp_key_avail()) return vv_disp_key_take();       /* logged when pressed (display.c) */
+    int c = stdin_peek; stdin_peek = -1; vv_disp_key_log(c); return c;
 }
 
 /* ---- --input-script FILE: timed events. Line: WHEN ACTION ARG
@@ -107,7 +108,7 @@ static void run_event(uc_engine *uc, vv_event *e) {
     else for (char *c = e->arg; *c; c++) {
         size_t n = (sq_tail + 1) % sizeof script_q;
         if (n == sq_head) { fprintf(stderr, "[script] RX queue full\n"); break; }
-        script_q[sq_tail] = *c; sq_tail = n;
+        script_q[sq_tail] = *c; sq_tail = n; vv_disp_key_log((unsigned char)*c);
     }
     fprintf(stderr, "[script] %c%llu %s %s (insn %llu, frame %llu)\n", e->is_frame ? 'f' : 'i',
             (unsigned long long)e->when, e->is_dump ? "dump" : "key", e->is_dump ? e->arg : "", 
@@ -184,7 +185,7 @@ void vv_cop0_write(unsigned rd, uint32_t v) {
     }
 }
 void vv_mmio_side_read(uint32_t canon) {         /* a HW read of UARX_DATA pops the RX FIFO */
-    if ((canon & 0xFCu) == VV_OW_UARX_DATA) (void)rx_take();
+    if ((canon & VV_MMIO_DECODE) == VV_OW_UARX_DATA) (void)rx_take();
 }
 static void irq_step(uc_engine *uc, uint32_t pc) {
     int cop0 = vv_quirk_on(VV_Q_COP0);
@@ -222,8 +223,13 @@ static void irq_step(uc_engine *uc, uint32_t pc) {
 
 static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     (void)uc; (void)u; (void)size;
-    uint32_t w = (off & 0xFF) & ~3u;            /* addra[5:0] decode: alias every 0x100 */
+    uint32_t w = off & VV_MMIO_DECODE;          /* addra[11:0]; registers only at addra[11:6]==0 */
     uint32_t v = 0;
+    if (w >= VV_MMIO_REG_SPAN) {                /* LCD window reads 0; elsewhere HW reads 32'dx */
+        if (!opt_quiet_mmio && (w < VV_OW_LCD_BASE || w >= VV_OW_LCD_END))
+            fprintf(stderr, "[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
+        w = 0xFFFFFFFFu;                        /* no register: v stays 0 */
+    }
     switch (w) {
     case VV_OW_UATX_READY: v = 1; break;        /* host stdout always ready */
     case VV_OW_UARX_VALID: v = rx_avail(); break;
@@ -237,23 +243,32 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
         v = (vv_disp_frame() & 0x3F) << 24
           | (((gp_frame >> 28) ? (gp_frame >> VV_FSHIFT) : gp_frame) & 0x3F) << 16 | 0x1F; break;
     case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
+    case 0xFFFFFFFFu: break;
     default:
-        if (!opt_quiet_mmio) fprintf(stderr, "[mmio] MISS-READ off=0x%03x\n", (unsigned)off);
+        if (!opt_quiet_mmio) fprintf(stderr, "[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
     }
     /* Sub-word reads (e.g. lbu OB_UARX_DATA = +3 on big-endian): Unicorn hands us the
      * byte offset; return the matching lane of the 32-bit big-endian word. */
     if (size < 4) { unsigned lane = off & 3; v = (v >> (8 * (4 - size - lane))) & ((1u << (8 * size)) - 1); }
     if (!opt_quiet_mmio && w != VV_OW_UATX_READY && w != VV_OW_UARX_VALID)
-        fprintf(stderr, "[mmio] R off=0x%03x size=%u -> 0x%08x\n", (unsigned)off, size, v);
+        fprintf(stderr, "[mmio] R off=0x%04x size=%u -> 0x%08x\n", (unsigned)off, size, v);
     return v;
 }
 static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val, void *u) {
     (void)u;
-    uint32_t w = (off & 0xFF) & ~3u, v = (uint32_t)val;
+    uint32_t w = off & VV_MMIO_DECODE, v = (uint32_t)val;   /* addra[11:0] */
     /* mmio-lane quirk: ByteAccess4 places sb/sh data in its big-endian byte lane (zeros elsewhere)
      * and MemMapIO uses the whole dina, e.g. sb to UATX_DATA+0 transmits 0x00. */
     int lane_hw = size < 4 && vv_quirk_on(VV_Q_MMIO_LANE);
     if (lane_hw) { unsigned lane = off & 3; v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
+    if (w >= VV_MMIO_REG_SPAN) {                /* registers decode only at addra[11:6]==0 */
+        if (w < VV_OW_LCD_END) {                /* LCDText2x16_MemPort: addra[11:5]==2, wdata = dina[7:0] */
+            vv_lcd_write((w - VV_OW_LCD_BASE) >> 2, (uint8_t)v);
+            if (!opt_quiet_mmio) fprintf(stderr, "[mmio] W off=0x%04x size=%u <- 0x%08x (LCD[%u] = 0x%02x)\n",
+                                         (unsigned)off, size, v, (unsigned)(w - VV_OW_LCD_BASE) >> 2, v & 0xFF);
+        } else if (!opt_quiet_mmio) fprintf(stderr, "[mmio] MISS-WRITE off=0x%04x size=%u <- 0x%08x (dropped)\n", (unsigned)off, size, v);
+        return;
+    }
     switch (w) {
     case VV_OW_UATX_DATA: putchar(v & 0xFF); fflush(stdout); return; /* dina[7:0] */
     case VV_OW_CNT_RESET: cnt_base_insn = insn_count; break;
@@ -275,7 +290,7 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
         break;
     default: break;
     }
-    if (!opt_quiet_mmio) fprintf(stderr, "[mmio] W off=0x%03x size=%u <- 0x%08x\n", (unsigned)off, size, v);
+    if (!opt_quiet_mmio) fprintf(stderr, "[mmio] W off=0x%04x size=%u <- 0x%08x\n", (unsigned)off, size, v);
 }
 
 static int stop_reason_intr = -1;
@@ -401,6 +416,29 @@ static void dump_regs(uc_engine *uc) {
     fprintf(stderr, "\n"); /* Unicorn 2.1 exposes no Cause/EPC/Count reg ids */
 }
 void vv_dump_regs(uc_engine *uc) { dump_regs(uc); }
+
+/* ---- status strip text (display.c) ---- */
+static const char *run_state = "RUN";
+static int guest_big = VV_DEFAULT_BIG_ENDIAN;
+static uint32_t rd_guest(uc_engine *uc, uint32_t a, unsigned n) {
+    unsigned char b[4] = { 0 }; uint32_t v = 0;
+    if (uc_mem_read(uc, a, b, n)) return 0;
+    for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
+    return v;
+}
+void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2) {
+    snprintf(l1, n1, "%s  insns %llu  PF_FRAME %u (writes %llu)  GP %u  IRQ %llu%s",
+             vv_quirk_halted ? "HALTED (quirk)" : run_state, (unsigned long long)insn_count, vv_disp_frame(),
+             (unsigned long long)pf_writes, gp_launches, (unsigned long long)irq_count,
+             vv_disp_keys_enabled ? "" : "  keys->UART off");
+    /* proj6/proj7 shared memory (shared7.h): magic 0xFEDBEEFn, flags (pause / notimer), clock (BCD mm:ss) */
+    uint32_t magic = rd_guest(uc, VV_SM_BASE_ADDR, 4);
+    if ((magic & ~0xFu) == 0xFEDBEEF0u) {
+        uint32_t fl = rd_guest(uc, VV_SM_BASE_ADDR + 0x16, 2), clk = rd_guest(uc, VV_SM_BASE_ADDR + 0x20, 4);
+        snprintf(l2, n2, "graphics %s  clock %s  %X%X:%X%X  proj%u", fl & 1 ? "PAUSED" : "running",
+                 fl & 2 ? "PAUSED" : "running", clk >> 12 & 15, clk >> 8 & 15, clk >> 4 & 15, clk & 15, 4 + (magic & 0xF));
+    } else snprintf(l2, n2, "graphics -  clock -  (no proj6/7 shared memory at 0x%08x)", VV_SM_BASE_ADDR);
+}
 uint64_t vv_insns(void) { return insn_count; }
 static int reg_index(const char *n) {
     if (n[0] == '$') n++;
@@ -429,6 +467,8 @@ static void usage(const char *p) {
 "  --dump-frame F.ppm write the selected frame (PF_FRAME) as PPM at exit\n"
 "  --trace-regs       --trace plus GPRs changed by the previous insn (debug)\n"
 "  --hold             keep the window open after the run until it is closed\n"
+"  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
+"  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
 "  --input-script F  timed events (fN|iN key STR / dump F.ppm); enables --irq\n"
 "  --irq              inject UART-RX interrupts (EPC/Cause shadowed, ISR at 0x%08x)\n"
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
@@ -449,7 +489,7 @@ static void usage(const char *p) {
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
-    const char *dump_path = NULL, *bios_path = NULL; int no_bios = 0;
+    const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0;
     uint32_t entry = VV_PC_BOOT, sp = 0x50004000u; int have_entry = 0, have_elf_entry = 0;
     const char *loads[32]; int nloads = 0;
     const char *expects[32]; int nexp = 0;
@@ -457,7 +497,7 @@ int main(int argc, char **argv) {
     static struct option lo[] = {
         {"load",1,0,'l'},{"entry",1,0,'e'},{"sp",1,0,'s'},{"max-insns",1,0,'m'},{"until",1,0,'u'},
         {"trace",2,0,'t'},{"little",0,0,'L'},{"big",0,0,'B'},{"quiet-mmio",0,0,'q'},{"expect",1,0,'x'},{"input-script",1,0,'S'},{"irq",0,0,'I'},{"dump-every",1,0,'E'},{"dump-prefix",1,0,'P'},
-        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"quirks",1,0,'J'},{"no-quirks",0,0,'O'},{"list-quirks",0,0,'Y'},{"help",0,0,'h'},{0,0,0,0}};
+        {"no-window",0,0,'W'},{"no-window-keys",0,0,'K'},{"dump-frame",1,0,'D'},{"hold",0,0,'H'},{"bios",1,0,'b'},{"no-bios",0,0,'N'},{"trace-regs",0,0,'R'},{"random-ddr",2,0,'r'},{"uart-in",1,0,'U'},{"no-random-ddr",0,0,'z'},{"halt-on-quirk",2,0,'Q'},{"warn-on-quirk",2,0,'w'},{"quirks",1,0,'J'},{"no-quirks",0,0,'O'},{"list-quirks",0,0,'Y'},{"dump-lcd",0,0,'C'},{"screenshot",1,0,'G'},{"help",0,0,'h'},{0,0,0,0}};
     int c;
     uint32_t emul = vv_quirk_default();
     const char *qenv = getenv("VVIZARD_QUIRKS"), *qcli = NULL, *qdet = NULL; int qdet_on = 0;
@@ -491,6 +531,8 @@ int main(int argc, char **argv) {
         case 'J': qcli = optarg; break;
         case 'O': qcli = "none"; break;
         case 'Y': vv_quirk_list(stdout); return 0;
+        case 'C': dump_lcd = 1; break;
+        case 'G': shot_path = optarg; break;
         default: usage(argv[0]); return c == 'h' ? 0 : 2;
     }
     if (qcli && vv_quirk_parse(qcli, emul, &emul)) return 2;
@@ -502,6 +544,7 @@ int main(int argc, char **argv) {
         vv_quirk_detect = d;
     }
     uc_engine *uc; uc_err err;
+    guest_big = big; vv_lcd_reset();
     if ((err = uc_open(UC_ARCH_MIPS, UC_MODE_MIPS32 | (big ? UC_MODE_BIG_ENDIAN : UC_MODE_LITTLE_ENDIAN), &uc))) {
         fprintf(stderr, "uc_open: %s\n", uc_strerror(err)); return 1; }
     /* Bypass MIPS kseg0/kseg1/kseg2 + TLB: identity-ish translation via our TLB hook. */
@@ -588,6 +631,10 @@ int main(int argc, char **argv) {
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
+    if (dump_lcd) vv_lcd_dump(stderr);
+    run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : stop_reason_intr == 18 ? "STOPPED (break)" :
+                (max_insns && insn_count >= max_insns) ? "STOPPED (max-insns)" : "STOPPED";
+    if (shot_path) vv_disp_screenshot(uc, shot_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);
     vv_disp_close();
     int rc = err ? 1 : vv_quirk_halted ? 4 : 0;

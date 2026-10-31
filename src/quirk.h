@@ -29,7 +29,7 @@
     Q(SYSCALL,     "syscall",     1, "syscall is a nop, no exception (innerds/ALUdec.v:44)") \
     Q(RESERVED,    "reserved",    1, "insns the MIPS150 does not decode: unknown SPECIAL funct (movz/movn/sync/teq...) writes 0 to rd; branch-likely, SPECIAL2/3 (mul/clz), COP1-3, LL/SC/LWC/SWC/PREF, COP0 ops other than mfc0/mtc0 (eret, di/ei) are nops; rotr/rotrv act as srl/srlv; REGIMM rt other than 0/1/16/17 acts as bltz/bgez(al) by rt[0]/rt[4] (traps branch!); ops 0x27/0x2C/0x2D/0x2F access address 0 (innerds/InstructionControl.v:33,58-59,69,86,125-127, innerds/ALUdec.v:22,75)") \
     Q(COP0,        "cop0",        1, "COP0150 has only Count(9, +1 per cycle), Compare(11, reset 0xFFFF), Status(12, reset 0, all 32 bits RW), Cause(13), EPC(14); mtc0 EPC is ignored, other registers read 0, the sel field is ignored (cpu/COP0150.v:24-28,61,70-75)") \
-    Q(MMIO_LANE,   "mmio-lane",   1, "sb/sh to an MMIO register delivers the ByteAccess4 lane-placed word (data in its big-endian lane, zeros elsewhere): UART TX sends dina[7:0], so sb not at +3 sends 0x00 (innerds/ByteAccess4.v WordMasked, cpu/MemMapIO.v:99)") \
+    Q(MMIO_LANE,   "mmio-lane",   1, "sb/sh to an MMIO register delivers the ByteAccess4 lane-placed word (data in its big-endian lane, zeros elsewhere): UART TX and the LCD chars (0x80000100+) take dina[7:0], so sb not at +3 sends/writes 0x00 (innerds/ByteAccess4.v WordMasked, cpu/MemMapIO.v, base_io/LCDText2x16.v)") \
     Q(JALR_RD,     "jalr-rd",     0, "FIXED in fcdda7f (old hardware): jalr linked to $31 whatever rd was (innerds/InstructionControl.v:115)") \
     Q(LB_SIGN,     "lb-sign",     0, "FIXED in fcdda7f (old hardware): lb/lh zero-extended like lbu/lhu (innerds/ByteAccess4.v ValExtract)")
 

@@ -68,6 +68,7 @@ uses as its shared memory (the stack is at the top of D-scratch).
       --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (0x50004000)
       --max-insns N (1e6, 0=unlimited)  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio
       --little | --big   --bios FILE   --no-bios   --no-window   --no-window-keys   --dump-frame F.ppm   --hold
+      --dump-lcd   --screenshot F.png
       --random-ddr[=SEED]   --no-random-ddr   --uart-in STR   --expect REG=VAL
       --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
@@ -129,25 +130,45 @@ The hardware decodes only `ADDR[31:28]`.
 | 0x4 | BIOS (data read-only in HW; writes are logged here) | 0x40000000 | 16 KiB |
 | 0x5 | D-scratch = SM_BASE_ADDR shared memory (plain RAM) | 0x50000000 | 16 KiB |
 | 0x6 | I-scratch | 0x60000000 | 16 KiB |
-| 0x8 | MMIO | 0x80000000 | 4 KiB page; registers repeat every 0x100 |
+| 0x8 | MMIO (MemMapIO, `addra = ADDR[13:2]`) | 0x80000000 | 16 KiB, repeats every 0x4000. Registers only at 0x80000000-0x800000FC, LCD at 0x80000100-0x8000017C, the rest reads 0 and drops stores (see MMIO model) |
 | 0xC | ISR BRAM, PC_ISR=0xC0000180 | 0xC0000000 | 16 KiB |
 Any other nibble can't be decoded. In hardware a load from one reads 0, a store is dropped and a fetch runs nops.
 vvizard emulates this through the `unmapped` and `unmapped-fetch` quirks, which map a zero "VOID" page. With
 those quirks off, the access raises a TLB-style CPU exception (`UC_ERR_EXCEPTION`). vvizard does this with Unicorn's virtual-TLB mode and a fill hook, which is why it needs Unicorn 2.1 or newer. Hardware references and the probe findings are in [NOTES.md](NOTES.md).
 
 ## MMIO model
+MemMapIO gets the word address `addra = ADDR[13:2]` and now decodes it (cs150 branch `lcd-text`, `cpu/MemMapIO.v`):
+| offset (`ADDR[13:0]`) | `addra` | device |
+|---|---|---|
+| 0x0000-0x00FC | `addra[11:6] == 0`, compared on `addra[5:0]` | the registers below (UART, counters, PF/GP, PRNG) |
+| 0x0100-0x017C | `addra[11:5] == 2` | 2x16 LCD text buffer, write-only |
+| 0x0180-0x3FFC | - | nothing: reads 0 here (`32'dx` in HW), stores dropped, logged as MISS-READ / MISS-WRITE |
+
+The registers no longer repeat every 0x100: 0x80000108 is LCD char 2, not UART TX data, and 0x80000180 or 0x80000280
+are not the PRNG. `ADDR[27:14]` is still not decoded, so the whole 16 KiB map repeats (0x80004008 is UART TX data).
+This is plain address decode, not a quirk: the `unmapped` quirk covers undecoded nibbles only, and MMIO misses read 0
+and drop stores in every quirk setting.
 - **UART:** TX_READY always reads 1. A write to TX_DATA (offset 0x08) sends byte [7:0] of the written word to stdout. With `mmio-lane` (the default), that's the lane-placed word, so only `sw` and `sb` at +0xB send the byte.
 - **UART RX:** RX_VALID and RX_DATA serve any `--uart-in` bytes first, then due `--input-script` bytes, then window keystrokes, then poll stdin without blocking.
+- **LCD (0x80000100-0x8000017C, `src/lcd.c`):** LCDText2x16.v's 32-character buffer behind `LCDText2x16_MemPort`. Character i (0-15 line 1, 16-31 line 2, left to right) is at `0x80000100 + 4*i` and takes `dina[7:0]` of any store (any byte mask). With `mmio-lane` (the default), that's the lane-placed word, so `sw` and `sb` at +3 (`sh` at +2) write the byte, and `sb` at +0..+2 (`sh` at +0) writes 0x00, as in hardware. Without the quirk the char is the stored value's low byte. Reads return 0 and have no side effects. Reset contents are LCDText2x16's `INIT_TEXT` default, 32 spaces. `--dump-lcd` prints the buffer (text and hex) at exit, and the window shows it in the status strip.
 - **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. There is no cycle model.
-- **PRNG (0x80000080, `src/prng.c`):** PRNG32LFSR.v, a 32-bit Galois LFSR (mask 0x80200003, reset value 0xACE12468) that steps every clock, not per read. A read in cycle c returns state(c-1) (MemMapIO registers `prng_out` once more before `douta`). Any store (any byte lane, also via the 0x100 aliases) reseeds with the full lane-placed store data, and a seed of 0 becomes 1. The first read in the cycle right after a store returns the old value; from the next cycle on reads return the seed, then the seed advanced one step per cycle. Back-to-back reads return consecutive LFSR states. Cycles are counted as instructions (no stall or cache model), so seeded sequences match hardware only while the CPU does not stall, and the unseeded sequence after reset is not aligned with hardware. CNT_RESET does not reset the PRNG.
+- **PRNG (0x80000080, `src/prng.c`):** PRNG32LFSR.v, a 32-bit Galois LFSR (mask 0x80200003, reset value 0xACE12468) that steps every clock, not per read. A read in cycle c returns state(c-1) (MemMapIO registers `prng_out` once more before `douta`). Any store (any byte lane, also via the 16 KiB alias 0x80004080; 0x80000180 is no longer an alias) reseeds with the full lane-placed store data, and a seed of 0 becomes 1. The first read in the cycle right after a store returns the old value; from the next cycle on reads return the seed, then the seed advanced one step per cycle. Back-to-back reads return consecutive LFSR states. Cycles are counted as instructions (no stall or cache model), so seeded sequences match hardware only while the CPU does not stall, and the unseeded sequence after reset is not aligned with hardware. CNT_RESET does not reset the PRNG.
 - **GPU (stub):** PF_FRAME, GP_FRAME and GP_CODE writes are recorded, and a GP_CODE write logs a GPU "launch". PF_FRAME reads return `{4'h1, frame#, 22'b0}`. GP_STATE reads return 0, meaning idle.
-- **Other offsets:** logged as MISS-READ or MISS-WRITE.
+- **Other offsets:** logged as MISS-READ or MISS-WRITE (reads 0, stores dropped).
 - **Interrupts:** `--irq` injects only UART-RX interrupts. The COP0 timer (Count == Compare) and RTC interrupts are not raised, although `mfc0 Count` counts instructions with the `cop0` quirk (details in NOTES.md).
 
 ## Tests
-`make test` runs all three suites. `make test-hex` runs `tests/test_hex.py`, which checks the hex programs in `tests/*.hex` (loop, uart, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`. It runs one tiny program per quirk for detection, with clean counterparts. It runs each quirk on and off and checks the hardware result against the standard MIPS result. It also checks the CLI and environment interface. How to run them and their pass conditions are in NOTES.md.
+`make test` runs all three suites. `make test-hex` runs `tests/test_hex.py`, which checks the hex programs in `tests/*.hex` (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via `--input-script` UART keys and injected UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`. It runs one tiny program per quirk for detection, with clean counterparts. It runs each quirk on and off and checks the hardware result against the standard MIPS result. It also checks the CLI and environment interface. How to run them and their pass conditions are in NOTES.md.
 
 ## PixelFeeder display (raylib, `src/display.c`)
+The window is titled `vvizard`. It shows the selected frame unscaled at the top (800×600) and a 76-pixel status strip
+underneath:
+- **Left:** the 2x16 LCD in green dot-matrix style. Codes 0x20-0x7F use HD44780 ROM A00 glyphs (`src/lcdfont.h`, so 0x5C is ¥ and 0x7E/0x7F are → / ←). 0x10-0x1F and 0x80-0xA0 are blank as in A00. CGRAM codes 0x00-0x0F (LCDText2x16 never loads CGRAM) and 0xA1-0xFF (katakana and symbols, not drawn) show as a hollow box.
+- **Right, line 1:** run state (RUN, STOPPED (break / max-insns / error) or HALTED (quirk)), instructions, the displayed PF_FRAME and the number of PF_FRAME writes, GP launches and injected IRQs.
+- **Right, line 2:** when D-scratch holds proj6/proj7 shared memory (magic 0xFEDBEEFn at 0x50000000): graphics paused (flags bit 0, ' ' key), clock paused (flags bit 1, 'd'/'e' keys) and the BCD mm:ss clock.
+- **Right, bottom:** recent keys. Window keystrokes are shown when pressed, `--input-script` keys when due, and `--uart-in` and stdin bytes when the guest reads them. The newest key is at the right and older keys scroll out to the left.
+- `--screenshot F.png` writes the whole window, strip included, as PNG when the run ends (needs a window; works under `xvfb-run`).
+
 - Frame N starts at `0x10000000 + N<<22`. The visible area is 800×600, rows start 4096 bytes apart, and each pixel is a 32-bit big-endian XRGB word.
 - A PF_FRAME write (0x80000050) switches frames immediately (hardware waits for the end of the scan; details in NOTES.md).
 - Options:

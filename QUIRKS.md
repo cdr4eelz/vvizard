@@ -240,13 +240,17 @@ obscure and postponed the fix, so it stays on until the RTL changes.
 - **Default:** on.
 - **Hardware:** an `sb`/`sh` to an MMIO register delivers ByteAccess4's lane-placed word: the data in its
   big-endian byte lane, zeros elsewhere. UART TX sends `dina[7:0]`, so an `sb` to UART TX at +0x8 sends 0x00 and
-  only +0xB (or `sw`) sends the byte.
-- **vvizard without the quirk:** the MMIO register sees the raw byte value.
-- **RTL:** `innerds/ByteAccess4.v` (WordMasked) and `cpu/MemMapIO.v:99`.
+  only +0xB (or `sw`) sends the byte. The LCD text buffer (0x80000100-0x8000017C, `base_io/LCDText2x16.v`
+  `LCDText2x16_MemPort`) also takes `dina[7:0]` on any byte mask, so an `sb` to a char word at +0..+2 (or `sh` at
+  +0) writes 0x00 into that char, and only +3 (`sh` +2, or `sw`) writes the byte.
+- **vvizard without the quirk:** the MMIO register (or LCD char) sees the raw byte value.
+- **RTL:** `innerds/ByteAccess4.v` (WordMasked), `cpu/MemMapIO.v` (`Tx_Data = dina[7:0]`) and
+  `base_io/LCDText2x16.v` (`wdata = dina[7:0]`).
 - **Confirmed:** RTL reading. The cs150 PRNG Icarus check confirms the same lane placement for the PRNG reseed,
   which vvizard applies whether or not the quirk is on.
 - **Tests:** test_quirks det `mmio_lane` / `uart_ok` and emu `mmio_lane` (stdout `\0` with the quirk on, `A` with it
-  off). test_hex `uart` (`sb` at +0xB) and `prng` pass with the quirk on and off.
+  off). test_hex `uart` (`sb` at +0xB) and `prng` pass with the quirk on and off. test_hex `lcd` runs with the quirk
+  on (`sb` +0 / `sh` +0 write 0x00) and off (they write the byte).
 
 ### jalr-rd
 - **Default:** off. Fixed in cs150 commit **fcdda7f**.
@@ -281,7 +285,12 @@ These are found by RTL reading. vvizard keeps its standard or simplified behavio
 - **Mask-0 MMIO store** (`cpu/MemMapIO.v:65-66`): `isRead = ena && ~|wea`, so any MMIO access with an empty byte
   mask is a read and pops RX_DATA. vvizard does this only for the redirected `unaligned`/`lwlr` cases.
 - **RX_DATA read when not valid** returns junk (`cpu/MemMapIO.v:101`), and undefined MMIO offsets read `32'dx`
-  (`cpu/MemMapIO.v:166`). vvizard returns 0 and logs a MISS-READ.
+  (`cpu/MemMapIO.v`, `MUX_DOUTA` default; also every offset outside 0x000-0x0FC and the LCD window 0x100-0x17C of
+  the 16 KiB map). vvizard returns 0 and logs a MISS-READ. This is MMIO decode, not the `unmapped` quirk (which is
+  for undecoded nibbles): stores there are dropped and reads give 0 whatever the quirk set.
+- **MMIO decode (not a quirk):** since the cs150 `lcd-text` branch the MMIO registers decode `addra[11:6] == 0`, so
+  they no longer repeat every 0x100 (0x80000108 is LCD char 2, 0x80000180 is nothing). The 16 KiB map still repeats
+  through `ADDR[27:14]` (0x80004008 is UART TX). vvizard follows the new decode; older bitstreams aliased.
 - **J-type target** uses the jump's own PC[31:28] (`cpu/StageDX.v:96`), not the delay slot's. This only matters
   when the jump is the last word of a 256 MiB segment.
 - **`jr` to a misaligned target:** hardware ignores address[1:0], while Unicorn raises AdEL.

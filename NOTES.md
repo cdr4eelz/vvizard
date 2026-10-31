@@ -6,7 +6,11 @@ Background and probe findings moved out of README.md. Nothing here is needed to 
 - The hardware decodes only `ADDR[31:28]` (MemBank.v:51,70; StageMW.v:6-21).
 - DDR: 0x1 = D$ path, 0x2 = I$ path, 0x3 = both; address `{4'h0,addr[27:0]}` (MemBank.v:141,150).
 - BIOS: indexed by `addr[13:2]` (MemBank.v:160); data-read-only in hardware.
-- MMIO: MemMapIO.v; registers repeat every 0x100 (`addra[5:0]`, MemMapIO.v:67).
+- MMIO: MemMapIO.v gets `addra = DMEM_ADDR[13:2]` (MemBank.v:211), so the map repeats every 16 KiB. Since the
+  cs150 `lcd-text` branch (commit c2e8221) the registers are qualified with `io_base = addra[11:6] == 0` and answer only at
+  0x80000000-0x800000FC (they used to repeat every 0x100 on `addra[5:0]`). `LCDText2x16_MemPort` takes
+  `addra[11:5] == 2` (0x80000100-0x8000017C): `we = ena && |wea`, `waddr = addra[4:0]`, `wdata = dina[7:0]`, reads 0.
+  Elsewhere reads return `32'dx` (BADNESS=0); vvizard returns 0.
 - ISR BRAM: PC_ISR=0xC0000180 (CPUMIPS.v:6).
 - PF_FRAME reads return `{4'h1, frame#, 22'b0}` (MemMapIO.v:152).
 
@@ -22,7 +26,8 @@ I tested this with a probe program:
 **Approach:** `uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL)` plus a `UC_HOOK_TLB_FILL` hook.
 The hook maps each virtual address to `base | (addr & (size-1))`, page by page. This bypasses kseg handling and the CP0 TLB, so a write to Status no longer affects address translation.
 It also reproduces the hardware's top-nibble aliasing: 0x3xxxxxxx reaches the same DDR as 0x1xxxxxxx, and the BRAMs wrap every 16 KiB.
-MMIO uses `uc_mmio_map`. Its callbacks fold the offset with `& 0xFC` to reproduce the 0x100 alias.
+MMIO uses `uc_mmio_map` over the 16 KiB map. Its callbacks take `off & 0x3FFC` (`VV_MMIO_DECODE`): offsets below 0x100
+reach the registers, 0x100-0x17C the LCD buffer (`src/lcd.c`), anything else is a miss.
 The loader writes through `vv_canon()`, so you can also load at alias addresses.
 
 
@@ -48,12 +53,13 @@ These Unicorn 2.1.1 behaviors were confirmed with a probe program:
 ## Test pass conditions
 Hex programs in `tests/*.hex`; convert with `perl -ne 'print pack("H*",join("",split))'`.
 - `loop` (at 0x40000000): passes if t0=30 and t2=0x11e.
-- `uart`: writes "Hi\n" to 0x80000008, to the alias 0x80000108, and as a byte store to 0x8000000B. Passes if stdout is exactly `Hi\n` and t2 (the TX_READY read) is 1.
+- `uart`: writes "H" to 0x80000008, "i" to 0x80000108 and "\n" as a byte store to 0x8000000B. 0x80000108 used to be a UART alias; now it is LCD char 2. Passes if stdout is exactly `H\n`, LCD char 2 is `i` (`--dump-lcd`) and t2 (the TX_READY read) is 1.
+- `lcd` (source `tests/lcd.s`, at 0x40000000, run with the default quirks and with `--quirks=-mmio-lane`): `sw` to chars 0, 1, 15, 16 and 31 (one with junk in bits 31:8), `sb` at +3 and +0, `sh` at +2 and +0, a store through the 16 KiB alias 0x80004100, a store to 0x80000108 (old UART alias), stores to 0x80000180 and 0x80000208 (dropped), and `\n` to 0x80004008 (16 KiB UART alias). Reads 0x80000100/104 (0), TX_READY at 0x80000000 and 0x80004000 (1), 0x80000100 (0, not TX_READY) and 0x80000184 (0). Passes if stdout is exactly `\n`, the registers match, and `--dump-lcd` shows line 1 `QiU`, 0x00, `X`, 0x00, 9 spaces, `L` (with `mmio-lane`; `QiUXXX` without) and line 2 `a`, 14 spaces, `z`.
 - `alias` (runs at 0xC0000180): stores to 0x12003000 and reads back through 0x32003000, before and after `mtc0 $0,Status`.
 - `frame`: fills x 100..131, y 50..59 of frame 1 with 0x00FF8000, writes 1 to PF_FRAME, then `break`.
-- `prng` (source `tests/prng.s`, at 0x40000000, `--max-insns 300000 --no-random-ddr`): reads the PRNG unseeded, stores 0xDEADBEEF and reads at +1 (stale), +2, +3, +5 cycles, reseeds with 0, `sb` at +3 and at +0, `lbu`, a store through the 0x80000180 alias, a CNT_RESET store (must not disturb the PRNG), then reads after a 196608-instruction loop (exercises the jump-ahead). Passes with
-  `--expect a0=0x56709234 --expect a1=0x2b38491a --expect s0=0xe28b8493 --expect s1=0xdeadbeef --expect s2=0xef76df74 --expect s3=0x3bddb7dd --expect s4=0x1 --expect s5=0xab --expect s6=0xab000000 --expect s7=0x0 --expect t3=0xdeadbeef --expect t5=0x46dd8d7a`.
-  These values were checked against the RTL: an Icarus testbench drove cpu/MemMapIO.v with the same MMIO access in the same cycle (cycle = instruction number, state(0) = reset value) and read the same 12 values.
+- `prng` (source `tests/prng.s`, at 0x40000000, `--max-insns 300000 --no-random-ddr`): reads the PRNG unseeded, stores 0xDEADBEEF and reads at +1 (stale), +2, +3, +5 cycles, reseeds with 0, `sb` at +3 and at +0, `lbu`, a store to 0x80000180 (no longer a PRNG alias, so it must not reseed), a CNT_RESET store (must not disturb the PRNG), then reads after a 196608-instruction loop (exercises the jump-ahead). Passes with
+  `--expect a0=0x56709234 --expect a1=0x2b38491a --expect s0=0xe28b8493 --expect s1=0xdeadbeef --expect s2=0xef76df74 --expect s3=0x3bddb7dd --expect s4=0x1 --expect s5=0xab --expect s6=0xab000000 --expect s7=0x0 --expect t3=0x0ab00000 --expect t5=0x9484c744`.
+  The first 10 values were checked against the RTL: an Icarus testbench drove cpu/MemMapIO.v with the same MMIO access in the same cycle (cycle = instruction number, state(0) = reset value) and read the same values. t3 and t5 changed with the new decode (the 0x80000180 store no longer reseeds): they are step^4 and step^196614 of the 0xAB000000 seed, checked with a separate Python LFSR model, not yet with the RTL. The RTL side of "0x80000280 is not the PRNG" is the `memmapio_prng` Icarus test on the lcd-text branch.
 - `gpcmds` + `gplaunch`: load gpcmds at 0x12003000 and gplaunch at 0x40000000, run with `--dump-frame`, check with `tests/check_gp.py`.
 - `hwprobe` (source `tests/hwprobe.s`, at 0x60000000, `--no-bios --no-random-ddr`): passes with `--expect s5=0 --expect s3=45` (default quirks).
 - `make test-hex` runs all of the above (`tests/test_hex.py`); `make test` = test-hex + test-quirks + test-player.
