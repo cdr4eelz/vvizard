@@ -36,7 +36,9 @@ ISR_BIN  ?= $(SW)/proj_app7/isr7.bin
 BIN  ?= --load $(DMEM_APP)@0x50000000 --load $(ISR_BIN)@0xC0000000 --load $(IMEM_APP)@0x60000000 --entry 0x40000000
 # Auto-type the jump to the IMEM app at the GIOS prompt (GIOS ends tokens on space/CR).
 AUTORUN ?= jal 60000000\r
-ARGS ?= --random-ddr --irq --max-insns 0
+ARGS ?= --random-ddr --irq --max-insns 0 --quiet-mmio
+# Extra flags appended to ARGS without replacing the defaults, e.g. EXTRA=--trace=100
+EXTRA ?=
 # MIPS150 hardware quirks to EMULATE (README "Hardware quirks"; ./vvizard --list-quirks).
 # 'default' = the current hardware (fixed bugs jalr-rd/lb-sign off, bal-untaken on).
 # e.g. HW_QUIRKS=none (standard MIPS32), HW_QUIRKS=-load-use, HW_QUIRKS=+jalr-rd,+lb-sign (old HW).
@@ -121,7 +123,7 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 run: $(TARGET)
-	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') --quirks=$(HW_QUIRKS) $(QUIRKS) $(ARGS) $(BIN)
+	LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET) --bios $(BIOS) $(if $(AUTORUN),--uart-in '$(AUTORUN)') --quirks=$(HW_QUIRKS) $(QUIRKS) $(ARGS) $(EXTRA) $(BIN)
 
 test-player: $(TARGET)
 	python3 tests/test_player.py
