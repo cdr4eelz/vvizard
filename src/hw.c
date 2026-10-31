@@ -6,6 +6,7 @@
 #include "display.h"
 #include <stdio.h>
 #include <time.h>
+#include <stdarg.h>
 
 int      vv_legacy_io;
 uint64_t vv_uart_rx_gap = VV_UART_RX_FRAME;
@@ -15,6 +16,14 @@ uint32_t vv_cur_pc;
 
 static uint64_t now_c;                     /* cycle of the last vv_hw_tick */
 static uc_engine *g_uc;
+
+FILE *vv_evt;
+void vv_evt_log(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    fprintf(vv_evt, "%llu %08x ", (unsigned long long)now_c, vv_cur_pc);
+    vfprintf(vv_evt, fmt, ap); fputc('\n', vv_evt);
+    va_end(ap);
+}
 
 /* ---------------- COP0150 (cpu/COP0150.v) ----------------
  * Interrupt sources are 1-cycle pulses OR-ed into Cause[15:10] every cycle (next_ip = ip | interrupts,
@@ -28,6 +37,7 @@ static uint64_t hits_ip[6];
 static void raise(uint32_t ip) {
     if (vv_legacy_io && ip != VV_IP_UARX) return;
     vv_hw_cause_ip |= ip;
+    VV_EVT("ip 0x%04x", ip);
     for (int b = 0; b < 6; b++) if (ip >> (10 + b) & 1) hits_ip[b]++;
 }
 static uint32_t count_at(uint64_t t) { return cnt0_val + (uint32_t)(t - cnt0_at); }
@@ -75,6 +85,7 @@ void vv_uart_tx_write(uint8_t c) {
                         c, (unsigned long long)(tx_ready_at - now_c));
         return;
     }
+    VV_EVT("uart-tx 0x%02x", c);
     vv_uart_out(c); tx_sent++;                 /* stdout = the serial line only (term.c) */
     if (!vv_legacy_io) { tx_ready_at = now_c + VV_UART_TX_BUSY; tx_irq_due = 1; }
 }
@@ -94,6 +105,7 @@ uint64_t vv_mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t
 uint64_t vv_pf_frames(void) { return pf_frames; }
 static void pf_frame_end(uc_engine *uc) {
     pf_frames++;
+    VV_EVT("frame-end %llu frame %u", (unsigned long long)pf_frames, pf_next);
     pf_cur = pf_next; vv_disp_pf_write(uc, pf_cur);   /* select + redraw on every frame end */
     raise(VV_IP_PF);
 }
@@ -114,6 +126,7 @@ uint32_t vv_pf_frame(void) { return pf_cur; }
 static uint32_t gp_rframe, gp_fault; static uint64_t gp_launches;
 void vv_gp_launched(uint32_t gp_frame, int rc) {
     gp_rframe = frame_bits(gp_frame); gp_fault = rc < -1; gp_launches++;
+    VV_EVT("gp-done rc %d", rc);
     if (!vv_legacy_io) raise(VV_IP_GP);
 }
 uint32_t vv_gp_status_word(void) {
@@ -190,6 +203,7 @@ void vv_hw_tick(uc_engine *uc, uint64_t now) {
         }
         rx_shift = (uint16_t)(1u << 9 | (unsigned)rx_byte << 1);
         rx_has = 1; rx_busy = 0; rx_bytes++;
+        VV_EVT("uart-rx-land 0x%02x", rx_byte);
         rx_next_ok = rx_land + vv_uart_rx_gap;
         raise(VV_IP_UARX);
     }
@@ -197,7 +211,7 @@ void vv_hw_tick(uc_engine *uc, uint64_t now) {
         int poll = now - rx_last_poll >= 4096;          /* stdin poll() at most every 4096 cycles */
         if (poll) rx_last_poll = now;
         if (vv_host_rx_avail(poll)) {
-            rx_byte = (uint8_t)vv_host_rx_take(); rx_busy = 1; rx_start = now; rx_land = now + VV_UART_RX_FRAME;
+            rx_byte = (uint8_t)vv_host_rx_take(); VV_EVT("uart-rx-start 0x%02x", rx_byte); rx_busy = 1; rx_start = now; rx_land = now + VV_UART_RX_FRAME;
         }
     }
     /* UART TX: ready again -> IRQ_TX */

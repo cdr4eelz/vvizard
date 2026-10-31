@@ -7,6 +7,7 @@
 #ifndef VV_HW_H
 #define VV_HW_H
 #include <stdint.h>
+#include <stdio.h>
 #include <unicorn/unicorn.h>
 
 #define VV_CPU_HZ        50000000u  /* ml505top.v:2 CPU_FREQ (PLL CLKOUT0 = 50 MHz, ml505top.v:269-273) */
@@ -42,6 +43,13 @@ extern int      vv_frame_clock;   /* --frame-clock: VV_FRAME_CLOCK_WALL (default
 uint64_t vv_mono_ns(void);        /* host CLOCK_MONOTONIC in ns */
 uint64_t vv_pf_frames(void);      /* frame events (PixelFeeder frame ends) so far */
 extern uint32_t vv_cur_pc;        /* PC of the instruction being executed (for reports) */
+/* --event-trace FILE: one line per guest-visible device event, prefixed with the cycle (= instruction
+ * count) and PC: Cause IP latches, IRQ entries, PixelFeeder frame ends, GPU launches and ready edges,
+ * UART bytes, MMIO writes and MMIO reads whose value differs from the last read of that register.
+ * Used to compare runs (--threads on/off) byte for byte; NULL = off. */
+extern FILE *vv_evt;
+void vv_evt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#define VV_EVT(...) do { if (vv_evt) vv_evt_log(__VA_ARGS__); } while (0)
 
 void     vv_hw_tick(uc_engine *uc, uint64_t now);   /* advance devices to cycle `now` (every insn) */
 /* COP0150 */

@@ -227,6 +227,7 @@ static void irq_step(uc_engine *uc, uint32_t pc) {
         if (last_pc != NOPC) { uint32_t x = read_insn(uc, last_pc); defer = is_branch(x) || is_mtc0(x); }
         if (!defer && last3_pc != NOPC && is_branch(read_insn(uc, last3_pc)) && last_pc != last3_pc + 8) defer = 1;
         if (!defer) {
+            VV_EVT("irq-enter cause 0x%04x status 0x%08x", vv_hw_cause() & 0xFFFFu, st);
             vv_hw_isr_enter(pc, st); st &= ~1u; prev_status = st;
             if (!cop0) uc_reg_write(uc, UC_MIPS_REG_CP0_STATUS, &st);
             uint32_t npc = VV_PC_ISR; irq_count++;
@@ -263,6 +264,11 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     /* Sub-word reads (e.g. lbu OB_UARX_DATA = +3 on big-endian): Unicorn hands us the
      * byte offset; return the matching lane of the 32-bit big-endian word. */
     if (size < 4) { unsigned lane = off & 3; v = (v >> (8 * (4 - size - lane))) & ((1u << (8 * size)) - 1); }
+    if (vv_evt) {                               /* reads: only when the value changed (polling loops) */
+        static uint32_t last_v[VV_MMIO_REG_SPAN / 4 + 1], seen[VV_MMIO_REG_SPAN / 4 + 1];
+        unsigned k = w < VV_MMIO_REG_SPAN ? w / 4 : VV_MMIO_REG_SPAN / 4;
+        if (!seen[k] || last_v[k] != v) { seen[k] = 1; last_v[k] = v; VV_EVT("mmio-r 0x%04x/%u 0x%08x", (unsigned)off, size, v); }
+    }
     if (!opt_quiet_mmio && w != VV_OW_UATX_READY && w != VV_OW_UARX_VALID)
         vv_eprintf("[mmio] R off=0x%04x size=%u -> 0x%08x\n", (unsigned)off, size, v);
     return v;
@@ -274,6 +280,7 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
      * and MemMapIO uses the whole dina, e.g. sb to UATX_DATA+0 transmits 0x00. */
     int lane_hw = size < 4 && vv_quirk_on(VV_Q_MMIO_LANE);
     if (lane_hw) { unsigned lane = off & 3; v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
+    VV_EVT("mmio-w 0x%04x/%u 0x%08x", (unsigned)off, size, v);
     if (w >= VV_MMIO_REG_SPAN) {                /* registers decode only at addra[11:6]==0 */
         if (w < VV_OW_LCD_END) {                /* LCDText2x16_MemPort: addra[11:5]==2, wdata = dina[7:0] */
             vv_lcd_write((w - VV_OW_LCD_BASE) >> 2, (uint8_t)v);
@@ -305,12 +312,13 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
             break;
         }
         if (!guest_exited) {
-            guest_exited = 1; guest_code = v; stop_req = 1;
+            guest_exited = 1; guest_code = v; stop_req = 1; VV_EVT("guest-exit 0x%08x", v);
             vv_eprintf("[exit] guest exit code %d (0x%08x) at pc=0x%08x -> exit status %u\n", (int32_t)v, v, vv_cur_pc, v & 0xFF);
             /* hook_code stops before the next insn runs */
         }
         break;
     case VV_OW_GP_GCODE:  gp_code = v; gp_launches++;   /* write launches GP (MemMapIO.v:50-51) */
+        VV_EVT("gp-launch #%u code 0x%08x frame 0x%08x", gp_launches, gp_code, gp_frame);
         { int n = vv_gpu_run(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1);
           vv_gp_launched(gp_frame, n);                 /* GP status frame/fault + irq_gp_done (Cause bit 12) */
           if (!opt_quiet_mmio) vv_eprintf("[gpu] launch #%u code@0x%08x frame=0x%08x -> %d cmds\n", gp_launches, gp_code, gp_frame, n); }
@@ -618,6 +626,9 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --mmio-log         log every MMIO access and GP launch (alias --no-quiet-mmio)\n"
 "  --trace[=N]        print PC of each (or first N) instruction(s)\n"
 "  --trace-regs       --trace plus GPRs changed by the previous insn (debug)\n"
+"  --event-trace F    write guest-visible device events (Cause IP latches, IRQ entries, frame ends,\n"
+"                     GPU launch/ready, UART bytes, MMIO writes, changed MMIO reads) with their\n"
+"                     instruction count to F, to compare runs (e.g. --threads=on vs off)\n"
 "  --dump-frame F.ppm write the displayed frame as PPM at exit\n"
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
@@ -650,7 +661,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT, O_FRAME_CLOCK, O_MAX_SECONDS };
+       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT, O_FRAME_CLOCK, O_MAX_SECONDS, O_EVENT_TRACE };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -677,7 +688,7 @@ int main(int argc, char **argv) {
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"guest-exit",0,0,O_GUEST_EXIT},{"no-guest-exit",0,0,O_NO_GUEST_EXIT},
-        {"frame-clock",1,0,O_FRAME_CLOCK},{"max-seconds",1,0,O_MAX_SECONDS},
+        {"frame-clock",1,0,O_FRAME_CLOCK},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
@@ -727,6 +738,9 @@ int main(int argc, char **argv) {
         case O_MAX_SECONDS: { char *e; double sec = strtod(optarg, &e);
             if (*e || sec < 0) { vv_eprintf("--max-seconds: bad value '%s'\n", optarg); return 2; }
             max_wall_ns = (uint64_t)(sec * 1e9); break; }
+        case O_EVENT_TRACE:
+            if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
+            setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
         case O_QUIRKS: if (vv_quirk_parse(optarg, emul, qdflt, &emul)) return 2; break;
         case O_NO_QUIRKS: emul = 0; break;
         case O_LIST_QUIRKS: vv_quirk_list(stdout); return 0;
@@ -889,6 +903,7 @@ int main(int argc, char **argv) {
         if (got != want) rc = 3;
         free(s);
     }
+    if (vv_evt) { VV_EVT("end insns %llu", (unsigned long long)insn_count); fclose(vv_evt); vv_evt = NULL; }
     uc_close(uc);
     for (size_t i = 0; i < NREG; i++) if (ram_buf[i]) munmap(ram_buf[i], regions[i].size);
     return rc;
