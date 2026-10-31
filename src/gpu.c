@@ -25,12 +25,13 @@ const vv_gpu_stats *vv_gpu_get_stats(void) { return &st; }
  * emulator).  G_COUNT: no stores, only the pixel count (emulator, at a threaded launch).  G_HOST:
  * the GPU worker thread: stores straight into the DDR host buffer, no uc_*, no D-cache, no printing. */
 enum { G_UC, G_COUNT, G_HOST };
-typedef struct { uc_engine *uc; uint32_t fbase; int mode, quiet; uint64_t pix; } gctx;
+typedef struct { uc_engine *uc; uint32_t fbase; int mode, quiet, nonram; uint64_t pix; } gctx;
 
 static uint32_t rd_word(gctx *g, uint32_t a, int *ok) {
     uint8_t b[4]; uint32_t c = vv_canon(a); int in_ram = 1;
     uint32_t v = vv_ram_be32(c, &in_ram);                  /* RAM: straight from the host buffer */
     if (in_ram) return v;
+    g->nonram = 1;
     if (g->mode == G_HOST) { *ok = 0; return 0; }          /* (worker: never uc_*; the count pass
                                                             * on the emulator saw the same list) */
     if (uc_mem_read(g->uc, c, b, 4)) { *ok = 0; return 0; }   /* (MMIO etc.: as before) */
@@ -188,16 +189,16 @@ static int walk(gctx *g, uint32_t gp_frame, uint32_t code, int verbose, uint32_t
 }
 
 int vv_gpu_run(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose) {
-    gctx g = { uc, 0, G_UC, 0, 0 }; int nc;
+    gctx g = { uc, 0, G_UC, 0, 0, 0 }; int nc;
     return walk(&g, gp_frame, code, verbose, UINT32_MAX, &nc);
 }
-int vv_gpu_count(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose, uint64_t *pixels, int *ncmds) {
-    gctx g = { uc, 0, G_COUNT, 0, 0 };
+int vv_gpu_count(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose, uint64_t *pixels, int *ncmds, int *host_only) {
+    gctx g = { uc, 0, G_COUNT, 0, 0, 0 };
     int r = walk(&g, gp_frame, code, verbose, UINT32_MAX, ncmds);
-    *pixels = g.pix; return r;
+    *pixels = g.pix; *host_only = !g.nonram; return r;
 }
 void vv_gpu_draw_uc(uc_engine *uc, uint32_t gp_frame, uint32_t code, int ncmds) {
-    gctx g = { uc, 0, G_UC, 1, 0 }; int nc;      /* the stores of vv_gpu_run, no stats / messages */
+    gctx g = { uc, 0, G_UC, 1, 0, 0 }; int nc;   /* the stores of vv_gpu_run, no stats / messages */
     walk(&g, gp_frame, code, 0, (uint32_t)ncmds, &nc);
 }
 
@@ -206,7 +207,7 @@ static pthread_t wk_tid; static int wk_started, wk_quit, wk_pending;
 static pthread_mutex_t wk_mx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t wk_job = PTHREAD_COND_INITIALIZER, wk_fin = PTHREAD_COND_INITIALIZER;
 static atomic_int wk_done = 1;
-static uint32_t job_frame, job_code; static int job_cmds;
+static uint32_t job_frame, job_code, job_fn; static int job_cmds;   /* job_fn: emulator only */
 static void *worker(void *a) {
     (void)a;
     pthread_mutex_lock(&wk_mx);
@@ -216,7 +217,7 @@ static void *worker(void *a) {
         wk_pending = 0;
         uint32_t f = job_frame, c = job_code; int n = job_cmds;
         pthread_mutex_unlock(&wk_mx);
-        gctx g = { NULL, 0, G_HOST, 1, 0 }; int nc;
+        gctx g = { NULL, 0, G_HOST, 1, 0, 0 }; int nc;
         walk(&g, f, c, 0, (uint32_t)n, &nc);
         pthread_mutex_lock(&wk_mx);
         atomic_store_explicit(&wk_done, 1, memory_order_release);
@@ -233,6 +234,7 @@ int vv_gpu_worker_start(void) {
 void vv_gpu_submit(uint32_t gp_frame, uint32_t code, int ncmds) {
     pthread_mutex_lock(&wk_mx);
     job_frame = gp_frame; job_code = code; job_cmds = ncmds; wk_pending = 1;
+    job_fn = (gp_frame >> 28) ? (gp_frame >> VV_FSHIFT) & VV_FNMASK : gp_frame & VV_FNMASK;
     atomic_store_explicit(&wk_done, 0, memory_order_relaxed);
     pthread_cond_signal(&wk_job);
     pthread_mutex_unlock(&wk_mx);
@@ -243,6 +245,9 @@ void vv_gpu_wait(void) {
     pthread_mutex_lock(&wk_mx);
     while (!atomic_load_explicit(&wk_done, memory_order_acquire)) pthread_cond_wait(&wk_fin, &wk_mx);
     pthread_mutex_unlock(&wk_mx);
+}
+void vv_gpu_settle(uint32_t fn) {
+    if (wk_started && !vv_gpu_done() && job_fn == fn) vv_gpu_wait();
 }
 void vv_gpu_worker_stop(void) {
     if (!wk_started) return;

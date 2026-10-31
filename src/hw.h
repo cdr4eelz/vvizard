@@ -86,12 +86,13 @@ void     vv_gp_launched(uint32_t gp_frame, int rc); /* after a GP_CODE launch (r
  * waiting for the worker if it is still drawing) they rise and Cause bit 12 is latched. */
 extern int vv_gp_async;
 int      vv_gp_try_launch(void);                    /* 0: GPU busy, launch dropped (gp-busy) */
-void     vv_gp_start(uint32_t gp_frame, int rc, uint64_t pixels, int ncmds, int worker);
+void     vv_gp_start(uint32_t gp_frame, int rc, uint64_t pixels, int ncmds, int worker, uint32_t fbase);
 int      vv_gp_busy(void);
 uint32_t vv_gp_status_word(void);                   /* GP_STATE (0x8000005C) read value */
 void     vv_hw_summary(void);
 /* provided by main.c: the host side of the serial line */
 int      vv_host_rx_avail(int poll_stdin);
 int      vv_host_rx_take(void);
-int      vv_host_rx_paced(void);        /* next host byte waits for the guest to read the last */
+int      vv_host_rx_paced(void);
+int      vv_ddr_exec_overlaps(uint32_t lo, uint32_t hi);   /* the guest has fetched from DDR in [lo, hi) */        /* next host byte waits for the guest to read the last */
 #endif

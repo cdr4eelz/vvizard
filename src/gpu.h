@@ -22,11 +22,15 @@ const vv_gpu_stats *vv_gpu_get_stats(void);
  * engines will store, *ncmds = commands incl. STOP) to get the completion cycle, then either hands
  * the drawing to the worker (vv_gpu_submit: stores into the DDR host buffer) or, when that is
  * unsafe, draws inline (vv_gpu_draw_uc).  vv_gpu_wait blocks until the worker finished its job. */
-int  vv_gpu_count(uc_engine *uc, uint32_t gp_frame, uint32_t code_addr, int verbose, uint64_t *pixels, int *ncmds);
+int  vv_gpu_count(uc_engine *uc, uint32_t gp_frame, uint32_t code_addr, int verbose, uint64_t *pixels, int *ncmds,
+                  int *host_only);   /* *host_only = 0: a list word came from MMIO (draw inline) */
 void vv_gpu_draw_uc(uc_engine *uc, uint32_t gp_frame, uint32_t code_addr, int ncmds);
 int  vv_gpu_worker_start(void);
 void vv_gpu_submit(uint32_t gp_frame, uint32_t code_addr, int ncmds);
 int  vv_gpu_done(void);
 void vv_gpu_wait(void);
 void vv_gpu_worker_stop(void);
+/* Host-side readers of frame fn (window copy, PPM dumps; emulator thread): wait for a worker job
+ * drawing into fn first, so they never race the worker's stores.  No guest-visible effect. */
+void vv_gpu_settle(uint32_t fn);
 #endif

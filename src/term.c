@@ -9,7 +9,8 @@
 
 /* One recursive lock for stdout and stderr (docs/MULTITHREADING-PLAN.md section 7): the emulator
  * thread writes UART bytes and its messages, the display thread raylib's log lines; err_bol and the
- * stdout color/dirty state are shared.  Uncontended (and never taken) in a --sync run's hot path. */
+ * stdout color/dirty state are shared.  Taken in every mode (per UART byte, per 4096-instruction
+ * stdout flush, per message): uncontended, so cheap; it never affects emulated time. */
 static pthread_mutex_t io_mx;
 static pthread_once_t io_once = PTHREAD_ONCE_INIT;
 static void io_init(void) {

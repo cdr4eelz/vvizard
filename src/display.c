@@ -5,6 +5,7 @@
 #include "memmap.h"
 #include "lcd.h"
 #include "lcdfont.h"
+#include "gpu.h"
 #include <raylib.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@ static void swizzle_row(uint8_t *o, const uint8_t *row) {
 static void grab(uc_engine *uc, uint8_t *out) {
     static uint8_t rowbuf[VV_SCREEN_W * 4];
     uint32_t base = VV_FRAME0 + (cur_frame << VV_FSHIFT);
+    vv_gpu_settle(cur_frame);               /* never read a frame the GPU worker is drawing */
     for (int y = 0; y < VV_SCREEN_H; y++) {
         uint8_t *o = out + (size_t)y * VV_SCREEN_W * 4;
         uint32_t a = base + (uint32_t)y * VV_ROW_PITCH;
@@ -98,7 +100,7 @@ static _Atomic unsigned tb_mid = 1;         /* middle slot index | SLOT_FRESH wh
 static unsigned tb_back = 0, tb_front = 2;  /* back: emulator only; front: main only */
 static atomic_int emu_done;
 static pthread_mutex_t pub_mx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t pub_cv = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t pub_cv;              /* CLOCK_MONOTONIC where available (vv_disp_init) */
 static void wake_main(void) { pthread_mutex_lock(&pub_mx); pthread_cond_signal(&pub_cv); pthread_mutex_unlock(&pub_mx); }
 static unsigned char klq[256]; static _Atomic unsigned klq_h, klq_t;   /* emulator -> main key log */
 
@@ -226,6 +228,11 @@ static void raylib_log(int level, const char *fmt, va_list ap) {   /* raylib log
     (void)level; vv_term_lock(); vv_eprintf("[raylib] "); vv_veprintf(fmt, ap); vv_eprintf("\n"); vv_term_unlock();
 }
 int vv_disp_init(int want_window) {
+    pthread_condattr_t ca; pthread_condattr_init(&ca);
+#ifndef __APPLE__
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+#endif
+    pthread_cond_init(&pub_cv, &ca); pthread_condattr_destroy(&ca);
     if (!want_window) return 0;
     SetTraceLogCallback(raylib_log);
     SetTraceLogLevel(LOG_WARNING);
@@ -243,6 +250,7 @@ static double last_pub;
 static void publish(uc_engine *uc) {
     disp_slot *sl = &slots[tb_back];
     uint32_t base = VV_FRAME0 + (cur_frame << VV_FSHIFT);
+    vv_gpu_settle(cur_frame);               /* (shows the finished draw; the guest is not affected) */
     for (int y = 0; y < VV_SCREEN_H; y++) {
         uint32_t a = base + (uint32_t)y * VV_ROW_PITCH;
         const uint8_t *row = vv_ram(a, VV_SCREEN_W * 4);
@@ -283,31 +291,48 @@ int vv_disp_tick(uc_engine *uc) {
     if (atomic_exchange(&esc_pressed, 0)) return VV_DISP_ESC;
     return WindowShouldClose() ? VV_DISP_CLOSED : 0;
 }
+/* Emulator thread, after uc_emu_start returned: publish the final frame, then let main finish. */
+void vv_disp_emu_done(uc_engine *uc) {
+    if (vv_disp_threaded) publish(uc);
+    atomic_store(&emu_done, 1); wake_main();
+}
+static int draw_fresh(void) {               /* main: draw the middle slot if it is new */
+    if (!(atomic_load_explicit(&tb_mid, memory_order_acquire) & SLOT_FRESH)) return 0;
+    tb_front = atomic_exchange_explicit(&tb_mid, tb_front, memory_order_acq_rel) & 3u;
+    const disp_slot *sl = &slots[tb_front];
+    for (int y = 0; y < VV_SCREEN_H; y++) swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, sl->px[y]);
+    klq_drain();
+    UpdateTexture(tex, rgba);
+    BeginDrawing(); ClearBackground(BLACK); DrawTexture(tex, 0, 0, WHITE); draw_strip(sl->l1, sl->l2, sl->lcd); EndDrawing();
+    collect_keys();                          /* EndDrawing polled */
+    return 1;
+}
+static void wait_publish(void) {            /* up to POLL_PERIOD for the emulator's next publish */
+    pthread_mutex_lock(&pub_mx);
+    if (!(atomic_load_explicit(&tb_mid, memory_order_acquire) & SLOT_FRESH) && !atomic_load(&emu_done)) {
+#ifdef __APPLE__
+        struct timespec rel = { 0, (long)(POLL_PERIOD * 1e9) };
+        pthread_cond_timedwait_relative_np(&pub_cv, &pub_mx, &rel);
+#else
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_nsec += (long)(POLL_PERIOD * 1e9);
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&pub_cv, &pub_mx, &ts);
+#endif
+    }
+    pthread_mutex_unlock(&pub_mx);
+}
 /* Main thread while the emulator thread runs: input, and a redraw for each fresh slot. */
-void vv_disp_emu_done(void) { atomic_store(&emu_done, 1); wake_main(); }
 void vv_disp_main_loop(void) {
     double lp = 0;
     while (!atomic_load(&emu_done)) {
-        pthread_mutex_lock(&pub_mx);
-        if (!(atomic_load_explicit(&tb_mid, memory_order_acquire) & SLOT_FRESH) && !atomic_load(&emu_done)) {
-            struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += (long)(POLL_PERIOD * 1e9);
-            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-            pthread_cond_timedwait(&pub_cv, &pub_mx, &ts);
-        }
-        pthread_mutex_unlock(&pub_mx);
+        wait_publish();
         double t = now();
-        if (atomic_load_explicit(&tb_mid, memory_order_acquire) & SLOT_FRESH) {
-            tb_front = atomic_exchange_explicit(&tb_mid, tb_front, memory_order_acq_rel) & 3u;
-            const disp_slot *sl = &slots[tb_front];
-            for (int y = 0; y < VV_SCREEN_H; y++) swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, sl->px[y]);
-            klq_drain();
-            UpdateTexture(tex, rgba);
-            BeginDrawing(); ClearBackground(BLACK); DrawTexture(tex, 0, 0, WHITE); draw_strip(sl->l1, sl->l2, sl->lcd); EndDrawing();
-            collect_keys(); lp = t;              /* EndDrawing polled */
-        } else if (t - lp >= POLL_PERIOD) { PollInputEvents(); collect_keys(); lp = t; }
+        if (draw_fresh()) lp = t;
+        else if (t - lp >= POLL_PERIOD) { PollInputEvents(); collect_keys(); lp = t; }
         if (WindowShouldClose()) atomic_store(&win_closed, 1);
     }
+    draw_fresh();                            /* the final frame (vv_disp_emu_done) */
     klq_drain();
 }
 int vv_disp_dump_ppm(uc_engine *uc, const char *path) {   /* emulator thread: own buffer, not rgba */

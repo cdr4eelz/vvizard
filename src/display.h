@@ -29,7 +29,7 @@ void vv_disp_status_dirty(void);               /* re-read the status lines at th
  * vv_disp_emu_done(), joins it and clears vv_disp_threaded (screenshot / hold run as before). */
 extern int vv_disp_threaded;
 void vv_disp_main_loop(void);
-void vv_disp_emu_done(void);
+void vv_disp_emu_done(uc_engine *uc);          /* emulator thread at the end: last publish */
 /* Provided by main.c: the two status lines shown in the strip. */
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2);
 #endif

@@ -131,7 +131,7 @@ void vv_gp_launched(uint32_t gp_frame, int rc) {
     if (!vv_legacy_io) raise(VV_IP_GP);
 }
 int vv_gp_async;
-static int gp_busy, gp_worker, gp_rc; static uint64_t gp_done_at, gp_dropped;
+static int gp_busy, gp_worker, gp_rc, gp_exec0; static uint64_t gp_done_at, gp_dropped; static uint32_t gp_fb;
 int vv_gp_busy(void) { return gp_busy; }
 int vv_gp_try_launch(void) {
     if (!gp_busy) return 1;
@@ -141,14 +141,24 @@ int vv_gp_try_launch(void) {
                     (unsigned long long)(gp_done_at - now_c));
     return 0;
 }
-void vv_gp_start(uint32_t gp_frame, int rc, uint64_t pixels, int ncmds, int worker) {
+void vv_gp_start(uint32_t gp_frame, int rc, uint64_t pixels, int ncmds, int worker, uint32_t fbase) {
     gp_rframe = frame_bits(gp_frame); gp_fault = 0; gp_launches++;
-    gp_busy = 1; gp_worker = worker; gp_rc = rc;
+    gp_busy = 1; gp_worker = worker; gp_rc = rc; gp_fb = fbase;
+    gp_exec0 = vv_ddr_exec_overlaps(fbase, fbase + (1u << VV_FSHIFT));
     gp_done_at = now_c + pixels / 4 + 32u * (uint64_t)(ncmds > 0 ? ncmds : 1);
-    VV_EVT("gp-busy until %llu (%llu pixels, %d cmds)", (unsigned long long)gp_done_at, (unsigned long long)pixels, ncmds);
+    VV_EVT("gp-busy until %llu (%llu pixels, %d cmds, %s)", (unsigned long long)gp_done_at, (unsigned long long)pixels, ncmds,
+           worker ? "worker" : "inline");
 }
 static void gp_complete(void) {             /* the ready rising edge (irq_gp_done) */
-    if (gp_worker) vv_gpu_wait();           /* (normally finished long ago) */
+    if (gp_worker) {
+        vv_gpu_wait();                      /* (normally finished long ago) */
+        /* the guest started running code from the target frame while the worker drew it: drop the
+         * translations made from half-drawn pages (host stores do not invalidate them) */
+        if (!gp_exec0 && vv_ddr_exec_overlaps(gp_fb, gp_fb + (1u << VV_FSHIFT))) {
+            uc_ctl_remove_cache(g_uc, gp_fb, (uint64_t)gp_fb + (1u << VV_FSHIFT));
+            VV_EVT("gp-tb-flush 0x%08x", gp_fb);
+        }
+    }
     gp_busy = 0; gp_fault = gp_rc < -1;
     VV_EVT("gp-done rc %d", gp_rc);
     raise(VV_IP_GP);

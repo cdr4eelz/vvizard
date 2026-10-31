@@ -83,7 +83,17 @@ static uint64_t max_insns;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
 static int trace_left = -1;
-static int ddr_executed;                         /* the guest fetched from DDR (threaded GPU: draw inline) */
+/* DDR pages the guest has fetched from (canonical, [lo, hi)): host stores from the GPU worker do not
+ * drop Unicorn's translated code, so a launch whose target frame overlaps them draws inline. */
+static uint32_t ddr_exec_lo = 0xFFFFFFFFu, ddr_exec_hi;
+int vv_ddr_exec_overlaps(uint32_t lo, uint32_t hi) { return ddr_exec_lo < hi && lo < ddr_exec_hi; }
+/* (hook_code, for an instruction in nibbles 0x1-0x3.  Not tlb_fill: a data access to the page
+ * already filled the TLB with execute permission, so the first fetch need not call it.) */
+static void note_ddr_exec(uint32_t pc) {
+    uint32_t pg = vv_canon_inl(pc) & ~0xFFFu;
+    if (pg < ddr_exec_lo) ddr_exec_lo = pg;
+    if (pg + 0x1000u > ddr_exec_hi) ddr_exec_hi = pg + 0x1000u;
+}
 /* Guest exit register (VV_OW_GUEST_EXIT, 0x80000084): a store ends the run right after the store
  * instruction; the process exits with code & 0xFF.  --no-guest-exit drops the store (FPGA behaviour). */
 static int opt_guest_exit = 1, guest_exited, stop_req;   /* stop_req: hook_code stops before the next insn */
@@ -325,17 +335,17 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
             if (!vv_gp_try_launch()) break;                /* busy: dropped (gp-busy) */
             gp_launches++;
             VV_EVT("gp-launch #%u code 0x%08x frame 0x%08x", gp_launches, gp_code, gp_frame);
-            uint64_t pix; int nc;
-            int n = vv_gpu_count(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1, &pix, &nc);
-            /* Host stores do not drop Unicorn's translated code; once the guest has executed from
-             * DDR, draw inline with uc_mem_write instead (same timing). */
-            int worker = !ddr_executed;
+            uint64_t pix; int nc, host_only;
+            int n = vv_gpu_count(uc, gp_frame, gp_code, opt_quiet_mmio ? 0 : 1, &pix, &nc, &host_only);
+            uint32_t fb = VV_FRAME0 + (((gp_frame >> 28) ? (gp_frame >> VV_FSHIFT) & VV_FNMASK : gp_frame & VV_FNMASK) << VV_FSHIFT);
+            /* Inline (uc_mem_write, same timing) when the frame overlaps DDR code the guest has run,
+             * or the list has words outside the host buffers (MMIO: the worker cannot read them). */
+            int worker = host_only && !vv_ddr_exec_overlaps(fb, fb + (1u << VV_FSHIFT));
             if (worker) {
-                uint32_t fb = VV_FRAME0 + (((gp_frame >> 28) ? (gp_frame >> VV_FSHIFT) & VV_FNMASK : gp_frame & VV_FNMASK) << VV_FSHIFT);
                 vv_dc_dma_snapshot(fb, fb + (1u << VV_FSHIFT));   /* D-cache lines over the target frame */
                 vv_gpu_submit(gp_frame, gp_code, nc);
             } else vv_gpu_draw_uc(uc, gp_frame, gp_code, nc);
-            vv_gp_start(gp_frame, n, pix, nc, worker);
+            vv_gp_start(gp_frame, n, pix, nc, worker, fb);
             if (!opt_quiet_mmio) vv_eprintf("[gpu] launch #%u code@0x%08x frame=0x%08x -> %d cmds (%llu pixels, %s)\n", gp_launches, gp_code, gp_frame, n,
                                          (unsigned long long)pix, worker ? "worker" : "inline");
             break;
@@ -359,7 +369,7 @@ static uint32_t emu_entry; static uint64_t emu_until;
 static void *emu_thread(void *a) {
     uc_engine *uc = a;
     emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
-    vv_disp_emu_done();
+    vv_disp_emu_done(uc);                    /* publishes the last frame */
     return NULL;
 }
 static int stop_reason_intr = -1;
@@ -387,7 +397,6 @@ static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e,
         }
         return false;
     }
-    if (fetch && (pa >> 28) == 0x1) ddr_executed = 1;
     e->paddr = pa & ~0xFFFull;                   /* page granularity; offset kept by Unicorn */
     e->perms = region_for((uint32_t)va)->prot;
     return true;
@@ -406,6 +415,7 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     if (max_insns && ++hook_calls > max_insns) { stopped_max = 1; uc_emu_stop(uc); return; }
     insn_count++;
     vv_cur_pc = (uint32_t)addr;
+    if ((uint32_t)addr - 0x10000000u < 0x30000000u) note_ddr_exec((uint32_t)addr);   /* code in DDR */
     vv_hw_tick(uc, insn_count);              /* devices advance one cycle (UART, PixelFeeder, timer) */
     if (vv_quirk_halted) { uc_emu_stop(uc); return; }
     if (nevents) run_due_events(uc, 0);

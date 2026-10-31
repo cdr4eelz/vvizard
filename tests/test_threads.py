@@ -3,7 +3,8 @@
 
 The rest of make test runs --sync (one thread, the GPU completes inside the GP_CODE store).  Here:
   A. the threaded GPU model: ready bits low until launch + pixels/4 + 32 x commands, Cause bit 12 at
-     that edge, a GP_CODE store while busy dropped (gp-busy), D-cache snapshot at launch;
+     that edge, a GP_CODE store while busy dropped (gp-busy), D-cache snapshot at launch, inline draw
+     into a frame holding code the guest ran, translations dropped after code ran during a worker draw;
   B. determinism: --event-trace (every guest-visible device event with its instruction count) and
      the UART output are byte-identical between two threaded runs, between threaded runs with and
      without a window (when $DISPLAY is set), and between --sync and threaded for programs that do
@@ -54,6 +55,9 @@ def t_dcache_async():   # stale after GP_WAIT (snapshot at launch); -dcache-stal
     a, ea, _ = run("hw/dcache_async", "--expect", "s0=0", "--expect", "s5=0")
     b, eb, _ = run("hw/dcache_async", "--quirks=-dcache-stale", "--expect", "s0=0x345678", "--expect", "s5=0")
     return a.returncode == 0 and "[quirk] dcache-stale at" in ea and b.returncode == 0
+def t_gp_inline():      # frame with code the guest ran: inline draw; code run during a worker draw: translations dropped
+    r, err, ev = run("hw/gp_inline", "--expect", "s5=0", "--expect", "s3=4")
+    return r.returncode == 0 and b"cmds, inline)" in ev and b"cmds, worker)" in ev and b"gp-tb-flush 0x11800000" in ev
 def t_gpcmds():         # the GPU command test (one probe per command) drawn by the worker
     ppm = os.path.join(TMP, "gp.ppm")
     r, err, _ = run(None, "--load", f"{prog('gpcmds')[0]}@0x12003000", "--load", f"{prog('gplaunch')[0]}@0x40000000",
@@ -91,7 +95,7 @@ def t_player():
     return r.returncode == 0
 
 
-TESTS = [t_gp_async, t_gp_busy_halt, t_gp_sync_ready, t_dcache_async, t_gpcmds, t_same_without_gpu, t_repeatable, t_player]
+TESTS = [t_gp_async, t_gp_busy_halt, t_gp_sync_ready, t_dcache_async, t_gp_inline, t_gpcmds, t_same_without_gpu, t_repeatable, t_player]
 
 
 def main():
