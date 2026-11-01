@@ -439,7 +439,7 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
         if (max_wall_ns && vv_mono_ns() - run_t0 >= max_wall_ns) { stopped_wall = stop_req = 1; uc_emu_stop(uc); return; }
         vv_term_tick();                      /* flush pending UART text (e.g. a prompt with no newline) */
         int why = vv_disp_tick(uc);
-        if (why) { vv_eprintf(why == VV_DISP_ESC ? "[stop] Esc pressed\n" : "[stop] window closed\n"); uc_emu_stop(uc); }
+        if (why) { vv_eprintf(why == VV_DISP_ESC ? "[stop] Esc pressed\n" : "[stop] window closed\n"); stop_req = 1; uc_emu_stop(uc); }   /* stop_req hides the fetch Unicorn makes on the way out */
     }
     if (opt_trace && trace_left != 0) {
         uint32_t insn = read_insn(uc, (uint32_t)addr);
