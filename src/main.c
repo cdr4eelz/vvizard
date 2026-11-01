@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <getopt.h>
 #include <poll.h>
 #include <unistd.h>
@@ -94,10 +95,12 @@ static void note_ddr_exec(uint32_t pc) {
     if (pg < ddr_exec_lo) ddr_exec_lo = pg;
     if (pg + 0x1000u > ddr_exec_hi) ddr_exec_hi = pg + 0x1000u;
 }
-/* Guest exit register (VV_OW_GUEST_EXIT, 0x80000084): a store ends the run right after the store
- * instruction; the process exits with code & 0xFF.  --no-guest-exit drops the store (FPGA behaviour). */
-static int opt_guest_exit = 1, guest_exited, stop_req;   /* stop_req: hook_code stops before the next insn */
-static uint32_t guest_code;
+/* HaltVal register (VV_OW_GUEST_EXIT, 0x80000084): a plain store-then-load register.  Every store is
+ * logged and the last value is printed after the register dump.  --exit-on-halt (env VVIZARD_EXIT_ON_HALT)
+ * also ends the run right after the store instruction, with exit status 0. */
+static int opt_exit_on_halt, guest_exited, stop_req;   /* stop_req: hook_code stops before the next insn */
+static uint32_t halt_val, halt_pc; static uint64_t halt_stores;
+#define VV_HALT_LOG_MAX 64                       /* [halt] store lines printed (then only counted) */
 
 /* ---- UART RX sources: --uart-in, then --input-script bytes that are due, then stdin ---- */
 static int stdin_peek = -1, stdin_eof;
@@ -270,6 +273,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     case VV_OW_PF_FRAME:  v = 0x10000000u | vv_pf_frame() << VV_FSHIFT; break;   /* frame being scanned (MemMapIO.v:162) */
     case VV_OW_GP_STATE:  v = vv_gp_status_word(); break;   /* graphics.h gstate_s layout (hw.c) */
     case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
+    case VV_OW_GUEST_EXIT: v = halt_val; break;  /* HaltVal: the last stored word (0 at reset) */
     case 0xFFFFFFFFu: break;
     default:
         if (!opt_quiet_mmio) vv_eprintf("[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
@@ -319,16 +323,14 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     case VV_OW_GUEST_EXIT:   /* sb/sh: the lane-placed dina word (as RANDOM32), e.g. sb at +3 = the byte */
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
-        if (!opt_guest_exit) {
-            static int noted;
-            if (!noted++) vv_eprintf("[exit] guest exit code %u (0x%08x) ignored (--no-guest-exit)\n", v, v);
-            break;
-        }
-        if (!guest_exited) {
-            guest_exited = 1; guest_code = v; stop_req = 1; VV_EVT("guest-exit 0x%08x", v);
-            vv_eprintf("[exit] guest exit code %d (0x%08x) at pc=0x%08x -> exit status %u\n", (int32_t)v, v, vv_cur_pc, v & 0xFF);
-            /* hook_code stops before the next insn runs */
-        }
+        if (guest_exited) break;                 /* --exit-on-halt: already stopping */
+        halt_val = v; halt_pc = vv_cur_pc; halt_stores++;
+        if (opt_exit_on_halt) {
+            guest_exited = 1; stop_req = 1; VV_EVT("guest-exit 0x%08x", v);   /* hook_code stops before the next insn */
+            vv_eprintf("[halt] HaltVal = 0x%08x (%u) at pc=0x%08x -> stop (--exit-on-halt)\n", v, v, vv_cur_pc);
+        } else if (halt_stores <= VV_HALT_LOG_MAX)
+            vv_eprintf("[halt] HaltVal = 0x%08x (%u) at pc=0x%08x%s\n", v, v, vv_cur_pc,
+                       halt_stores == VV_HALT_LOG_MAX ? " (further stores not logged)" : "");
         break;
     case VV_OW_GP_GCODE:  gp_code = v;
         if (vv_gp_async) {   /* threaded: busy until the completion cycle (hw.c); drawn by the worker */
@@ -627,14 +629,17 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --hold             keep the window open after the run until it is closed\n"
 "  --input-script F   timed events (fN|iN key STR / dump F.ppm)\n"
 "  --expect REG=VAL   exit 0 iff GPR REG equals VAL at stop (repeatable)\n"
-"  --no-guest-exit    ignore stores to the guest exit register 0x%08x (FPGA behaviour: the\n"
-"                     guest goes on, e.g. into its interrupts-off spin loop)\n"
+"  --exit-on-halt     a store to the HaltVal register 0x%08x ends the run right after the store\n"
+"                     (exit status 0).  Default off (env VVIZARD_EXIT_ON_HALT=1 turns it on): the\n"
+"                     store only sets the register, which reads back, and the guest goes on.  Either\n"
+"                     way each store is logged ([halt] HaltVal = ...) and the last value is printed\n"
+"                     after the register dump.  --no-exit-on-halt turns it off (old names: --guest-exit,\n"
+"                     --no-guest-exit)\n"
 "  Esc in the window ends the run like closing it (Esc is not sent to the UART)\n"
 "\n"
-"Exit status: 0 normal stop (break, --max-insns, --max-seconds, --until, window closed, Esc), 1\n"
-"  setup or CPU error, 2 usage, 3 an --expect failed, 4 --halt-on-quirk; a guest exit-register store: the\n"
-"  stored code & 0xFF (so guest codes 1-4 look like vvizard's own; the [exit] line tells them\n"
-"  apart), unless an --expect fails (3)\n"
+"Exit status: 0 normal stop (break, --max-insns, --max-seconds, --until, window closed, Esc, a HaltVal\n"
+"  store with --exit-on-halt, whatever the value), 1 setup or CPU error, 2 usage, 3 an --expect failed,\n"
+"  4 --halt-on-quirk\n"
 "\n"
 "Hardware model:\n"
 "  --legacy-io        old untimed I/O: TX always ready, RX served on demand with a level UARX interrupt,\n"
@@ -712,7 +717,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_GUEST_EXIT, O_NO_GUEST_EXIT, O_FRAME_CLOCK, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -738,7 +743,8 @@ int main(int argc, char **argv) {
         {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"screenshot",1,0,O_SCREENSHOT},
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
-        {"guest-exit",0,0,O_GUEST_EXIT},{"no-guest-exit",0,0,O_NO_GUEST_EXIT},
+        {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
+        {"guest-exit",0,0,O_EXIT_ON_HALT},{"no-guest-exit",0,0,O_NO_EXIT_ON_HALT},   /* old names */
         {"frame-clock",1,0,O_FRAME_CLOCK},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
         {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
         {0,0,0,0}};
@@ -747,6 +753,12 @@ int main(int argc, char **argv) {
     const char *qenv = getenv("VVIZARD_QUIRKS"), *qdet = NULL, *qquiet = NULL;
     int qdet_on = 1, qwarn = 0;                  /* default: --halt-on-quirk (emulated set) */
     if (qenv && vv_quirk_parse(qenv, emul, qdflt, &emul)) { vv_eprintf("bad VVIZARD_QUIRKS\n"); return 2; }
+    const char *henv = getenv("VVIZARD_EXIT_ON_HALT");   /* 1/on/yes/true or 0/off/no/false/empty */
+    if (henv) {
+        if (!*henv || !strcmp(henv, "0") || !strcasecmp(henv, "off") || !strcasecmp(henv, "no") || !strcasecmp(henv, "false")) opt_exit_on_halt = 0;
+        else if (!strcmp(henv, "1") || !strcasecmp(henv, "on") || !strcasecmp(henv, "yes") || !strcasecmp(henv, "true")) opt_exit_on_halt = 1;
+        else { vv_eprintf("bad VVIZARD_EXIT_ON_HALT '%s' (expected 1/on/yes/true or 0/off/no/false)\n", henv); return 2; }
+    }
     while ((c = getopt_long(argc, argv, "h", lo, NULL)) != -1) { const char *v; switch (c) {
         case O_LOAD: if (nloads < 32) loads[nloads++] = optarg; break;
         case O_ENTRY: entry = strtoul(optarg, 0, 0); have_entry = 1; break;
@@ -809,8 +821,8 @@ int main(int argc, char **argv) {
                 vv_eprintf("--color: expected always, never or auto, not '%s'\n", v); return 2; } break;
         case O_BARE: bare = 1; break;
         case O_SW_DIR: sw_dir = optarg; break;
-        case O_GUEST_EXIT: opt_guest_exit = 1; break;
-        case O_NO_GUEST_EXIT: opt_guest_exit = 0; break;
+        case O_EXIT_ON_HALT: opt_exit_on_halt = 1; break;
+        case O_NO_EXIT_ON_HALT: opt_exit_on_halt = 0; break;
         case 'h': usage(stdout, argv[0]); return 0;
         default: usage(stderr, argv[0]); return 2;
     } }
@@ -960,17 +972,20 @@ int main(int argc, char **argv) {
     vv_hw_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
+    if (halt_stores)                            /* after the register dump (also after a quirk halt's) */
+        vv_eprintf("[halt] HaltVal = 0x%08x (%u), last stored at pc=0x%08x (%llu store%s)%s\n", halt_val, halt_val, halt_pc,
+                   (unsigned long long)halt_stores, halt_stores == 1 ? "" : "s", guest_exited ? "; run ended by --exit-on-halt" : "");
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
     if (dump_lcd) vv_lcd_dump();
     static char exit_state[48];
-    if (guest_exited) snprintf(exit_state, sizeof exit_state, "EXITED (guest code %d)", (int32_t)guest_code);
+    if (guest_exited) snprintf(exit_state, sizeof exit_state, "EXITED (HaltVal 0x%08x)", halt_val);
     run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : guest_exited ? exit_state : stop_reason_intr == 18 ? "STOPPED (break)" :
                 at_max ? "STOPPED (max-insns)" : stopped_wall ? "STOPPED (max-seconds)" : "STOPPED";
     vv_disp_status_dirty();
     if (shot_path) vv_disp_screenshot(uc, shot_path);
     if (hold) while (!vv_disp_tick(uc)) usleep(16000);
     vv_disp_close();
-    int rc = err ? 1 : vv_quirk_halted ? 4 : guest_exited ? (int)(guest_code & 0xFF) : 0;
+    int rc = err ? 1 : vv_quirk_halted ? 4 : 0;   /* --exit-on-halt stop: 0, whatever HaltVal holds */
     for (int i = 0; i < nexp; i++) {
         char *s = strdup(expects[i]), *eq = strchr(s, '=');
         int r = eq ? (*eq = 0, reg_index(s)) : -1;

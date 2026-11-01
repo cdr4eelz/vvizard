@@ -124,10 +124,14 @@ Makefile build leaves out (`--no-pad-sections`).
   - `dcache_stale` (2): a load caches 0x10000000, the GPU FILLs frame 0 with 0x345678, the reload reads 0 (stale,
     `dcache-stale` warned), after evicting the line (load 0x10002000) it reads 0x345678; with
     `--quirks=-dcache-stale` the reload reads 0x345678 (still warned); halts with `--halt-on-quirk`.
-  - `guest_exit` (`tests/hw/guest_exit.s`): stores 42 to 0x80000084, then `li $s0, 1`, interrupts off and `b .`.
-    Default (also with `--halt-on-quirk`): exit status 42, `[exit] guest exit code 42 (0x0000002a)`, `$s0` still 0
-    (nothing after the store ran), no `[stop] max-insns`.  `--no-guest-exit --max-insns 5000`: `ignored
-    (--no-guest-exit)` noted once, `$s0` = 1, stops at max-insns with status 0.
+  - `halt_val` (`tests/hw/halt_val.s`, 8 EXPECTs): stores 42 to HaltVal (0x80000084), then `li $s0, 1`, reads it
+    back, then `sb` at +3 / `sh` at +2 (word 7 / 0x1234), `lhu`/`lbu` lanes, 0xdeadbeef and finally 99, then
+    interrupts off and `b .`.  Default (with `--halt-on-quirk`, `--max-insns 5000`): every readback right, five
+    `[halt] HaltVal = ... at pc=...` lines, `[stop] max-insns`, status 0, and `[halt] HaltVal = 0x00000063 (99),
+    last stored at ... (5 stores)` after the register dump.  `exit_on_halt`: `--exit-on-halt` stops at the first
+    store (`-> stop (--exit-on-halt)`, `$s0` still 0, no `[stop]` line, no quirk), the value line after the
+    registers, **status 0** (not 42); `--guest-exit` (old name) with a failing `--expect` gives 3;
+    `VVIZARD_EXIT_ON_HALT=1` stops too; `--exit-on-halt --no-exit-on-halt` runs on.
   - Esc has no automated test: `--input-script` only queues UART RX bytes and cannot press a window key.  Checked by
     hand on Xvfb `:77` with `xdotool key --window $(xdotool search --name '^vvizard$') Escape` (see "Ending a run").
 - `test-player` (`make test-player`, ~13 s since frames take their real 828960 cycles): runs vvizard's **built-in
@@ -255,32 +259,42 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
   adds (it used to start a new set when first). For `--halt-on-quirk`/`--warn-on-quirk` the base and `default` are the
   emulated set. Each `--quirks` edits the result of the previous one.
 
-## Ending a run: Esc and the guest exit register (Oct 31 2026)
+## Ending a run: Esc and the HaltVal register (Oct 31 2026; HaltVal reworked Nov 1 2026)
 - **Esc** (`src/display.c` `collect_keys`): raylib's default exit key is Esc; vvizard keeps `SetExitKey(KEY_NULL)`
   and handles Esc itself, so it can tell it apart from a window close.  Esc is no longer queued as 0x1b on UART RX
   (a lone Esc doesn't travel well through `screen` on the real UART anyway).  `vv_disp_tick` returns `VV_DISP_ESC`
   (or `VV_DISP_CLOSED`); main prints `[stop] Esc pressed` / `[stop] window closed` and runs the same shutdown (hw /
   quirk summaries, registers, `--dump-frame`, `--dump-lcd`, `--screenshot`, color reset at exit), exit status 0 like a
   close.  Esc is seen even with `--no-window-keys`, and it also ends `--hold`.  Verified on Xvfb `:77` with xdotool
-  (proj7 player: `[stop] Esc pressed`, screenshot written, rc 0; `--hold` after a guest exit: Esc releases it).
-- **Guest exit register, 0x80000084** (`VV_OW_GUEST_EXIT`, `src/memmap.h`).  Address rule: one word past the PRNG
-  (`OW_RANDOM32` = 0x0080, `A_Random32 = 6'h20`).  0x84 is `addra = 6'h21`: inside `io_base` (`addra[11:6] == 0`) but
+  (proj7 player: `[stop] Esc pressed`, screenshot written, rc 0; `--hold` after a guest exit (now `--exit-on-halt`): Esc releases it).
+- **HaltVal register, 0x80000084** (was "guest exit register"; `VV_OW_GUEST_EXIT`, `src/memmap.h`).  Address rule:
+  one word past the PRNG (`OW_RANDOM32` = 0x0080, `A_Random32 = 6'h20`).  0x84 is `addra = 6'h21`: inside `io_base` (`addra[11:6] == 0`) but
   in no `case` of MemMapIO.v, so on the FPGA `HOT_ADDR = 0` (a store does nothing) and a read gives the `default`
   `32'dx` (`BAD_WORD` with BADNESS).  Checked in `lcd-text` and `ISE` (and every other cs150 branch: none uses 6'h21),
   and no cs150 `software/` header defines an MMIO offset past 0x80.  On ISE, which has no `io_base`, 6'h21 also
   appears at 0x80000184, 0x80000284, ...; still nothing there.  0x84-0xFC is the **extended area** for vvizard-only
   registers.
-  - A store sets `stop_req`; `hook_code` calls `uc_emu_stop` before the next instruction, so nothing after the store
-    runs (the register dump shows pc = the next insn).  Calling `uc_emu_stop` from the MMIO callback itself works
+  - Nov 1 2026: HaltVal is a plain **store-then-load register** (what the hardware register will be), and ending
+    the run on a store is an option, **`--exit-on-halt`, off by default** (env `VVIZARD_EXIT_ON_HALT=1|on|yes|true`
+    or `0|off|no|false`, read before the options; bad values exit 2).  `--guest-exit` / `--no-guest-exit` are kept
+    as aliases of `--exit-on-halt` / `--no-exit-on-halt`.  Before, a store always stopped the run with exit status
+    code & 0xFF and `--no-guest-exit` dropped the store.
+  - Every store sets `halt_val` (also with the option on); a load (any size) returns it, sub-word loads the matching
+    lane, no side effect.  Off: each store prints `[halt] HaltVal = 0x%08x (%u) at pc=...` (first 64, then only
+    counted) and the guest goes on.  At the end of the run, if anything was stored, `[halt] HaltVal = ... , last
+    stored at pc=... (N stores)` is printed right **after the register dump** (also after a quirk halt's dump).
+  - On: the store sets `stop_req`; `hook_code` calls `uc_emu_stop` before the next instruction, so nothing after the
+    store runs (the register dump shows pc = the next insn).  Calling `uc_emu_stop` from the MMIO callback itself works
     too, but either way Unicorn 2.1 then fills a fetch TLB entry for 0xfffff000 on the way out (the same artefact as
     the max-insns stop); `tlb_fill` ignores fetch misses once `stop_req` is set, so `unmapped-fetch` isn't reported.
-  - Exit status = code & 0xFF (`[exit] guest exit code N (0x...) at pc=... -> exit status S`).  Codes 1-4 look like
-    vvizard's own statuses (1 setup/CPU error, 2 usage, 3 --expect, 4 --halt-on-quirk); the `[exit]` line tells them
-    apart.  A failing `--expect` still gives 3.  The status strip shows `EXITED (guest code N)`.
+    The store line ends `-> stop (--exit-on-halt)`, the end line `; run ended by --exit-on-halt`.  Exit status is
+    **0** whatever the value (a failing `--expect` still gives 3; quirk halts 4, setup/CPU errors 1 as before).  The
+    status strip shows `EXITED (HaltVal 0x...)`.  Event trace: `guest-exit 0x...` on the stopping store (every store
+    is also an `mmio-w` event).
   - sb/sh: the lane-placed `dina` word (as for RANDOM32), so `sb` at 0x80000087 / `sh` at 0x80000086 give the byte /
-    halfword; `sb` at +0 gives code<<24 (status 0) and, with the default halt set, the `mmio-lane` quirk stops first.
-  - Reads: 0, no side effect, logged as MISS-READ with `--mmio-log` (HW `32'dx`), the same as other unused offsets.
-  - `--no-guest-exit`: the store is dropped (FPGA behaviour), noted once as `[exit] ... ignored`.
+    halfword; `sb` at +0 gives value<<24 and, with the default halt set, the `mmio-lane` quirk stops first.
+  - `make run` keeps the default (option off): the proj7 player doesn't store to HaltVal, and a GIOS that reads it
+    back needs the run to go on.  `make run EXTRA=--exit-on-halt` turns it on.
 
 ## Window cost (status strip and frame pacing), Oct 31 2026
 Measured on the Debian 13 box, `-O3`, Xvfb `DISPLAY=:77` (Mesa llvmpipe), proj7 via GIOS, `--warn-on-quirk

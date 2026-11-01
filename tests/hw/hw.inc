@@ -11,7 +11,7 @@
 .equiv GP_CODE,  0x58
 .equiv GP_STATE, 0x5c
 .equiv RANDOM32, 0x80
-.equiv VV_EXIT,  0x84            # guest exit register (vvizard only; extended area 0x84-0xFC)
+.equiv HALTVAL,  0x84            # HaltVal register (vvizard only; extended area 0x84-0xFC): store-then-load
 
 .macro HW_INIT                   # registers are not preset (as on hardware): write before reading
     move  $s3, $zero

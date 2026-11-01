@@ -117,7 +117,8 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
 $(BUILD_DIR):
 	mkdir -p $@
 
-# make run: the built-in defaults (proj7 via GIOS, quirks=default, halt on a quirk hit, IRQs, random DDR)
+# make run: the built-in defaults (proj7 via GIOS, quirks=default, halt on a quirk hit, IRQs, random DDR;
+# HaltVal stores are logged and read back, not a stop: add EXTRA=--exit-on-halt to stop on one with status 0)
 run: $(TARGET)
 	$(VV_RUN) $(EXTRA)
 # standard MIPS32: no quirks emulated (so none to halt on; guest-bug detectors still warn)

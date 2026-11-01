@@ -119,14 +119,30 @@ def t_dcache_stale():  # stale line after a GPU write: HW (default) reads the ol
         and halted(h, "dcache-stale")
 
 
-# ---- C: guest exit register (0x80000084) ----
-def t_guest_exit():   # sw ends the run at once: status = code & 0xFF, [exit] line; --no-guest-exit spins on
-    a = run("guest_exit", None, "--halt-on-quirk", "--expect", "s0=0")   # no stray quirk at the stop
-    b = run("guest_exit", None, "--no-guest-exit", "--max-insns", "5000", "--expect", "s0=1")
-    return a.returncode == 42 and "[exit] guest exit code 42 (0x0000002a)" in a.err and "exit status 42" in a.err \
+# ---- C: HaltVal register (0x80000084) ----
+def after_regs(r, line):   # line is printed after the end-of-run register dump
+    i, j = r.err.rfind("---- registers"), r.err.rfind(line)
+    return 0 <= i < j
+def t_halt_val():     # default: store-then-load register, every store logged, last value after the registers
+    a = run("halt_val", 8, "--halt-on-quirk", "--max-insns", "5000", "--expect", "s0=1")   # no stray quirk
+    stores = re.findall(r"^\[halt\] HaltVal = (0x[0-9a-f]{8}) \((\d+)\) at pc=0x[0-9a-f]{8}$", a.err, re.M)
+    return a.returncode == 0 and [v for v, _ in stores] == ["0x0000002a", "0x00000007", "0x00001234", "0xdeadbeef", "0x00000063"] \
+        and stores[0][1] == "42" and "[stop] max-insns 5000 reached" in a.err and "--exit-on-halt" not in a.err \
+        and after_regs(a, "[halt] HaltVal = 0x00000063 (99), last stored at pc=") and "(5 stores)" in a.err
+def t_exit_on_halt(): # --exit-on-halt: stop right after the store, value after the registers, status 0 (not 42)
+    a = run("halt_val", None, "--halt-on-quirk", "--exit-on-halt", "--expect", "s0=0")   # nothing after the store ran
+    b = run("halt_val", None, "--guest-exit", "--expect", "s0=1")      # old name; a failing --expect still gives 3
+    c = subprocess.run([VV, *BASE, "--load", f"{prog('hw/halt_val')[0]}@0x40000000", "--entry", "0x40000000"],
+                       capture_output=True, env=dict(ENV, VVIZARD_EXIT_ON_HALT="1"))
+    d = run("halt_val", None, "--exit-on-halt", "--no-exit-on-halt", "--max-insns", "5000", "--expect", "s0=1")
+    ce = c.stderr.decode(errors="replace")
+    return a.returncode == 0 and "[halt] HaltVal = 0x0000002a (42) at pc=0x" in a.err and "-> stop (--exit-on-halt)" in a.err \
+        and after_regs(a, "[halt] HaltVal = 0x0000002a (42), last stored at pc=") and "run ended by --exit-on-halt" in a.err \
         and "$s0 = 0x00000000 (want 0x00000000) PASS" in a.err and "[stop] max-insns" not in a.err \
-        and b.returncode == 0 and "ignored (--no-guest-exit)" in b.err and "[stop] max-insns 5000 reached" in b.err \
-        and "$s0 = 0x00000001 (want 0x00000001) PASS" in b.err
+        and "[quirk] summary: no quirks hit" in a.err and "[stop]" not in a.err and "[halt] HaltVal = 0x00000007" not in a.err \
+        and b.returncode == 3 and "-> stop (--exit-on-halt)" in b.err \
+        and c.returncode == 0 and "-> stop (--exit-on-halt)" in ce \
+        and d.returncode == 0 and "[stop] max-insns 5000 reached" in d.err and "--exit-on-halt" not in d.err
 
 
 # ---- D: output streams and --color ----
@@ -146,7 +162,7 @@ def t_color():        # auto (not a tty) = off; always: green UART run on stdout
 
 TESTS = [t_uart_tx, t_uart_rx, t_uart_rx_hold, t_pf, t_pf_period, t_pf_custom, t_frame_clock, t_timer, t_irq_defer, t_gp_status, t_reset_regs,
          t_legacy_io, t_tx_busy, t_rx_overrun, t_irq_storm, t_undef_reg, t_dcache_stale,
-         t_guest_exit, t_streams, t_color]
+         t_halt_val, t_exit_on_halt, t_streams, t_color]
 
 
 def main():
