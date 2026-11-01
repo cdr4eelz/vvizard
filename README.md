@@ -170,7 +170,7 @@ makes a store also end the run right after the store instruction: `[halt] HaltVa
 then the normal shutdown (summaries, registers, the `[halt]` value line with `; run ended by --exit-on-halt`,
 `--dump-frame`, `--dump-lcd`, `--screenshot`, `--hold`) and **exit status 0** whatever the value; a failing `--expect`
 still gives 3. The status strip shows `EXITED (HaltVal 0x0000002a)`. `--no-exit-on-halt` turns it off again. The old
-names `--guest-exit` / `--no-guest-exit` still work as aliases (but the old "exit status = code & 0xFF" is gone).
+`--guest-exit` / `--no-guest-exit` options and the "exit status = code & 0xFF" behaviour are gone.
 
 Stores are lane-placed as on the bus: `sw` sets the word, `sb` at 0x80000087 / `sh` at 0x80000086 set the word to the
 byte / halfword (zeros elsewhere), and `sb` at 0x80000084 puts it in bits 31:24 (and is the `mmio-lane` quirk).

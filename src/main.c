@@ -633,8 +633,7 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     (exit status 0).  Default off (env VVIZARD_EXIT_ON_HALT=1 turns it on): the\n"
 "                     store only sets the register, which reads back, and the guest goes on.  Either\n"
 "                     way each store is logged ([halt] HaltVal = ...) and the last value is printed\n"
-"                     after the register dump.  --no-exit-on-halt turns it off (old names: --guest-exit,\n"
-"                     --no-guest-exit)\n"
+"                     after the register dump.  --no-exit-on-halt turns it off\n"
 "  Esc in the window ends the run like closing it (Esc is not sent to the UART)\n"
 "\n"
 "Exit status: 0 normal stop (break, --max-insns, --max-seconds, --until, window closed, Esc, a HaltVal\n"
@@ -744,7 +743,6 @@ int main(int argc, char **argv) {
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
-        {"guest-exit",0,0,O_EXIT_ON_HALT},{"no-guest-exit",0,0,O_NO_EXIT_ON_HALT},   /* old names */
         {"frame-clock",1,0,O_FRAME_CLOCK},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
         {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
         {0,0,0,0}};

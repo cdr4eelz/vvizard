@@ -130,7 +130,7 @@ Makefile build leaves out (`--no-pad-sections`).
     `[halt] HaltVal = ... at pc=...` lines, `[stop] max-insns`, status 0, and `[halt] HaltVal = 0x00000063 (99),
     last stored at ... (5 stores)` after the register dump.  `exit_on_halt`: `--exit-on-halt` stops at the first
     store (`-> stop (--exit-on-halt)`, `$s0` still 0, no `[stop]` line, no quirk), the value line after the
-    registers, **status 0** (not 42); `--guest-exit` (old name) with a failing `--expect` gives 3;
+    registers, **status 0** (not 42); `--exit-on-halt` with a failing `--expect` gives 3;
     `VVIZARD_EXIT_ON_HALT=1` stops too; `--exit-on-halt --no-exit-on-halt` runs on.
   - Esc has no automated test: `--input-script` only queues UART RX bytes and cannot press a window key.  Checked by
     hand on Xvfb `:77` with `xdotool key --window $(xdotool search --name '^vvizard$') Escape` (see "Ending a run").
@@ -276,8 +276,8 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
   registers.
   - Nov 1 2026: HaltVal is a plain **store-then-load register** (what the hardware register will be), and ending
     the run on a store is an option, **`--exit-on-halt`, off by default** (env `VVIZARD_EXIT_ON_HALT=1|on|yes|true`
-    or `0|off|no|false`, read before the options; bad values exit 2).  `--guest-exit` / `--no-guest-exit` are kept
-    as aliases of `--exit-on-halt` / `--no-exit-on-halt`.  Before, a store always stopped the run with exit status
+    or `0|off|no|false`, read before the options; bad values exit 2).  The old
+    `--guest-exit` / `--no-guest-exit` options are gone.  Before, a store always stopped the run with exit status
     code & 0xFF and `--no-guest-exit` dropped the store.
   - Every store sets `halt_val` (also with the option on); a load (any size) returns it, sub-word loads the matching
     lane, no side effect.  Off: each store prints `[halt] HaltVal = 0x%08x (%u) at pc=...` (first 64, then only

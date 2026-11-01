@@ -131,7 +131,7 @@ def t_halt_val():     # default: store-then-load register, every store logged, l
         and after_regs(a, "[halt] HaltVal = 0x00000063 (99), last stored at pc=") and "(5 stores)" in a.err
 def t_exit_on_halt(): # --exit-on-halt: stop right after the store, value after the registers, status 0 (not 42)
     a = run("halt_val", None, "--halt-on-quirk", "--exit-on-halt", "--expect", "s0=0")   # nothing after the store ran
-    b = run("halt_val", None, "--guest-exit", "--expect", "s0=1")      # old name; a failing --expect still gives 3
+    b = run("halt_val", None, "--exit-on-halt", "--expect", "s0=1")    # a failing --expect still gives 3
     c = subprocess.run([VV, *BASE, "--load", f"{prog('hw/halt_val')[0]}@0x40000000", "--entry", "0x40000000"],
                        capture_output=True, env=dict(ENV, VVIZARD_EXIT_ON_HALT="1"))
     d = run("halt_val", None, "--exit-on-halt", "--no-exit-on-halt", "--max-insns", "5000", "--expect", "s0=1")
