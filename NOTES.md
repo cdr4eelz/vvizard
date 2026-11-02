@@ -450,3 +450,4 @@ fault/dormant stay 0 (video always active here); `--exit-on-halt` stays off by d
 Seen in the cs150 working tree, not touched: isr7.s `_uarx_inc_opponents` (uncommitted) computes `slt $k0,...` then
 `addiu $k0,$k0,1` in the delay slot and stores that, so `+` sets num_opponents to 2 rather than incrementing; the tests
 avoid `+`/`-`.
+Follow-up (planned, not implemented): vendored copies of mmio_intr_cop0.h / shared7.h checked against the originals, `docs/VENDORED-HEADERS-PLAN.md`.
