@@ -24,6 +24,7 @@
 #include "quirk.h"
 #include "prng.h"
 #include "lcd.h"
+#include "shmem.h"
 #include "hw.h"
 #include "dcache.h"
 
@@ -78,6 +79,10 @@ uint32_t vv_canon(uint32_t a) { return vv_canon_inl(a); }
 
 /* ---------------- state ---------------- */
 static int opt_trace, opt_quiet_mmio, opt_trace_regs;
+/* --mmio-decode=ise: the cs150 ISE branch MemMapIO.v (proj7 era), which compares only addra[5:0]: the
+ * registers repeat every 0x100 across the 16 KiB map and there is no LCD.  Default: lcd-text decode
+ * (registers only at addra[11:6]==0, LCD at 0x100-0x17C). */
+static int opt_mmio_ise;
 static uint32_t prev_regs[32];
 static uint64_t insn_count, cnt_base_insn;
 static uint64_t max_insns;
@@ -95,7 +100,7 @@ static void note_ddr_exec(uint32_t pc) {
     if (pg < ddr_exec_lo) ddr_exec_lo = pg;
     if (pg + 0x1000u > ddr_exec_hi) ddr_exec_hi = pg + 0x1000u;
 }
-/* HaltVal register (VV_OW_GUEST_EXIT, 0x80000084): a plain store-then-load register.  Every store is
+/* HaltVal register (VV_OW_HALTVAL, 0x80000084; MemMapIO.v A_HaltVal): a plain store-then-load register.  Every store is
  * logged and the last value is printed after the register dump.  --exit-on-halt (env VVIZARD_EXIT_ON_HALT)
  * also ends the run right after the store instruction, with exit status 0. */
 static int opt_exit_on_halt, guest_exited, stop_req;   /* stop_req: hook_code stops before the next insn */
@@ -258,6 +263,7 @@ static void irq_step(uc_engine *uc, uint32_t pc) {
 static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     (void)uc; (void)u; (void)size;
     uint32_t w = off & VV_MMIO_DECODE;          /* addra[11:0]; registers only at addra[11:6]==0 */
+    if (opt_mmio_ise) w &= 0xFCu;               /* ISE: addra[5:0] only */
     uint32_t v = 0;
     if (w >= VV_MMIO_REG_SPAN) {                /* LCD window reads 0; elsewhere HW reads 32'dx */
         if (!opt_quiet_mmio && (w < VV_OW_LCD_BASE || w >= VV_OW_LCD_END))
@@ -273,7 +279,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     case VV_OW_PF_FRAME:  v = 0x10000000u | vv_pf_frame() << VV_FSHIFT; break;   /* frame being scanned (MemMapIO.v:162) */
     case VV_OW_GP_STATE:  v = vv_gp_status_word(); break;   /* graphics.h gstate_s layout (hw.c) */
     case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
-    case VV_OW_GUEST_EXIT: v = halt_val; break;  /* HaltVal: the last stored word (0 at reset) */
+    case VV_OW_HALTVAL: v = halt_val; break;  /* HaltVal: the last stored word (0 at reset) */
     case 0xFFFFFFFFu: break;
     default:
         if (!opt_quiet_mmio) vv_eprintf("[mmio] MISS-READ off=0x%04x\n", (unsigned)off);
@@ -293,6 +299,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
 static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val, void *u) {
     (void)u;
     uint32_t w = off & VV_MMIO_DECODE, v = (uint32_t)val;   /* addra[11:0] */
+    if (opt_mmio_ise) w &= 0xFCu;               /* ISE: addra[5:0] only */
     /* mmio-lane quirk: ByteAccess4 places sb/sh data in its big-endian byte lane (zeros elsewhere)
      * and MemMapIO uses the whole dina, e.g. sb to UATX_DATA+0 transmits 0x00. */
     int lane_hw = size < 4 && vv_quirk_on(VV_Q_MMIO_LANE);
@@ -320,7 +327,7 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;   /* (already placed when lane_hw) */
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
         vv_prng_write(insn_count, v); break;
-    case VV_OW_GUEST_EXIT:   /* sb/sh: the lane-placed dina word (as RANDOM32), e.g. sb at +3 = the byte */
+    case VV_OW_HALTVAL:   /* sb/sh: the lane-placed dina word (as RANDOM32), e.g. sb at +3 = the byte */
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
         if (guest_exited) break;                 /* --exit-on-halt: already stopping */
@@ -528,18 +535,15 @@ static uint32_t rd_guest(uc_engine *uc, uint32_t a, unsigned n) {
     for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
     return v;
 }
+static uint32_t sm_reader(void *ctx, uint32_t a, unsigned n) { return rd_guest((uc_engine *)ctx, a, n); }
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2) {
     snprintf(l1, n1, "%s  insns %llu  PF_FRAME %u (writes %llu)  GP %u  IRQ %llu%s",
              vv_quirk_halted ? "HALTED (quirk)" : run_state, (unsigned long long)insn_count, vv_disp_frame(),
              (unsigned long long)pf_writes, gp_launches, (unsigned long long)irq_count,
              vv_disp_keys_enabled ? "" : "  keys->UART off");
-    /* proj6/proj7 shared memory (shared7.h): magic 0xFEDBEEFn, flags (pause / notimer), clock (BCD mm:ss) */
-    uint32_t magic = rd_guest(uc, VV_SM_BASE_ADDR, 4);
-    if ((magic & ~0xFu) == 0xFEDBEEF0u) {
-        uint32_t fl = rd_guest(uc, VV_SM_BASE_ADDR + 0x16, 2), clk = rd_guest(uc, VV_SM_BASE_ADDR + 0x20, 4);
-        snprintf(l2, n2, "graphics %s  clock %s  %X%X:%X%X  proj%u", fl & 1 ? "PAUSED" : "running",
-                 fl & 2 ? "PAUSED" : "running", clk >> 12 & 15, clk >> 8 & 15, clk >> 4 & 15, clk & 15, 4 + (magic & 0xF));
-    } else snprintf(l2, n2, "graphics -  clock -  (no proj6/7 shared memory at 0x%08x)", VV_SM_BASE_ADDR);
+    /* proj6/proj7 shared memory (shared6.h / shared7.h layouts, src/shmem.c) */
+    vv_sm sm; vv_sm_read(sm_reader, uc, VV_SM_BASE_ADDR, &sm);
+    vv_sm_status(&sm, VV_SM_BASE_ADDR, l2, n2);
     /* frame ends (PixelFeeder scans) and their rate per wall second since the last refresh (4 Hz) */
     static uint64_t f_prev, t_prev; static double fps;
     uint64_t f = vv_pf_frames(), t = vv_mono_ns();
@@ -563,8 +567,11 @@ static int reg_index(const char *n) {
 #define VV_SW_REL     "../../software"
 #define VV_BIOS_REL   "gios/gios.inst.bin"
 #define VV_AUTORUN    "jal 60000000\\r"       /* typed at the GIOS prompt (GIOS ends tokens on CR) */
+/* The same images the FPGA's block RAMs are initialised with (cs150 b2db683,
+ * hardware/src/core_ip/brams/<bram>/<bram>.coe): bios_mem = gios, dmem_blk_ram (D-scratch) =
+ * bench (was draw), imem_blk_ram (I-scratch) = proj7, isr_mem = isr7 (were proj6 / isr6). */
 static const struct { const char *rel; uint32_t addr; } default_app[] = {
-    { "draw/draw.inst.bin",       0x50000000u },   /* D-scratch */
+    { "bench/bench.inst.bin",     0x50000000u },   /* D-scratch (dmem_blk_ram.coe; proj7 overwrites it) */
     { "proj_app7/isr7.bin",       0xC0000000u },   /* ISR BRAM */
     { "proj_app7/proj7.inst.bin", 0x60000000u },   /* I-scratch: the app GIOS jumps to */
 };
@@ -641,6 +648,9 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  4 --halt-on-quirk\n"
 "\n"
 "Hardware model:\n"
+"  --mmio-decode=D    MMIO register decode: lcd-text (default; registers only at 0x80000000-0xFC,\n"
+"                     2x16 LCD at 0x80000100-0x17C) or ise (cs150 ISE branch MemMapIO.v: addra[5:0]\n"
+"                     only, registers repeat every 0x100, no LCD)\n"
 "  --legacy-io        old untimed I/O: TX always ready, RX served on demand with a level UARX interrupt,\n"
 "                     PF_FRAME switches at once, no TX/GP/PF/timer/RTC interrupts\n"
 "  --uart-rx-gap N    idle cycles the host leaves between UART RX bytes (default %u = one byte time;\n"
@@ -682,6 +692,9 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
+"  --dump-sm          print the proj6/proj7 shared memory at 0x50000000 (shared7.h struct SM_DATA,\n"
+"                     or shared6.h) decoded, at exit; its consistency warnings (magic/majorvers\n"
+"                     stamp vs shared7.h, magic2, buffer) are printed at exit even without it\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
 "  --threads=on|off   on (default): GPU command lists are drawn by a worker thread and, with a\n"
 "                     window, the emulator runs on its own thread while the main thread draws (frame\n"
@@ -697,7 +710,7 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  -h, --help         this text\n", p, sw_default, VV_PC_BOOT,
     default_app[0].rel, default_app[0].addr, default_app[1].rel, default_app[1].addr,
     default_app[2].rel, default_app[2].addr, VV_PC_BOOT, VV_PC_BOOT, VV_PC_BOOT,
-    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, VV_MMIO_BASE + VV_OW_GUEST_EXIT, VV_UART_RX_FRAME, VV_PF_PERIOD, vv_quirk_names());
+    VV_DEFAULT_BIG_ENDIAN ? "big" : "little", VV_PC_ISR, VV_MMIO_BASE + VV_OW_HALTVAL, VV_UART_RX_FRAME, VV_PF_PERIOD, vv_quirk_names());
 }
 
 /* getopt_long's optional arguments only bind with '=' (--color=never).  To accept the
@@ -715,12 +728,12 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_EXPECT, O_SCRIPT, O_IRQ, O_NO_IRQ, O_DUMP_EVERY, O_DUMP_PREFIX, O_WINDOW, O_NO_WINDOW,
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
-       O_DUMP_LCD, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
+       O_DUMP_LCD, O_DUMP_SM, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
-    const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0;
+    const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0, dump_sm = 0;
     uint32_t entry = VV_PC_BOOT, sp = 0; int have_entry = 0, have_elf_entry = 0, have_sp = 0;
     const char *loads[32]; int nloads = 0;
     const char *expects[32]; int nexp = 0;
@@ -739,11 +752,11 @@ int main(int argc, char **argv) {
         {"random-ddr",2,0,O_RANDOM_DDR},{"no-random-ddr",0,0,O_NO_RANDOM_DDR},{"uart-in",1,0,O_UART_IN},
         {"no-autorun",0,0,O_NO_AUTORUN},{"halt-on-quirk",2,0,O_HALT},{"warn-on-quirk",2,0,O_WARN},
         {"no-halt-on-quirk",0,0,O_NO_HALT},{"quirks",1,0,O_QUIRKS},{"no-quirks",0,0,O_NO_QUIRKS},
-        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"screenshot",1,0,O_SCREENSHOT},
+        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"dump-sm",0,0,O_DUMP_SM},{"screenshot",1,0,O_SCREENSHOT},
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
-        {"frame-clock",1,0,O_FRAME_CLOCK},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
+        {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
         {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
@@ -797,6 +810,10 @@ int main(int argc, char **argv) {
             if (!strcmp(optarg, "wall")) vv_frame_clock = VV_FRAME_CLOCK_WALL;
             else if (!strcmp(optarg, "emulated")) vv_frame_clock = VV_FRAME_CLOCK_EMULATED;
             else { vv_eprintf("--frame-clock: expected wall or emulated, not '%s'\n", optarg); return 2; } break;
+        case O_MMIO_DECODE:
+            if (!strcmp(optarg, "ise")) opt_mmio_ise = 1;
+            else if (!strcmp(optarg, "lcd-text")) opt_mmio_ise = 0;
+            else { vv_eprintf("--mmio-decode: expected lcd-text or ise, not '%s'\n", optarg); return 2; } break;
         case O_MAX_SECONDS: { char *e; double sec = strtod(optarg, &e);
             if (*e || sec < 0) { vv_eprintf("--max-seconds: bad value '%s'\n", optarg); return 2; }
             max_wall_ns = (uint64_t)(sec * 1e9); break; }
@@ -813,6 +830,7 @@ int main(int argc, char **argv) {
         case O_NO_QUIRKS: emul = 0; break;
         case O_LIST_QUIRKS: vv_quirk_list(stdout); return 0;
         case O_DUMP_LCD: dump_lcd = 1; break;
+        case O_DUMP_SM: dump_sm = 1; break;
         case O_SCREENSHOT: shot_path = optarg; break;
         case O_COLOR: v = opt_next(argc, argv, is_color);
             if ((color = vv_color_parse(v)) < 0) {
@@ -975,6 +993,8 @@ int main(int argc, char **argv) {
                    (unsigned long long)halt_stores, halt_stores == 1 ? "" : "s", guest_exited ? "; run ended by --exit-on-halt" : "");
     if (dump_path) vv_disp_dump_ppm(uc, dump_path);
     if (dump_lcd) vv_lcd_dump();
+    {   vv_sm sm; vv_sm_read(sm_reader, uc, VV_SM_BASE_ADDR, &sm);   /* proj6/proj7 shared memory */
+        if (dump_sm) vv_sm_dump(&sm, VV_SM_BASE_ADDR); else vv_sm_warn(&sm, VV_SM_BASE_ADDR); }
     static char exit_state[48];
     if (guest_exited) snprintf(exit_state, sizeof exit_state, "EXITED (HaltVal 0x%08x)", halt_val);
     run_state = vv_quirk_halted ? "HALTED (quirk)" : err ? "STOPPED (error)" : guest_exited ? exit_state : stop_reason_intr == 18 ? "STOPPED (break)" :

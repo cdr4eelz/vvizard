@@ -1,6 +1,6 @@
 # gpstat.s - GP_STATE (0x8000005C) = {pf_status, gp_status} in the graphics.h gstate_s layout:
-# pf_frame 29:24; gp_fault 15, gp_procframe 13:8, engines ready 4:0.  (GPU.v:96-99 as written is
-# 17 bits wide and drops the fault bit; vvizard models the intended layout: QUIRKS.md "gp-status".)
+# pf_frame 29:24; gp_fault 15, gp_procframe 13:8, engines ready 4:0 (GPU.v:96-99 since cs150 ISE
+# 7e90149; before it the concatenation was 17 bits and dropped the fault bit: QUIRKS.md "gp-status").
 # A launch latches the frame, sets fault on a bad opcode, and raises irq_gp_done (Cause bit 12).
 # vv-load: 0x40000000
 # vv-isa: -mips32r2

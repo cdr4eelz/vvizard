@@ -160,13 +160,17 @@ static int walk(gctx *g, uint32_t gp_frame, uint32_t code, int verbose, uint32_t
         unsigned op = inst >> 28;
         uint32_t color = inst & 0x0FFFFFFFu;  /* GraphicsProcessor.v:154 {4'b0, COLOR28} */
         n++;
-        if (op == VV_GOP_STOP) { if (!quiet) st.cmds += n; *ncmds = n; return n; }
-        if (op == VV_GOP_FILL) {               /* FrameFiller: whole 800x600 */
-            for (int y = 0; y < H; y++) span(g, y, 0, W - 1, color);
+        if (op == VV_GOP_STOP && !color) { if (!quiet) st.cmds += n; *ncmds = n; return n; }
+        if (op == VV_GOP_FILL) {               /* FrameFiller: whole 800x600, one ScanLineRunner run per row: */
+            for (int y = 0; y < H; y++)        /* edge {4'b0,COLOR28} at x=0/799, fill 0xFF000000|color */
+                slr_run(g, (uint32_t)y, 0, W - 1, color, 0xFF000000u | color);   /* (FrameFiller.v:90-91) */
             continue;
         }
         if (op != VV_GOP_LINE && op != VV_GOP_ELIP && op != VV_GOP_RECT) {
-            if (!quiet) { vv_eprintf("[gpu] fault: bad opcode %u (0x%08x) at 0x%08x\n", op, inst, pc - 4);
+            /* bad opcode, or a STOP with any other bit set ("Valid STOP must be all zeros"): the
+             * GraphicsProcessor stops and sets GP_fault (GraphicsProcessor.v:176-189) */
+            if (!quiet) { vv_eprintf("[gpu] fault: %s %u (0x%08x) at 0x%08x\n", op ? "bad opcode" : "non-zero STOP, opcode",
+                                     op, inst, pc - 4);
                           st.faults++; st.cmds += n; }
             *ncmds = n;
             return -2;                         /* GP_fault (GraphicsProcessor.v:188-189) */

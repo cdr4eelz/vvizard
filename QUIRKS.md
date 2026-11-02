@@ -72,8 +72,8 @@ The old name `uart-lane` is accepted for `mmio-lane`.
 | [`irq-storm`](#irq-storm) | on, warns | guest bug on current hardware | RTL reading; test_hw `irq_storm` |
 | [`undef-reg`](#undef-reg) | on, warns | guest bug on current hardware | RTL reading; test_hw `reset_regs`, `undef_reg` |
 
-The [GP_STATE layout](#gp-status-rtl-bug) is an RTL bug of another kind: vvizard models the *intended* layout and
-this file gives the one-line Verilog fix.
+The [GP_STATE layout](#gp-status-rtl-bug) was an RTL bug of another kind: vvizard models the *intended* layout, and
+cs150 ISE commit 7e90149 applied the one-line Verilog fix given below, so GPU.v and vvizard now agree.
 
 **Default rule:** a quirk is on if the current hardware still behaves that way. The two bugs fixed in fcdda7f are
 off but kept so that older bitstreams can be reproduced. `bal-untaken` is a real RTL bug, but the user rated it
@@ -336,6 +336,10 @@ has the totals. `--legacy-io` turns off the timing they depend on (all but `unde
   idioms) don't count as reads, and a store's data register counts only when stored. The value read is 0.
 
 ## gp-status RTL bug
+**Fixed** in cs150 ISE commit 7e90149 ("Fix alignment problem in GP_Status due to mistaken constant bit width"):
+`hardware/src/gpu/GPU.v` now has `3'b000`, exactly the diff below, so the bitstream's GP_STATE matches graphics.h
+`gstate_s` and vvizard. The analysis is kept for older bitstreams.
+
 `hardware/src/gpu/GPU.v:96-99` (cs150 ISE branch fcdda7f; the same on `lcd-text` 4e7252c):
 
     assign gp_status = {
@@ -386,7 +390,9 @@ These are found by RTL reading. vvizard keeps its standard or simplified behavio
 - **CNT_CYCLE** (`cpu/MemMapIO.v`) counts every clock, including stalls. vvizard returns the instruction count for
   both CNT_CYCLE and CNT_INST, and COP0 Count also counts instructions. All device timing (UART, PixelFeeder,
   timer) uses this one-cycle-per-instruction clock, so it runs early wherever the hardware stalls.
-- **GPU busy time:** a launch completes at once (all engines ready, Cause bit 12 at the launch).
+- **GPU busy time:** with `--sync` a launch completes at once (all engines ready, Cause bit 12 at the launch). The
+  default `--threads=on` models a busy time (`launch + pixels/4 + 32 x commands` cycles, README "Threads"), not the
+  engines' real DDR timing.
 - **PixelFeeder frame phase:** frame ends are at multiples of 828960 cycles (`--pf-period`) from the first instruction, or of 16.579 ms of host time with `--frame-clock=wall`; the real phase depends on
   the DVI timing and DDR arbitration.
 - **Interrupt deferral:** `cpu/CPUMIPS.v:114` (DO_ISR) replaces the fetch after the instruction in F, unless that

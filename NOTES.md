@@ -6,8 +6,9 @@ Background and probe findings moved out of README.md. Nothing here is needed to 
 - The hardware decodes only `ADDR[31:28]` (MemBank.v:51,70; StageMW.v:6-21).
 - DDR: 0x1 = D$ path, 0x2 = I$ path, 0x3 = both; address `{4'h0,addr[27:0]}` (MemBank.v:141,150).
 - BIOS: indexed by `addr[13:2]` (MemBank.v:160); data-read-only in hardware.
-- MMIO: MemMapIO.v gets `addra = DMEM_ADDR[13:2]` (MemBank.v:211), so the map repeats every 16 KiB. Since the
-  cs150 `lcd-text` branch (commit c2e8221) the registers are qualified with `io_base = addra[11:6] == 0` and answer only at
+- MMIO: MemMapIO.v gets `addra = DMEM_ADDR[13:2]` (MemBank.v:211), so the map repeats every 16 KiB. (The cs150
+  `ISE` branch, proj7 era b2db683, still compares only `addra[5:0]`: no `io_base`, no LCD; vvizard models
+  `lcd-text`.) Since the cs150 `lcd-text` branch (commit c2e8221) the registers are qualified with `io_base = addra[11:6] == 0` and answer only at
   0x80000000-0x800000FC (they used to repeat every 0x100 on `addra[5:0]`). `LCDText2x16_MemPort` takes
   `addra[11:5] == 2` (0x80000100-0x8000017C): `we = ena && |wea`, `waddr = addra[4:0]`, `wdata = dina[7:0]`, reads 0.
   Elsewhere reads return `32'dx` (BADNESS=0); vvizard returns 0.
@@ -135,7 +136,7 @@ Makefile build leaves out (`--no-pad-sections`).
   - Esc has no automated test: `--input-script` only queues UART RX bytes and cannot press a window key.  Checked by
     hand on Xvfb `:77` with `xdotool key --window $(xdotool search --name '^vvizard$') Escape` (see "Ending a run").
 - `test-player` (`make test-player`, ~13 s since frames take their real 828960 cycles): runs vvizard's **built-in
-  default program** (GIOS + draw + isr7 + proj7 + autorun from `<vvizard dir>/../../software`, so the cs150 layout is
+  default program** (GIOS + draw (bench since the Nov 1 2026 proj7 sync) + isr7 + proj7 + autorun from `<vvizard dir>/../../software`, so the cs150 layout is
   needed) with only `--no-window --frame-clock=emulated --no-random-ddr --no-halt-on-quirk --input-script F
   --max-insns N`, and checks the
   four images were loaded from that tree. (`--no-halt-on-quirk`: isr7 has a load-use hit, see the findings below.)
@@ -267,7 +268,13 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
   quirk summaries, registers, `--dump-frame`, `--dump-lcd`, `--screenshot`, color reset at exit), exit status 0 like a
   close.  Esc is seen even with `--no-window-keys`, and it also ends `--hold`.  Verified on Xvfb `:77` with xdotool
   (proj7 player: `[stop] Esc pressed`, screenshot written, rc 0; `--hold` after a guest exit (now `--exit-on-halt`): Esc releases it).
-- **HaltVal register, 0x80000084** (was "guest exit register"; `VV_OW_GUEST_EXIT`, `src/memmap.h`).  Address rule:
+- **Nov 1 2026 (proj7 sync):** HaltVal is now real hardware: cs150 ISE 0fdc34b added `A_HaltVal = 6'h21` to MemMapIO.v
+  (`halt_val_r`, read/write, reset 0) and mmio_intr_cop0.h `OW_HALTVAL` / `MM_HALTVAL` / `HALTVAL` / `HALT(v)`
+  (Status = 0, store v, `jr 0x40000000`). vvizard's register already behaved that way; the constant is now
+  `VV_OW_HALTVAL` and only 0x88-0xFC is the extended area. proj7's `q` key ends in `HALT(1)` and GIOS (ISE working
+  tree) prints `HALTVAL: 00000001` under its banner when it starts again (tests/test_sm.py `quit`). The text below
+  describes the state before that commit.
+- **HaltVal register, 0x80000084** (was "guest exit register"; `VV_OW_GUEST_EXIT`, now `VV_OW_HALTVAL`, `src/memmap.h`).  Address rule:
   one word past the PRNG (`OW_RANDOM32` = 0x0080, `A_Random32 = 6'h20`).  0x84 is `addra = 6'h21`: inside `io_base` (`addra[11:6] == 0`) but
   in no `case` of MemMapIO.v, so on the FPGA `HOT_ADDR = 0` (a store does nothing) and a read gives the `default`
   `32'dx` (`BAD_WORD` with BADNESS).  Checked in `lcd-text` and `ISE` (and every other cs150 branch: none uses 6'h21),
@@ -293,8 +300,8 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
     is also an `mmio-w` event).
   - sb/sh: the lane-placed `dina` word (as for RANDOM32), so `sb` at 0x80000087 / `sh` at 0x80000086 give the byte /
     halfword; `sb` at +0 gives value<<24 and, with the default halt set, the `mmio-lane` quirk stops first.
-  - `make run` keeps the default (option off): the proj7 player doesn't store to HaltVal, and a GIOS that reads it
-    back needs the run to go on.  `make run EXTRA=--exit-on-halt` turns it on.
+  - `make run` keeps the default (option off): proj7 stores to HaltVal only when quitting (`q` -> `HALT(1)`), and
+    GIOS reads it back when it starts again, so the run has to go on.  `make run EXTRA=--exit-on-halt` turns it on.
 
 ## Window cost (status strip and frame pacing), Oct 31 2026
 Measured on the Debian 13 box, `-O3`, Xvfb `DISPLAY=:77` (Mesa llvmpipe), proj7 via GIOS, `--warn-on-quirk
@@ -419,3 +426,27 @@ Intel Core 7 150U (2P+8E, 12 threads), Mesa Intel GL on the real X display :0, b
   (fixed: `vv_gpu_settle`); the last frame not shown; `CLOCK_REALTIME` condvar wait; MMIO command lists. Accepted
   as in the plan: guest loads and stores to a frame or list during the busy window race the worker (same race as
   the FPGA, but not cycle-deterministic here).
+
+## proj7 sync (Nov 1 2026)
+Checked against the cs150 `ISE` working tree on UBU24 (HEAD b2db683 plus uncommitted edits to mmio_intr_cop0.h, gios.c,
+isr7.s, proj7.c), with a Grok Build scan as a second reviewer. Changed in vvizard:
+- **Shared memory** (`src/shmem.c`, `--dump-sm`, status strip): the strip read flags at +0x16 and the clock at +0x20
+  (shared6.h) on proj7's structure, where +0x16 is half of `stash3` (0xFFFF after `SM_INIT7`, so "PAUSED PAUSED") and
+  +0x20 is `seconds`. Now both layouts are decoded, chosen by the stamp (README "Shared memory"); a proj7 structure with
+  proj6 stamp values (isr7 `DO_INIT_VERSION` with today's deliberately stale shared7.s.inc) decodes as proj7 and warns.
+- **HaltVal** is real hardware since 0fdc34b (`A_HaltVal`); docs and `VV_OW_HALTVAL`. Behaviour unchanged.
+- **Default program** follows the new BRAM inits (b2db683): D-scratch = `bench.inst.bin` (was `draw.inst.bin`).
+- **GPU:** FILL stores `0xFF000000|color` inside each row and `{4'b0,COLOR28}` at x 0/799 (FrameFiller.v:90-91;
+  displayed RGB unchanged); a STOP word with any other bit set faults (GraphicsProcessor.v:182-189). gp-status RTL bug
+  documented as fixed (7e90149).
+- **`--mmio-decode=ise`**: ISE's MemMapIO compares only `addra[5:0]` (no `io_base`, no LCD; `lcd-text`/c2e8221 is not
+  in UBU24's clone at all). Default stays `lcd-text`.
+- Test assembler options gained `-R` (makefile.pre ASOPTS); no test binary changed.
+Checked and consistent: IB/IM bits 10-15 and IM_POSSIBLE 0xFC00, COP0150 Count/Compare/Status/Cause/EPC semantics,
+PC_ISR 0xC0000180, isr7's 16-byte jump table at 0xC0000000 (test_sm `isr7_entry`), proj7 link layout (as_scratchpair:
+.text 0x60000000, `_sp` 0x50004000), FIXED_ELF = gios.elf, GPU opcodes/point fields, PRNG.
+Not changed (decisions): frame period stays 828960 (Oct 31 decision; the DVI instance says 865800); pf_status
+fault/dormant stay 0 (video always active here); `--exit-on-halt` stays off by default.
+Seen in the cs150 working tree, not touched: isr7.s `_uarx_inc_opponents` (uncommitted) computes `slt $k0,...` then
+`addiu $k0,$k0,1` in the delay slot and stores that, so `+` sets num_opponents to 2 rather than incrementing; the tests
+avoid `+`/`-`.

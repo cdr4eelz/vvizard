@@ -38,7 +38,7 @@ The `Makefile` finds Unicorn and raylib through pkg-config:
   switching between the two never mixes objects. The MIPS assembler settings for the test programs (`T_ASOPTS`) are
   separate and unchanged.
 - The default program comes from the cs150 software tree, so build GIOS first (`make` in `software/gios`), then
-  `software/proj_app7` and `software/draw`.
+  `software/proj_app7` and `software/bench`.
 - Big-endian is the default CPU mode. Pick one at run time with `--little` or `--big`.
 - A Unicorn in `~/.local` takes priority automatically (PKG_CONFIG_PATH and rpath are set in the Makefile, and
   the `make run*` targets also set `LD_LIBRARY_PATH`).
@@ -56,7 +56,7 @@ raw bytes:
 | image | loaded at |
 |---|---|
 | `SW/gios/gios.inst.bin` | 0x40000000 (BIOS; the run starts here, `--entry 0x40000000`) |
-| `SW/draw/draw.inst.bin` | 0x50000000 (D-scratch) |
+| `SW/bench/bench.inst.bin` | 0x50000000 (D-scratch) |
 | `SW/proj_app7/isr7.bin` | 0xC0000000 (ISR BRAM) |
 | `SW/proj_app7/proj7.inst.bin` | 0x60000000 (I-scratch) |
 | autorun `jal 60000000\r` | typed at the GIOS prompt (as `--uart-in`) |
@@ -134,11 +134,16 @@ UART text is flushed at each newline, every byte when stdout is a terminal, befo
 Tab -> `\t`. **Esc ends the run** (it is not sent to the UART, since a lone Esc doesn't travel well over the real UART
 with `screen`): `[stop] Esc pressed` on stderr, then the same shutdown and exit status (0) as closing the window. It works
 with `--no-window-keys` too and also ends `--hold`. Terminal stdin still works too.
-proj7: `u i o / j k l / m , .` move, space pauses, `d`/`e` clock. `--no-window-keys` disables window capture.
+proj7 (isr7.s `ISR_UARX`): `u i o / j k l / m , .` move (`k` = centre, no move), space pauses the graphics, `d`/`e` turn
+the clock's UART output off/on, `+`/`-` change the opponent count (0..max_opponents), and `q` quits: proj7 leaves its
+loop and calls `HALT(1)` (mmio_intr_cop0.h: Status = 0, HaltVal = 1, `jr 0x40000000`), so GIOS starts again and prints
+`HALTVAL: 00000001` under its banner (add `--exit-on-halt` to end the run at that store instead).
+`--no-window-keys` disables window capture.
 
 **Note:** `bench` and `draw` are linked to run at DDR 0x10000000 (`LDSTYLE := inject_cache`). Their raw bytes can be
 placed in the scratchpads, but they won't run correctly from there unless relinked. proj7 (0x60000000) and isr7
-(0xC0000000) are linked for where they're loaded. Also, the default `draw.inst.bin` load overwrites the start of D-scratch, which proj7
+(0xC0000000) are linked for where they're loaded. The default images are the FPGA's block-RAM initial contents (cs150 b2db683,
+`hardware/src/core_ip/brams/*/*.coe`: gios, bench in D-scratch (it was draw), proj7, isr7), so `bench.inst.bin` fills the start of D-scratch, which proj7
 uses as its shared memory (the stack is at the top of D-scratch).
 
 ## Usage
@@ -147,11 +152,11 @@ uses as its shared memory (the stack is at the top of D-scratch).
       --load FILE@ADDR  raw binary or ELF (repeatable)   --entry ADDR   --sp ADDR (default: not preset)
       --max-insns N (default 0 = unlimited)  --max-seconds S  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio  --mmio-log
       --little | --big   --window | --no-window   --no-window-keys   --dump-frame F.ppm   --hold
-      --dump-lcd   --screenshot F.png
+      --dump-lcd   --dump-sm   --screenshot F.png
       --random-ddr[=SEED]   --no-random-ddr   --expect REG=VAL   --color[=WHEN]
       --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]   --no-halt-on-quirk
       --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N   --frame-clock=emulated|wall
-      --exit-on-halt   --threads=on|off (--sync = --threads=1)   --event-trace F
+      --exit-on-halt   --threads=on|off (--sync = --threads=1)   --event-trace F   --mmio-decode=lcd-text|ise
 A `break` instruction stops the run cleanly. When the run ends or fails, the registers are printed.
 `--expect` sets the exit status: 0 if every check passes, 3 if any fails.
 
@@ -176,10 +181,12 @@ Stores are lane-placed as on the bus: `sw` sets the word, `sb` at 0x80000087 / `
 byte / halfword (zeros elsewhere), and `sb` at 0x80000084 puts it in bits 31:24 (and is the `mmio-lane` quirk).
 Sub-word loads return the matching lane of the word.
 
-On the FPGA the address is free: MemMapIO.v decodes registers only at `addra[5:0]` = 0x00-0x06, 0x14-0x17 and 0x20
-(PRNG), so 0x84 (`addra` 0x21) selects nothing: the store is a no-op and a read is undefined. 0x80000084-0x800000FC is
-the **extended area** for vvizard-only registers. So guest code that wants to stop stores its value, then does what the
-FPGA needs: interrupts off and spin.
+On the FPGA it is the same register: MemMapIO.v `A_HaltVal = 6'h21` (cs150 ISE commit 0fdc34b), a plain read/write
+`halt_val_r` reset to 0, named `OW_HALTVAL` / `MM_HALTVAL` / `HALTVAL` in `software/common/mmio_intr_cop0.h`. A store
+never stops the FPGA, so guest code that wants to stop stores its value, then does what the FPGA needs: interrupts off
+and spin, or, like mmio_intr_cop0.h's `HALT(v)` (proj7 `q`), Status = 0, store, `jr 0x40000000` back to GIOS, which
+prints a nonzero HALTVAL at boot (a jump is not a reset, so the value survives; vvizard models no reset either).
+0x80000088-0x800000FC is still decoded by no MemMapIO.v case (the **extended area**).
 
 Assembly (`.set noreorder`):
 
@@ -276,7 +283,7 @@ those quirks off, the access raises a TLB-style CPU exception (`UC_ERR_EXCEPTION
 MemMapIO gets the word address `addra = ADDR[13:2]` and now decodes it (cs150 branch `lcd-text`, `cpu/MemMapIO.v`):
 | offset (`ADDR[13:0]`) | `addra` | device |
 |---|---|---|
-| 0x0000-0x00FC | `addra[11:6] == 0`, compared on `addra[5:0]` | the registers below (UART, counters, PF/GP, PRNG); 0x84-0xFC is the extended area (no RTL register; 0x84 = vvizard's HaltVal register) |
+| 0x0000-0x00FC | `addra[11:6] == 0`, compared on `addra[5:0]` | the registers below (UART, counters, PF/GP, PRNG); 0x84 = HaltVal (`A_HaltVal`); 0x88-0xFC is the extended area (no RTL register) |
 | 0x0100-0x017C | `addra[11:5] == 2` | 2x16 LCD text buffer, write-only |
 | 0x0180-0x3FFC | - | nothing: reads 0 here (`32'dx` in HW), stores dropped, logged as MISS-READ / MISS-WRITE |
 
@@ -284,14 +291,18 @@ The registers no longer repeat every 0x100: 0x80000108 is LCD char 2, not UART T
 are not the PRNG. `ADDR[27:14]` is still not decoded, so the whole 16 KiB map repeats (0x80004008 is UART TX data).
 This is plain address decode, not a quirk: the `unmapped` quirk covers undecoded nibbles only, and MMIO misses read 0
 and drop stores in every quirk setting.
+**Branch note:** the cs150 `ISE` branch (proj7 era, `b2db683`) does not have this decode yet: its MemMapIO.v compares
+only `addra[5:0]` (no `io_base`, no LCD), so there the registers repeat every 0x100 (0x80000108 is UART TX data,
+0x80000184 is HaltVal). vvizard keeps the `lcd-text` decode by default; `--mmio-decode=ise` switches to the ISE one
+(no LCD; test_hw `mmio_ise`). Software that stays below 0x80000100 (all of cs150 `software/`) behaves the same on both.
 - **UART TX:** a write to TX_DATA (offset 0x08) sends byte [7:0] of the written word to stdout (the only thing written to stdout; see [Output streams](#output-streams-and-color---color)). With `mmio-lane` (the default), that's the lane-placed word, so only `sw` and `sb` at +0xB send the byte. TX_READY reads 0 for 4773 cycles after an accepted byte (start + 8 data + stop at 115200 baud, 50 MHz), and a TX_DATA write while it is 0 is **lost**, as in MemMapIO.v (the `tx-busy` guest bug). When it goes back to 1, Cause bit 11 latches.
 - **UART RX:** host bytes come from `--uart-in` first, then due `--input-script` bytes, then window keystrokes, then stdin (polled without blocking). Each byte lands 4340 cycles after its start bit, in a single holding register: RX_VALID is 1 while a byte is held (and 0 while the next one is being shifted in), an RX_DATA read returns it and clears RX_VALID, and a byte that lands before the last one was read overwrites it (the `rx-overrun` guest bug). Each landed byte latches Cause bit 10.
 - **LCD (0x80000100-0x8000017C, `src/lcd.c`):** LCDText2x16.v's 32-character buffer behind `LCDText2x16_MemPort`. Character i (0-15 line 1, 16-31 line 2, left to right) is at `0x80000100 + 4*i` and takes `dina[7:0]` of any store (any byte mask). With `mmio-lane` (the default), that's the lane-placed word, so `sw` and `sb` at +3 (`sh` at +2) write the byte, and `sb` at +0..+2 (`sh` at +0) writes 0x00, as in hardware. Without the quirk the char is the stored value's low byte. Reads return 0 and have no side effects. Reset contents are LCDText2x16's `INIT_TEXT` default, 32 spaces. `--dump-lcd` prints the buffer (text and hex) at exit, and the window shows it in the status strip.
 - **Counters:** CNT_CYCLE and CNT_INST both return the number of instructions executed since the last CNT_RESET. Time in vvizard is one cycle per instruction (no stall or cache timing).
 - **PRNG (0x80000080, `src/prng.c`):** PRNG32LFSR.v, a 32-bit Galois LFSR (mask 0x80200003, reset value 0xACE12468) that steps every clock, not per read. A read in cycle c returns state(c-1) (MemMapIO registers `prng_out` once more before `douta`). Any store (any byte lane, also via the 16 KiB alias 0x80004080; 0x80000180 is no longer an alias) reseeds with the full lane-placed store data, and a seed of 0 becomes 1. The first read in the cycle right after a store returns the old value; from the next cycle on reads return the seed, then the seed advanced one step per cycle. Back-to-back reads return consecutive LFSR states. Cycles are counted as instructions (no stall or cache model), so seeded sequences match hardware only while the CPU does not stall, and the unseeded sequence after reset is not aligned with hardware. CNT_RESET does not reset the PRNG.
 - **PixelFeeder:** a PF_FRAME write only queues the frame. It is displayed from the end of the current scan frame (every 828960 cycles: VESA 800x600@60, 1056x628 pixel clocks at 40 MHz = 16.579 ms; or every 16.579 ms of host time with `--frame-clock=wall`), when Cause bit 13 latches. PF_FRAME reads return `{4'h1, frame#, 22'b0}` of the frame being displayed, not the last one written, so software that waits for its frame (proj7 `pf_wait`) now really waits.
-- **GPU:** a GP_CODE write runs the command list at once (`src/gpu.c`; no GPU busy time) and latches Cause bit 12. GP_STATE reads return `{pf_status, gp_status}` in the `graphics.h` `gstate_s` layout: displayed frame in bits 29:24, `gp_fault` in bit 15 (set by a bad opcode, cleared by the next launch), the launched frame in bits 13:8, and all five engines ready (bits 4:0). That is the intended layout; GPU.v as written drops the fault bit and puts the frame in bits 14:9, an RTL bug (see QUIRKS.md "gp-status RTL bug").
-- **HaltVal (0x80000084, vvizard only):** a store-then-load register, logged and printed after the register dump; `--exit-on-halt` also ends the run on a store (exit 0). See [HaltVal register](#haltval-register-0x80000084-and---exit-on-halt).
+- **GPU:** a GP_CODE write runs the command list at once (`src/gpu.c`; no GPU busy time) and latches Cause bit 12. GP_STATE reads return `{pf_status, gp_status}` in the `graphics.h` `gstate_s` layout: displayed frame in bits 29:24, `gp_fault` in bit 15 (set by a bad opcode, cleared by the next launch), the launched frame in bits 13:8, and all five engines ready (bits 4:0). That is the intended layout; GPU.v as written drops the fault bit and puts the frame in bits 14:9, fixed in cs150 ISE commit 7e90149 (`3'b000`), so GPU.v now matches (QUIRKS.md "gp-status RTL bug").
+- **HaltVal (0x80000084, MemMapIO.v `A_HaltVal`):** a store-then-load register, logged and printed after the register dump; `--exit-on-halt` also ends the run on a store (exit 0). See [HaltVal register](#haltval-register-0x80000084-and---exit-on-halt).
 - **Other offsets:** logged as MISS-READ or MISS-WRITE (reads 0, stores dropped).
 - **Interrupts:** see the next section.
 
@@ -381,14 +392,17 @@ busy / ready, UART bytes, MMIO writes, MMIO reads whose value changed) with its 
 traces, guest-state stderr and frame dumps byte for byte.
 
 ## Tests
-`make test` runs `check-hex`, `test-hex`, `test-hw`, `test-quirks`, `test-player` (all with `--sync`) and
+`make test` runs `check-hex`, `test-hex`, `test-hw`, `test-quirks`, `test-player`, `test-sm` (all with `--sync`) and
 `test-threads` (`tests/test_threads.py`: the threaded GPU model, determinism of threaded runs, the player with
 `--threads=on`). `make test-hex` runs `tests/test_hex.py`
 (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-hw` runs `tests/test_hw.py`:
 `tests/hw/*.s` checks UART TX timing, the RX edge and holding register, the PixelFeeder frame latch, the timer and
 interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, the HaltVal register (read-back by default, `--exit-on-halt` stop with exit 0), and makes every guest-bug detector warn,
 halt (exit 4) and go quiet, and checks the stdout/stderr split and `--color`. `make test-player` runs `tests/test_player.py` (proj7 player moved in 8 directions + idle via
-`--input-script` UART keys and UARX interrupts). `make test-quirks` runs `tests/test_quirks.py`: one tiny program per
+`--input-script` UART keys and UARX interrupts). `make test-sm` runs `tests/test_sm.py`: the `--dump-sm` decoder on
+proj6/proj7/no structures, the real isr7.bin jump table at 0xC0000000 (slots 0-3; slot 0's stamp is checked against
+`shared7.s.inc`, with the stale-stamp warning expected while it differs from shared7.h), and the proj7 player's shared
+memory after keys plus `q` -> `HALT(1)` -> GIOS `HALTVAL: 00000001` (and the `--exit-on-halt` stop). `make test-quirks` runs `tests/test_quirks.py`: one tiny program per
 quirk for detection, with clean counterparts, each quirk on and off against the standard MIPS result, and the CLI and
 environment interface (list syntax incl. `no-NAME`, `--opt VALUE` forms, `--help`). How to run them and their pass conditions are in NOTES.md.
 
@@ -396,8 +410,9 @@ environment interface (list syntax incl. `no-NAME`, `--opt VALUE` forms, `--help
 `tests/hw/*.s` (the hardware tests, macros in `tests/hw/hw.inc`) and `tests/quirk/det_*.s` / `emu_*.s` (the quirk snippets). `make tests` (a dependency of the test targets) assembles
 them with the MIPS GNU toolchain found on the PATH (`mips-linux-gnu-*`, else `mips64-linux-gnu-*`, or `make M_PRE=...`)
 into `build/tests/NAME.bin` (raw big-endian `.text`) and `NAME.hex` (one word per line). The settings follow cs150
-`software/makefile.in` (`ASOPTS`) and `makefile.isr`: `-EB -mabi=32 -non_shared -mno-shared -G0 -mno-pdr --no-break
---no-trap`, static link with `-T tests/test.ld` (`.text` only, no build-id), `objcopy -O binary -j .text`. Each `.s`
+`software/makefile.pre` (`ASOPTS`), the `ASOPTS += -G0` that `proj_app7/Makefile` and `gios/Makefile` add (with
+`CCMIPS += -G0 -ffixed-28` for C: `$gp`/$28 is reserved, never allocated) and `makefile.isr`: `-EB -mabi=32
+-non_shared -mno-shared -G0 -mno-pdr --no-break --no-trap -R`, static link with `-T tests/test.ld` (`.text` only, no build-id), `objcopy -O binary -j .text`. Each `.s`
 names its link/load address and ISA in its header (`# vv-load: 0x60000000`, `# vv-isa: -mips32r2`; the programs use
 `-mips1` like cs150 except hwprobe and the quirk snippets, which need MIPS32r2 encodings). `tests/check.inc` holds the
 CHECK/BEGIN_CHECKS/END_CHECKS/LA_CODE macros used by hwprobe (the same instruction sequences as the cs150 Icarus
@@ -413,7 +428,10 @@ The window is titled `vvizard`. It shows the selected frame unscaled at the top 
 underneath:
 - **Left:** the 2x16 LCD in green dot-matrix style. Codes 0x20-0x7F use HD44780 ROM A00 glyphs (`src/lcdfont.h`, so 0x5C is ¥ and 0x7E/0x7F are → / ←). 0x10-0x1F and 0x80-0xA0 are blank as in A00. CGRAM codes 0x00-0x0F (LCDText2x16 never loads CGRAM) and 0xA1-0xFF (katakana and symbols, not drawn) show as a hollow box.
 - **Right, line 1:** run state (RUN, STOPPED (break / max-insns / error), EXITED (HaltVal 0x...) with `--exit-on-halt`, or HALTED (quirk)), instructions, the displayed PF_FRAME and the number of PF_FRAME writes, GP launches and injected IRQs.
-- **Right, line 2:** when D-scratch holds proj6/proj7 shared memory (magic 0xFEDBEEFn at 0x50000000): graphics paused (flags bit 0, ' ' key), clock paused (flags bit 1, 'd'/'e' keys) and the BCD mm:ss clock.
+- **Right, line 2:** when D-scratch holds proj6/proj7 shared memory (magic 0xFEDBEEFn at 0x50000000, decoded by
+  `src/shmem.c`, see [Shared memory](#shared-memory-proj7-sm_data-and---dump-sm)): `proj7` (or `proj6`), graphics
+  running/PAUSED (flags bit 0, space), the BCD mm:ss clock (`(uart off)` when flags bit 1 `notimer` is set: `d`/`e`),
+  the player x,y and, for proj7, `opp num/max` and `QUIT` (flags bit 2, `q`). `STAMP?` means a consistency warning.
 - **Right, bottom:** recent keys. Window keystrokes are shown when pressed, `--input-script` keys when due, and `--uart-in` and stdin bytes when the guest reads them. The newest key is at the right and older keys scroll out to the left.
 - `--screenshot F.png` writes the whole window, strip included, as PNG when the run ends (needs a window; works under `xvfb-run`).
 
@@ -433,6 +451,24 @@ underneath:
   - `--hold` keeps the window open after the run.
   - Closing the window stops emulation.
 
+## Shared memory (proj7 `SM_DATA`) and `--dump-sm`
+proj6 and proj7 keep app/ISR state in a `struct SM_DATA` at `SM_BASE_ADDR` = 0x50000000 (D-scratch). vvizard reads it
+(never writes it) for the status strip and `--dump-sm`, with both layouts in `src/shmem.h`:
+| | proj7 (`software/proj_app7/shared7.h`) | proj6 (`shared6.h`) |
+|---|---|---|
+| stamp | `magic1` 0x00 = 0xFEDBEEF3, `majorvers` 0x04 = 7, `magic2` 0x13C = 0xFEDBEEF3 | `magic` 0x00 = 0xFEDBEEF2 |
+| fields | stash0-3 0x08-0x14, state/flags u16 0x18/0x1A, RTC_count 0x1C, seconds 0x20, clock 0x24, player_y/x i16 0x28/0x2A, max/num_opponents u16 0x2C/0x2E, buff_size/head/tail 0x30/0x34/0x38, buff_data[256] 0x3C | stash0-3 0x04-0x10, state/flags 0x14/0x16, RTC_count 0x18, seconds 0x1C, clock 0x20, player_y/x 0x24/0x26, buff_size/head/tail 0x28/0x2C/0x30, buff_data 0x34 |
+| flags | pause 0, notimer 1, quit 2 | pause 0, notimer 1 |
+
+The layout is chosen from the stamp: `magic1` 0xFEDBEEF3 (or newer), or `magic2` at 0x13C equal to `magic1`, is the
+proj7 layout; otherwise 0xFEDBEEF2 is proj6. So a proj7 structure stamped with proj6 values still decodes as proj7 and
+the stamp is reported: today `shared7.s.inc` deliberately still says `K_MAGIC_VERSION` 0xFEDBEEF2 / `K_MAJOR_VERSION` 6
+(the C side, shared7.h, says 0xFEDBEEF3 / 7), so isr7.s `DO_INIT_VERSION` (jump-table slot 0 at 0xC0000000) stamps
+0xFEDBEEF2 / 6. proj7 itself stamps through `SM_INIT7` (C), so a normal run shows 0xFEDBEEF3 / 7.
+`--dump-sm` prints the decoded structure at exit (`[sm] ...` lines on stderr); consistency problems (stamp vs shared7.h,
+`magic2` != `magic1`, `buff_size` != 256, head/tail out of range) are printed as `[sm] WARNING ...` at exit even without
+it, and shown as `STAMP?` in the strip. vvizard never changes the run because of them.
+
 ## Default BIOS (gios)
 proj_app* programs are linked against **gios**: `FIXED_ELF ?= ../gios/gios.elf` in `software/proj_app7/Makefile:5`. With bios150v3 loaded instead, proj7 jumps to address 0 because the two BIOS images put different functions at the same addresses.
 - By default vvizard loads `SW/gios/gios.inst.bin` raw at 0x40000000, SW being `--sw-dir` or `<exe dir>/../../software`
@@ -442,7 +478,7 @@ proj_app* programs are linked against **gios**: `FIXED_ELF ?= ../gios/gios.elf` 
   warning and the run continues.
 
 ## GPU command interpreter (`src/gpu.c`)
-A write to GP_CODE (0x80000058) runs the GPU on the big-endian command list at that address. It draws into frame `FRAME_BITS(GP_FRAME)` and finishes instantly, so GP_STATE always reads as ready. The GPU-done interrupt (IB_GPU=12) is not raised yet.
+A write to GP_CODE (0x80000058) runs the GPU on the big-endian command list at that address. It draws into frame `FRAME_BITS(GP_FRAME)`; with `--sync` it finishes inside the store (GP_STATE always ready), with the default `--threads=on` the GPU is busy for a modelled time (see "Threads"). Cause bit 12 (IB_GPU) latches when it is done.
 | op (bits 31:28) | words | meaning |
 |---|---|---|
 | 0 STOP | 1 | end of the list |

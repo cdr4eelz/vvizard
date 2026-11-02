@@ -1,7 +1,8 @@
 /* memmap.h - single authoritative memory-map table for VVIZARD.
  * Sources (read-only): hardware/src/cpu/MemBank.v (top-nibble decode, BRAM addr[13:2]),
  * hardware/src/cpu/StageMW.v (fetch/read/write table), hardware/src/cpu/MemMapIO.v,
- * software/common/mmio_intr_cop0.h, software/proj_app6/shared6.h, software/common/graphics.h.
+ * software/common/mmio_intr_cop0.h, software/proj_app7/shared7.h (shared6.h too: src/shmem.h),
+ * software/common/graphics.h.
  *
  * Decode model: hardware only looks at ADDR[31:28] (the "nibble") to pick a device and
  * then only the low address bits that device has.  Everything inside a nibble ALIASES:
@@ -46,7 +47,7 @@ typedef struct {
     A(0x2, 0x1) /* I-cache path into DDR */ \
     A(0x3, 0x1) /* both caches into DDR  */
 
-/* Known addresses (mmio_intr_cop0.h / shared6.h / graphics.h) */
+/* Known addresses (mmio_intr_cop0.h OW_* / shared7.h / graphics.h) */
 #define VV_MMIO_BASE      0x80000000u
 #define VV_OW_UATX_READY  0x0000u
 #define VV_OW_UARX_VALID  0x0004u
@@ -60,14 +61,16 @@ typedef struct {
 #define VV_OW_GP_GCODE    0x0058u
 #define VV_OW_GP_STATE    0x005Cu
 #define VV_OW_RANDOM32    0x0080u   /* PRNG32LFSR: read value / write seed (src/prng.c) */
-/* 0x84-0xFC: extended area, inside io_base but decoded by no MemMapIO.v case (writes do nothing,
- * reads 32'dx on the FPGA).  vvizard-only registers live here. */
-#define VV_OW_GUEST_EXIT  0x0084u   /* HaltVal: store-then-load register; --exit-on-halt stops on a store (main.c) */
+/* HaltVal: MemMapIO.v A_HaltVal = 6'h21 (cs150 ISE 0fdc34b), mmio_intr_cop0.h OW_HALTVAL / MM_HALTVAL / HALT():
+ * a plain read/write register, reset to 0 (halt_val_r).  Store-then-load here too; --exit-on-halt
+ * (off by default) also stops the run on a store (main.c).  0x88-0xFC: decoded by no MemMapIO.v case
+ * (writes do nothing, reads 32'dx on the FPGA). */
+#define VV_OW_HALTVAL     0x0084u
 #define VV_MMIO_DECODE    0x3FFCu   /* word offset within the map: addra[11:0] << 2 */
 #define VV_MMIO_REG_SPAN  0x0100u   /* registers: addra[11:6]==0 only (no 0x100 aliases) */
 #define VV_OW_LCD_BASE    0x0100u   /* LCD char i at 0x80000100 + 4*i, i = 0..31 (src/lcd.h) */
 #define VV_OW_LCD_END     0x0180u
-#define VV_SM_BASE_ADDR   0x50000000u   /* shared6.h: plain RAM in D-scratch */
+#define VV_SM_BASE_ADDR   0x50000000u   /* shared7.h (and shared6.h) SM_BASE_ADDR: plain RAM in D-scratch */
 #define VV_GPTEMP         0x12003000u   /* graphics.h GP command buffer (DDR) */
 #define VV_FRAME0         0x10000000u   /* frame N at 0x10000000 + N<<FSHIFT */
 #define VV_FSHIFT         22

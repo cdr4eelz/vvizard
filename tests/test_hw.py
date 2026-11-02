@@ -79,6 +79,17 @@ def t_irq_defer():    # CPUMIPS.v:114: no entry right after an mtc0, a branch or
 def t_gp_status():    # graphics.h gstate_s layout: fault 15, frame 13:8; Cause bit 12 on launch
     r = run("gpstat", 5)
     return r.returncode == 0 and not bugs(r)
+def t_gp_fill_stop():  # FILL stores edge {0,COLOR28} at x 0/799 and 0xFF|color inside; non-zero STOP = fault
+    r = run("gp_fill_stop", 6, "--max-insns", "5000000")
+    t = run("gp_fill_stop", 6, "--threads=on", "--max-insns", "5000000")
+    return r.returncode == 0 and not bugs(r) and "[gpu] fault: non-zero STOP" in r.err \
+        and t.returncode == 0 and not bugs(t)
+def t_mmio_ise():      # --mmio-decode=ise: registers repeat every 0x100 (no io_base, no LCD); default: lcd-text
+    i = run("mmio_ise", 2, "--mmio-decode=ise")
+    d = run("mmio_ise", None, "--expect", "s5=2", "--expect", "s3=2")
+    bad = run("mmio_ise", None, "--mmio-decode=foo")
+    return i.returncode == 0 and "[halt] HaltVal = 0x00000055" in i.err and d.returncode == 0 \
+        and "[halt]" not in d.err and bad.returncode == 2
 def t_reset_regs():   # no $sp preset: reads 0 and warns (undef-reg); --sp presets it, no warning
     a = run("reset_regs", 1, "--expect", "s0=0")
     b = run("reset_regs", 1, "--sp", "0x50004000", "--expect", "s0=0x50004000")
@@ -160,7 +171,7 @@ def t_color():        # auto (not a tty) = off; always: green UART run on stdout
         and "\x1b[1;36mpc\x1b[0m=" in w.err and bad.returncode == 2 and bad.stdout == b""
 
 
-TESTS = [t_uart_tx, t_uart_rx, t_uart_rx_hold, t_pf, t_pf_period, t_pf_custom, t_frame_clock, t_timer, t_irq_defer, t_gp_status, t_reset_regs,
+TESTS = [t_uart_tx, t_uart_rx, t_uart_rx_hold, t_pf, t_pf_period, t_pf_custom, t_frame_clock, t_timer, t_irq_defer, t_gp_status, t_gp_fill_stop, t_mmio_ise, t_reset_regs,
          t_legacy_io, t_tx_busy, t_rx_overrun, t_irq_storm, t_undef_reg, t_dcache_stale,
          t_halt_val, t_exit_on_halt, t_streams, t_color]
 

@@ -11,7 +11,7 @@
 .equiv GP_CODE,  0x58
 .equiv GP_STATE, 0x5c
 .equiv RANDOM32, 0x80
-.equiv HALTVAL,  0x84            # HaltVal register (vvizard only; extended area 0x84-0xFC): store-then-load
+.equiv HALTVAL,  0x84            # HaltVal register (MemMapIO.v A_HaltVal, mmio_intr_cop0.h OW_HALTVAL): store-then-load
 
 .macro HW_INIT                   # registers are not preset (as on hardware): write before reading
     move  $s3, $zero

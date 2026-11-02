@@ -1,5 +1,5 @@
-# halt_val.s - the HaltVal register (vvizard-only, 0x80000084: first word of the 0x84-0xFC extended
-# area past RANDOM32; MemMapIO.v decodes nothing there, so on the FPGA a store is a no-op).
+# halt_val.s - the HaltVal register (0x80000084, one word past RANDOM32: MemMapIO.v A_HaltVal = 6'h21,
+# mmio_intr_cop0.h OW_HALTVAL; on the FPGA a plain read/write register, reset 0).
 # Default (no --exit-on-halt): a plain store-then-load register.  Stores 42 and reads it back, then
 # sb/sh (lane-placed: sb at +3 = the byte, sh at +2 = the halfword) and lhu/lbu lanes, ends with 99
 # stored, then does what FPGA code does next: interrupts off (Status IE = 0) and spin (--max-insns).

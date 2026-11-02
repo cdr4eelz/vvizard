@@ -172,12 +172,12 @@ static void draw_strip(const char *l1, const char *l2, const uint8_t *lcd) {
     double t_now = now();
     char l2w[160]; snprintf(l2w, sizeof l2w, "%s", l2);
     DrawText(l1, x, y, FS, TXT);
-    {   /* second line word by word: PAUSED stands out */
+    {   /* second line word by word: PAUSED, QUIT and STAMP? stand out */
         int wx = x, sp = MeasureText("a", FS);
         for (char *p = l2w; *p; ) {
             if (*p == ' ') { wx += sp; p++; continue; }
             char *e = strchr(p, ' '), save = 0; if (e) { save = *e; *e = 0; }
-            DrawText(p, wx, y + 16, FS, strcmp(p, "PAUSED") ? TXT : WARN);
+            DrawText(p, wx, y + 16, FS, strcmp(p, "PAUSED") && strcmp(p, "QUIT") && strcmp(p, "STAMP?") ? TXT : WARN);
             wx += MeasureText(p, FS) + 1;
             if (!e) break;
             *e = save; p = e;

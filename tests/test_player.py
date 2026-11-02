@@ -66,7 +66,7 @@ def main():
     script = os.path.join(tmp, "input.txt")
     open(script, "w").write("\n".join(lines) + "\n")
     max_insns = (f + 4) * 900000      # PixelFeeder frame = 828960 cycles (--pf-period default)
-    # vvizard's built-in default program (= GIOS + draw + isr7 + proj7, autorun 'jal 60000000\r'),
+    # vvizard's built-in default program (= GIOS + bench + isr7 + proj7, autorun 'jal 60000000\r'),
     # from <exe dir>/../../software; --no-halt-on-quirk: isr7 has load-use hits the default would stop on.
     cmd = [VV, os.environ.get("VV_PLAYER_THREADS", "--sync"), "--no-window", "--frame-clock=emulated", "--no-random-ddr", "--no-halt-on-quirk",
            "--input-script", script, "--max-insns", str(max_insns)]
@@ -77,7 +77,7 @@ def main():
     irq = [l for l in r.stderr.splitlines() if l.startswith("[irq]")]
     print(f"vvizard rc={r.returncode} {emu_t:.2f}s; {irq[0] if irq else 'no [irq] line'}")
     missing = [p for p in dumps if not os.path.exists(p)]
-    loaded = [f"{SW}/{f}" in r.stderr for f in ("gios/gios.inst.bin", "draw/draw.inst.bin",
+    loaded = [f"{SW}/{f}" in r.stderr for f in ("gios/gios.inst.bin", "bench/bench.inst.bin",
                                                  "proj_app7/isr7.bin", "proj_app7/proj7.inst.bin")]
     if not all(loaded):
         print(r.stderr[-3000:]); print("FAIL: default program not loaded from", SW, loaded); return 1

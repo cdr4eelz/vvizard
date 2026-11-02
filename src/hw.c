@@ -120,10 +120,10 @@ uint32_t vv_pf_frame(void) { return pf_cur; }
 /* ---------------- GPU status (gpu/GPU.v, software/common/graphics.h:72-92) ----------------
  * GP_STATE = {pf_status, gp_status}.  pf_status = {fault, dormant, framebits_r[5:0], 8'b0}.
  * gp_status as software (graphics.h gstate_s, gios.c BC_GSTAT, GPUTestbench.v:24-27) reads it:
- * {gp_fault, 1'b0, gp_rframe[5:0], 3'b0, rect, elip, line, fill, gp_ready}.  NOTE: GPU.v:96-99 as
- * written concatenates 17 bits (4'b000 is a 4-bit literal) so the real hardware drops gp_fault and
- * shifts the frame to 14:9; vvizard models the intended layout (QUIRKS.md "gp-status").  The GPU
- * here completes instantly, so every engine reads ready; irq_gp_done is the gp_ready rising edge. */
+ * {gp_fault, 1'b0, gp_rframe[5:0], 3'b0, rect, elip, line, fill, gp_ready}, which is also GPU.v:96-99
+ * since cs150 ISE 7e90149 (before it, 4'b000 made it 17 bits: QUIRKS.md "gp-status").  pf fault and
+ * dormant read 0 (video always active here).  With --sync the GPU completes inside the store, so every
+ * engine reads ready; --threads=on models busy time (below).  irq_gp_done is the gp_ready rising edge. */
 static uint32_t gp_rframe, gp_fault; static uint64_t gp_launches;
 void vv_gp_launched(uint32_t gp_frame, int rc) {
     gp_rframe = frame_bits(gp_frame); gp_fault = rc < -1; gp_launches++;

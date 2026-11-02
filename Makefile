@@ -41,13 +41,14 @@ OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
-.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm tests check-hex refresh-hex
 
 all: $(TARGET)
 
 # ---- Test programs: built from assembly (tests/*.s, tests/quirk/*.s, tests/hw/*.s) with the MIPS GNU toolchain ----
-# Settings follow cs150 software/makefile.in ASOPTS (+ the -G0 static link of makefile.isr): big-endian
-# o32, -non_shared (no abicalls/PIC), no .pdr, --no-break/--no-trap.  Each .s names its load (= link) address and ISA:
+# Settings follow cs150 software/makefile.pre ASOPTS (-mabi=32 --no-break --no-trap -mno-pdr -non_shared
+# -mno-shared -R) plus the ASOPTS += -G0 of proj_app7/ and gios/Makefile ($gp reserved; C adds -ffixed-28) and makefile.isr: big-endian o32, no
+# abicalls/PIC, no .pdr.  (-g2 is left out: the tests use raw .text only.)  Each .s names its load (= link) address and ISA:
 #   # vv-load: 0x40000000      # vv-isa: -mips1   (hwprobe and the quirk snippets use -mips32r2)
 # Output: build/tests/NAME.bin (raw big-endian .text) and NAME.hex (one word per line).  The tests use
 # the built .bin; without a toolchain they fall back to the committed tests/NAME.hex copies
@@ -57,7 +58,7 @@ M_PRE   ?= $(shell command -v mips-linux-gnu-as >/dev/null 2>&1 && echo mips-lin
 T_AS    := $(M_PRE)-as
 T_LD    := $(M_PRE)-ld
 T_COPY  := $(M_PRE)-objcopy
-T_ASOPTS := -EB -mabi=32 -non_shared -mno-shared -G0 -mno-pdr --no-break --no-trap --no-pad-sections -Itests
+T_ASOPTS := -EB -mabi=32 -non_shared -mno-shared -G0 -mno-pdr --no-break --no-trap -R --no-pad-sections -Itests
 T_SRCS  := $(wildcard tests/*.s tests/quirk/*.s tests/hw/*.s)
 T_BINS  := $(patsubst tests/%.s,$(BUILD_DIR)/tests/%.bin,$(T_SRCS))
 T_HEXS  := $(T_BINS:.bin=.hex)
@@ -152,13 +153,17 @@ test-hex: $(TARGET) tests
 test-hw: $(TARGET) tests
 	python3 tests/test_hw.py
 
+# proj7 shared memory decode (--dump-sm), isr7 jump table at 0xC0000000, proj7 'q' -> HALT(1) via GIOS
+test-sm: $(TARGET) tests
+	python3 tests/test_sm.py
+
 # --threads=on: threaded GPU model, determinism (event traces), player (the rest of make test is --sync)
 test-threads: $(TARGET) tests
 	python3 tests/test_threads.py
 
 # All tests (hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
-# proj7 player via GIOS; all --sync), then the threaded-mode tests
-test: check-hex test-hex test-hw test-quirks test-player test-threads
+# proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode tests
+test: check-hex test-hex test-hw test-quirks test-player test-sm test-threads
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
