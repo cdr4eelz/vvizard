@@ -1,0 +1,13 @@
+# Written by make vendor-update (scripts/check_vendor.py --update); do not edit by hand.
+source_root: ../../software
+source_commit: 54924f8b99301dcc6da899af5eba783d1b353cea
+source_commit_date: 2026-11-01T21:16:56-08:00
+source_dirty: no
+source_tree_dirty: yes (2 paths)
+vendor_date: 2026-11-02T05:49:24Z
+files:
+  software/common/types.h sha256:0cc227ce870b40319c5cf0e6f351e39b2ba67fca622c268535b97f8626ac2e54
+  software/common/mmio_intr_cop0.h sha256:68aa3f0fb56381df4ab7314e2c566401d1f5866c9e649d897b216f3969a66bd2
+  software/common/mmio_intr_cop0.s.inc sha256:8c719e7f993d387a56d36791833de1c70410f36aa27f8ff9d3e57d8eb3613cd0
+  software/proj_app7/shared7.h sha256:bed9b6c7e01c86b1f5fcaddc07cde08ef923f7bdc5c1b78bac17822786b48336
+  software/proj_app7/shared7.s.inc sha256:80ac03c0f829e278943d8cc3fcd5a1f3111eea1321f851770636aa439cb5b6a1

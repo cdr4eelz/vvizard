@@ -41,6 +41,7 @@ OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
+.PHONY: vendor-cmp check-vendor vendor-update test-vendor
 .PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm tests check-hex refresh-hex
 
 all: $(TARGET)
@@ -103,13 +104,54 @@ endif
 refresh-hex: tests
 	@for h in $(T_HEXS); do cp $$h tests/$${h#$(BUILD_DIR)/tests/}; done; echo "refresh-hex: $(words $(T_HEXS)) files"
 
+# ---- Vendored cs150 headers (docs/VENDORED-HEADERS-PLAN.md) ----
+# vendor/cs150/ holds byte-for-byte copies of five cs150 files (mmio_intr_cop0.h/.s.inc, shared7.h/.s.inc,
+# types.h); PROVENANCE says where and when they came from.  vvizard builds against these copies only:
+#   build/cs150_check.o  _Static_asserts src/*.h VV_* and the struct SM_DATA layout against them (not linked)
+#   build/types_check.o  compiles the vendored types.h on its own (not linked)
+#   vendor-cmp           every make: byte-compares them with the originals in $(CS150_SW) when that tree
+#                        exists; a difference prints a loud banner on stderr (scripts/vendor-cmp.sh)
+#   check-vendor         (make test) diff + .h vs .s.inc values + tests/hw/hw.inc (scripts/check_vendor.py)
+#   vendor-update        recopy the five files from $(CS150_SW) and rewrite PROVENANCE
+# VENDOR_CHECK=warn (default: report, keep building) | fail (a difference stops make / make test) | off.
+VENDOR_CHECK ?= warn
+ifeq ($(filter warn fail off,$(VENDOR_CHECK)),)
+$(error VENDOR_CHECK must be warn, fail or off (got '$(VENDOR_CHECK)'))
+endif
+CS150_SW     ?= ../../software
+VENDOR_ROOT  := vendor/cs150
+VENDOR_FILES := software/common/types.h software/common/mmio_intr_cop0.h software/common/mmio_intr_cop0.s.inc \
+                software/proj_app7/shared7.h software/proj_app7/shared7.s.inc
+VENDOR_DEPS  := $(addprefix $(VENDOR_ROOT)/,$(VENDOR_FILES))
+CHECK_OBJS   := $(BUILD_DIR)/cs150_check.o $(BUILD_DIR)/types_check.o
+
+$(BUILD_DIR)/cs150_check.o: src/cs150_host/cs150_check.c src/cs150_host/types_guard.h $(HDRS) $(VENDOR_DEPS) $(FLAGS_STAMP) | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) -Isrc/cs150_host -I$(VENDOR_ROOT)/software/common -I$(VENDOR_ROOT)/software/proj_app7 \
+	    $(UNICORN_CFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/types_check.o: src/cs150_host/types_check.c $(VENDOR_ROOT)/software/common/types.h $(FLAGS_STAMP) | $(BUILD_DIR)
+	$(CC) -I$(VENDOR_ROOT)/software/common $(CFLAGS) -c $< -o $@
+
+vendor-cmp:
+	@sh scripts/vendor-cmp.sh $(VENDOR_CHECK) $(VENDOR_ROOT) $(CS150_SW) $(VENDOR_FILES)
+
+check-vendor:
+	python3 scripts/check_vendor.py --mode $(VENDOR_CHECK) --cc "$(CC)" --vendor $(VENDOR_ROOT) \
+	    --upstream $(CS150_SW) --hw-inc tests/hw/hw.inc --build $(BUILD_DIR)
+
+vendor-update:
+	python3 scripts/check_vendor.py --update --vendor $(VENDOR_ROOT) --upstream $(CS150_SW)
+
+test-vendor:
+	python3 tests/test_vendor.py
+
 # Flags stamp: rewritten only when the compile/link command changes, so switching DEBUG/CFLAGS rebuilds everything.
 FLAGS_STAMP := $(BUILD_DIR)/.flags
 FLAGS_LINE   = $(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) LINK=$(LDFLAGS) $(UNICORN_LIBS) $(RAYLIB_LIBS)
 $(FLAGS_STAMP): FORCE | $(BUILD_DIR)
 	@echo '$(subst ','\'',$(FLAGS_LINE))' | cmp -s - $@ || echo '$(subst ','\'',$(FLAGS_LINE))' > $@
 
-$(TARGET): $(OBJS) $(FLAGS_STAMP)
+$(TARGET): $(OBJS) $(FLAGS_STAMP) $(CHECK_OBJS) | vendor-cmp
 	$(CC) $(CFLAGS) $(THREAD_FLAGS) $(LDFLAGS) $(OBJS) -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
@@ -161,9 +203,9 @@ test-sm: $(TARGET) tests
 test-threads: $(TARGET) tests
 	python3 tests/test_threads.py
 
-# All tests (hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
+# All tests (vendored cs150 headers vs the originals, hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
 # proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode tests
-test: check-hex test-hex test-hw test-quirks test-player test-sm test-threads
+test: check-vendor test-vendor check-hex test-hex test-hw test-quirks test-player test-sm test-threads
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

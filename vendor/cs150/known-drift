@@ -1,0 +1,9 @@
+# macro  header  asm
+# Hand-maintained (make vendor-update never touches this file).
+# A pair listed here is REPORTED by make check-vendor but does not count as a failure, as long as the two
+# values stay exactly these.  If they become equal, or change to any other pair, the exception no longer
+# applies (check-vendor says so) and VENDOR_CHECK decides.
+# Today: shared7.s.inc still carries the proj6 stamp on purpose (cs150 06264af "[INTENTIONAL BUG]");
+# isr7 DO_INIT_VERSION stamps these asm values and src/shmem.c reports the stale stamp.
+K_MAGIC_VERSION  software/proj_app7/shared7.h=0xFEDBEEF3  software/proj_app7/shared7.s.inc=0xFEDBEEF2
+K_MAJOR_VERSION  software/proj_app7/shared7.h=7           software/proj_app7/shared7.s.inc=6

@@ -27,6 +27,7 @@
 #define VV_PF_WALL_CHECK 1024u      /* wall mode: read the host clock every 1024 instructions (~0.05-0.1 ms) */
 enum { VV_FRAME_CLOCK_EMULATED = 0, VV_FRAME_CLOCK_WALL = 1 };
 
+/* VV_IP_* and VV_CPU_HZ are checked against the vendored mmio_intr_cop0.h IM_* / shared7.h K_CPU_HZ (src/cs150_host/cs150_check.c). */
 /* Cause/Status interrupt bits (COP0150.v:43-44: {timer, rtc, pf_frame, gp_done, UATX, UARX} -> 15:10) */
 #define VV_IP_UARX  0x0400u
 #define VV_IP_UATX  0x0800u

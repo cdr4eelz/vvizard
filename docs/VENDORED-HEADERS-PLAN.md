@@ -1,7 +1,9 @@
 # Plan: vendored cs150 headers, compared with the originals when visible
 
-Status: **plan only, not implemented** (Nov 1 2026). Drafted by Grok Build from the vvizard tree at commit 55ef744
-(proj7 sync) with the cs150 ISE tree beside it; reviewed and amended by Grok Bot. The amendments are listed at the end.
+Status: **implemented** (Nov 1 2026), with the changes listed under "As implemented" at the end. Drafted by Grok Build
+from the vvizard tree at commit 55ef744 (proj7 sync) with the cs150 ISE tree beside it; reviewed and amended by Grok Bot
+(the amendments are listed at the end). The text below is the plan as approved; where it differs from the code, the
+"As implemented" section wins.
 
 **Goal.** vvizard keeps its own copies of `software/common/mmio_intr_cop0.h` and `software/proj_app7/shared7.h` (plus
 what they need) and builds only against those, so a standalone clone builds anywhere. When the cs150 originals are
@@ -390,3 +392,23 @@ Comment-only touches, one line each: `src/memmap.h` (top comment: values checked
    fixed upstream (the known-drift entry then goes stale and `check-vendor` says so). Until then `warn` is right,
    because the cs150 tree is routinely edited (uncommitted changes to these very headers happened during the proj7
    sync).
+
+## As implemented (Nov 1 2026)
+Decision from the user: a mismatch must be **loudly** warned about, but the default stays `warn`.
+- **Every-build compare is `make vendor-cmp`** (`scripts/vendor-cmp.sh`, POSIX sh + `cmp`), an order-only prerequisite
+  of `vvizard`: it runs on every `make` (no stamp, so the warning keeps appearing until fixed, and it never forces a
+  relink). Clean: `vendor-cmp: all 5 vendored cs150 headers match ../../software`. Different or missing: a bordered
+  banner on stderr naming each file (`DIFFERS ... (first difference at line N)` / `MISSING`), the PROVENANCE commit,
+  and the commands to see the diff, take cs150's version, or switch to `fail`/`off`. `VENDOR_CHECK=fail` exits 1
+  after the banner. No cs150 tree: one line. `check_vendor.py` prints the same banner (after its diff) in
+  `make check-vendor`.
+- **PROVENANCE** also has `source_tree_dirty` (any uncommitted path in the cs150 tree, not just the five files), and
+  `check-vendor` verifies each vendored file against its recorded sha256 (catches hand edits of `vendor/`).
+- **Values** are compared in the vendored snapshot always (hermetic, includes the `known-drift` report) and in the
+  cs150 originals when they differ from the snapshot. The printer skips `volatile`/`struct`/deref macros
+  (`CYCLE_COUNTER`, `SM_BASE`, ...) besides the asm ones; `COP0_*` are compared as register numbers.
+- The check objects: `build/cs150_check.o` and `build/types_check.o`, prerequisites of `vvizard`, not linked.
+- Tests: `tests/test_vendor.py` (18 cases: the check-vendor table above, printer values, `--update`, the `make
+  vendor-cmp` banner in all three modes, and four compile-time drift cases); `tests/test_sm.py` reads `H7` from the
+  vendored `shared7.h`.
+- Snapshot: UBU24 cs150 working tree, commit 54924f8 (the five files clean there; two other paths dirty).

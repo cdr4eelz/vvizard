@@ -1,6 +1,7 @@
 # hw.inc - macros for the hardware-model tests (tests/hw/*.s, run by tests/test_hw.py).
 # $s3 counts EXPECTs, $s5 counts mismatches, $s4 = number of the first mismatching EXPECT.
 # The harness checks --expect s5=0 --expect s3=N.  Uses $t9.  Every program starts with HW_INIT.
+# The MMIO literals below are checked against the vendored mmio_intr_cop0.h by make check-vendor.
 .equiv IO,       0x8000          # lui base of the MMIO window (0x80000000)
 .equiv TX_READY, 0x00
 .equiv RX_VALID, 0x04

@@ -40,6 +40,24 @@ The `Makefile` finds Unicorn and raylib through pkg-config:
 - The default program comes from the cs150 software tree, so build GIOS first (`make` in `software/gios`), then
   `software/proj_app7` and `software/bench`.
 - Big-endian is the default CPU mode. Pick one at run time with `--little` or `--big`.
+- **Vendored cs150 headers.** `vendor/cs150/software/` holds unmodified copies of `common/mmio_intr_cop0.h` (+ `.s.inc`),
+  `proj_app7/shared7.h` (+ `.s.inc`) and `common/types.h`; `vendor/cs150/PROVENANCE` records the cs150 commit, whether
+  the source was dirty, and each file's sha256. vvizard builds against these copies only, so a standalone clone builds
+  anywhere. Every `make` also:
+  - compiles `src/cs150_host/cs150_check.c` (not linked): `_Static_assert`s that the `VV_*` constants in `src/memmap.h`,
+    `src/hw.h`, `src/shmem.h` and the proj7 `struct SM_DATA` offsets match the vendored headers, so drift fails the
+    build; `src/cs150_host/types_check.c` compiles the vendored `types.h` on its own;
+  - runs `vendor-cmp` (`scripts/vendor-cmp.sh`): when the cs150 tree is visible at `CS150_SW` (default
+    `../../software`, i.e. the normal `cs150/extern/vvizard` layout) it byte-compares the five files with the
+    originals and prints one line when they match, or a **bordered warning banner on stderr** listing each differing
+    or missing file and the commands below. No cs150 tree: one line, nothing else.
+  - `VENDOR_CHECK=warn` (default: warn and keep building), `fail` (a difference stops `make` and `make test`), `off`.
+  - `make check-vendor` (first step of `make test`, `scripts/check_vendor.py`): the unified diff (with a note whether
+    cs150 HEAD or only its working tree differs), the PROVENANCE checksums, the `.h` vs `.s.inc` values (the known,
+    intentional `shared7.s.inc` stamp difference in `vendor/cs150/known-drift` is reported, not counted), and the
+    `tests/hw/hw.inc` MMIO literals.
+  - `make vendor-update` recopies the five files from `CS150_SW` and rewrites `PROVENANCE` (refuses if one is
+    missing); then run `make test`, fix any `VV_*` the build complains about, and commit `vendor/`.
 - A Unicorn in `~/.local` takes priority automatically (PKG_CONFIG_PATH and rpath are set in the Makefile, and
   the `make run*` targets also set `LD_LIBRARY_PATH`).
 
@@ -392,7 +410,9 @@ busy / ready, UART bytes, MMIO writes, MMIO reads whose value changed) with its 
 traces, guest-state stderr and frame dumps byte for byte.
 
 ## Tests
-`make test` runs `check-hex`, `test-hex`, `test-hw`, `test-quirks`, `test-player`, `test-sm` (all with `--sync`) and
+`make test` runs `check-vendor` and `test-vendor` (`tests/test_vendor.py`, hermetic: the vendor checks against
+throwaway cs150 trees, the `vendor-cmp` banner and `VENDOR_CHECK` modes, and drifted headers breaking the compile-time
+checks; see Build), then `check-hex`, `test-hex`, `test-hw`, `test-quirks`, `test-player`, `test-sm` (all with `--sync`) and
 `test-threads` (`tests/test_threads.py`: the threaded GPU model, determinism of threaded runs, the player with
 `--threads=on`). `make test-hex` runs `tests/test_hex.py`
 (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-hw` runs `tests/test_hw.py`:
@@ -454,7 +474,7 @@ underneath:
 ## Shared memory (proj7 `SM_DATA`) and `--dump-sm`
 proj6 and proj7 keep app/ISR state in a `struct SM_DATA` at `SM_BASE_ADDR` = 0x50000000 (D-scratch). vvizard reads it
 (never writes it) for the status strip and `--dump-sm`, with both layouts in `src/shmem.h`:
-| | proj7 (`software/proj_app7/shared7.h`) | proj6 (`shared6.h`) |
+| | proj7 (`shared7.h`, vendored: `vendor/cs150/software/proj_app7/shared7.h`) | proj6 (`shared6.h`, offsets copied by hand) |
 |---|---|---|
 | stamp | `magic1` 0x00 = 0xFEDBEEF3, `majorvers` 0x04 = 7, `magic2` 0x13C = 0xFEDBEEF3 | `magic` 0x00 = 0xFEDBEEF2 |
 | fields | stash0-3 0x08-0x14, state/flags u16 0x18/0x1A, RTC_count 0x1C, seconds 0x20, clock 0x24, player_y/x i16 0x28/0x2A, max/num_opponents u16 0x2C/0x2E, buff_size/head/tail 0x30/0x34/0x38, buff_data[256] 0x3C | stash0-3 0x04-0x10, state/flags 0x14/0x16, RTC_count 0x18, seconds 0x1C, clock 0x20, player_y/x 0x24/0x26, buff_size/head/tail 0x28/0x2C/0x30, buff_data 0x34 |
@@ -465,6 +485,9 @@ proj7 layout; otherwise 0xFEDBEEF2 is proj6. So a proj7 structure stamped with p
 the stamp is reported: today `shared7.s.inc` deliberately still says `K_MAGIC_VERSION` 0xFEDBEEF2 / `K_MAJOR_VERSION` 6
 (the C side, shared7.h, says 0xFEDBEEF3 / 7), so isr7.s `DO_INIT_VERSION` (jump-table slot 0 at 0xC0000000) stamps
 0xFEDBEEF2 / 6. proj7 itself stamps through `SM_INIT7` (C), so a normal run shows 0xFEDBEEF3 / 7.
+The stale `shared7.s.inc` pair is recorded in `vendor/cs150/known-drift`, so `make check-vendor` reports it without
+failing. vvizard reads guest memory with explicit big-endian loads at the `VV_SM7_*` offsets (checked against the
+vendored header at compile time); it never overlays `struct SM_DATA` on the D-scratch buffer.
 `--dump-sm` prints the decoded structure at exit (`[sm] ...` lines on stderr); consistency problems (stamp vs shared7.h,
 `magic2` != `magic1`, `buff_size` != 256, head/tail out of range) are printed as `[sm] WARNING ...` at exit even without
 it, and shown as `STAMP?` in the strip. vvizard never changes the run because of them.

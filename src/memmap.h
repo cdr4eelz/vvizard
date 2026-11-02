@@ -3,6 +3,8 @@
  * hardware/src/cpu/StageMW.v (fetch/read/write table), hardware/src/cpu/MemMapIO.v,
  * software/common/mmio_intr_cop0.h, software/proj_app7/shared7.h (shared6.h too: src/shmem.h),
  * software/common/graphics.h.
+ * The VV_OW_* / VV_MMIO_BASE / VV_SM_BASE_ADDR values are checked against the vendored
+ * vendor/cs150/software/common/mmio_intr_cop0.h at compile time (src/cs150_host/cs150_check.c).
  *
  * Decode model: hardware only looks at ADDR[31:28] (the "nibble") to pick a device and
  * then only the low address bits that device has.  Everything inside a nibble ALIASES:

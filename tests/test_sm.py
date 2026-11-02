@@ -20,7 +20,17 @@ SW = os.path.abspath(os.path.join(ROOT, "..", "..", "software"))
 ENV = dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib"))
 ENV.pop("VVIZARD_QUIRKS", None); ENV.pop("VVIZARD_EXIT_ON_HALT", None)
 BASE = ["--sync", "--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-halt-on-quirk", "--color=never"]
-H7 = (0xFEDBEEF3, 7)        # shared7.h K_MAGIC_VERSION / K_MAJOR_VERSION (vvizard's src/shmem.h)
+
+
+def h7_stamp():
+    """K_MAGIC_VERSION / K_MAJOR_VERSION from vvizard's vendored shared7.h (= src/shmem.h VV_SM7_*, checked at
+    compile time by src/cs150_host/cs150_check.c)."""
+    t = open(os.path.join(ROOT, "vendor", "cs150", "software", "proj_app7", "shared7.h")).read()
+    g = lambda k: int(re.search(rf"^#define\s+{k}\s+\(?(\w+?)u?\)?\s*$", t, re.M).group(1), 0)
+    return g("K_MAGIC_VERSION"), g("K_MAJOR_VERSION")
+
+
+H7 = h7_stamp()             # (0xFEDBEEF3, 7) today
 
 
 def run(args, script=None):

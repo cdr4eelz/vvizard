@@ -450,4 +450,12 @@ fault/dormant stay 0 (video always active here); `--exit-on-halt` stays off by d
 Seen in the cs150 working tree, not touched: isr7.s `_uarx_inc_opponents` (uncommitted) computes `slt $k0,...` then
 `addiu $k0,$k0,1` in the delay slot and stores that, so `+` sets num_opponents to 2 rather than incrementing; the tests
 avoid `+`/`-`.
-Follow-up (planned, not implemented): vendored copies of mmio_intr_cop0.h / shared7.h checked against the originals, `docs/VENDORED-HEADERS-PLAN.md`.
+
+## Vendored cs150 headers (Nov 1 2026)
+`docs/VENDORED-HEADERS-PLAN.md`, implemented. Snapshot taken from the UBU24 cs150 working tree at 54924f8
+(2026-11-01 21:16 PST, "GIOS detect new HALT(HALTVAL) feature", which changed mmio_intr_cop0.h); the five vendored
+files were clean at that commit (`source_dirty: no`), the rest of the tree was not (isr7.s, proj7.c uncommitted:
+`source_tree_dirty: yes (2 paths)`). Files: software/common/{types.h, mmio_intr_cop0.h, mmio_intr_cop0.s.inc},
+software/proj_app7/{shared7.h, shared7.s.inc}; sha256s in vendor/cs150/PROVENANCE. shared6.h is still copied by hand
+into src/shmem.h (VV_SM6_*, not checked). A mismatch with the originals prints the vendor-cmp banner on every `make`
+(it is not a stamp: it keeps showing until fixed) but does not stop the build unless VENDOR_CHECK=fail.

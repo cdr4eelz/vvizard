@@ -9,7 +9,10 @@
  * 0xFEDBEEF3 or higher, or when magic2 (proj7 offset 0x13C) equals magic1; otherwise 0xFEDBEEF2 is
  * the proj6 layout.  So a proj7-layout structure stamped with the proj6 constants (as isr7.s
  * DO_INIT_VERSION does while shared7.s.inc still says 0xFEDBEEF2 / 6) still decodes as proj7, and the
- * stamp mismatch is reported instead of mis-reading every field. */
+ * stamp mismatch is reported instead of mis-reading every field.
+ * VV_SM7_* (and the flags) are checked against the vendored vendor/cs150/software/proj_app7/shared7.h at
+ * compile time (src/cs150_host/cs150_check.c); VV_SM6_* are not (shared6.h is not vendored).  Guest memory is
+ * big-endian: read through the vv_sm_reader callback, never by overlaying struct SM_DATA. */
 #ifndef VV_SHMEM_H
 #define VV_SHMEM_H
 #include <stdint.h>
