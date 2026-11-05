@@ -130,6 +130,21 @@ localparam [5:0]            //   DATA-ENCODING/DESC
         : "t0","t1", "memory"                   \
     )
 
+// Unsure of the caveats of manipulating interrupt Cause directly
+#define ISR_CAUSE(KEEP, SET)                    \
+    __asm__ __volatile__ (                      \
+        "li     $t0,%0"                 "\n\t"  \
+        "mfc0   $t1," COP0_Cause        "\n\t"  \
+        "and    $t1,$t1,$t0"            "\n\t"  \
+        "li     $t0,%1"                 "\n\t"  \
+        "or     $t1,$t1,$t0"            "\n\t"  \
+        "mtc0   $t1," COP0_Cause        "\n\t"  \
+        :                                       \
+        : "i" (KEEP), "i" (SET)                 \
+        : "t0","t1", "memory"                   \
+    )
+
+
 // ISR_COMPARE implicitly resets "Count"
 #define ISR_COMPARE(COMPARE)                    \
     __asm__ __volatile__ (                      \
@@ -148,7 +163,7 @@ localparam [5:0]            //   DATA-ENCODING/DESC
     __asm__ __volatile__ (                      \
         "mtc0   $zero," COP0_Status     "\n\t"  \
         "li     $t0,%0"                 "\n\t"  \
-        "li     $t1,%1"                 "\n\t"  \
+        "la     $t1,%1"                 "\n\t"  \
         "sw     $t0,0($t1)"             "\n\t"  \
         "la     $t0,0x40000000"         "\n\t"  \
         "jr     $t0"                    "\n\t"  \
@@ -162,6 +177,7 @@ localparam [5:0]            //   DATA-ENCODING/DESC
 
 
 // Define helpers for the simpler types of MMIO locations
+//TODO: Declare these in direct C style or __asm__ snippets
 #define CYCLE_COUNTER       (*((volatile uint32_t*)MM_CNT_CYCLE))
 #define INSTRUCTION_COUNTER (*((volatile uint32_t*)MM_CNT_INST))
 #define COUNTER_RST         (*((volatile uint32_t*)MM_CNT_RESET))

@@ -12,6 +12,8 @@
 ## Shared memory constants:
 .equiv  K_MAJOR_VERSION,    6
 .equiv  K_MAGIC_VERSION,    0xFEDBEEF2
+.equiv  K_SHBUF_SIZEB,      0x0100
+.equiv  K_SHBUF_ROLLOVERB,  0x00FF
 
 ## Shared memory base and field offsets (for IMM(RS) addressing from base):
 .equiv  SM_BASE,            0x50000000
@@ -28,15 +30,12 @@
 .equiv  SMO_clock,          0x0024
 .equiv  SMO_player_y,         0x0028    # Signed 16-bit (use "lh" & "sh")
 .equiv  SMO_player_x,         0x002A    # Signed 16-bit
-.equiv  SMO_max_opponents,    0x002C    # Unsigned 16-bit
-.equiv  SMO_num_opponents,    0x002E    # Unsigned 16-bit
+.equiv  SMO_max_bouncers,     0x002C    # Unsigned 16-bit
+.equiv  SMO_num_bouncers,     0x002E    # Unsigned 16-bit
 .equiv  SMO_buff_size,      0x0030
 .equiv  SMO_buff_head,      0x0034
 .equiv  SMO_buff_tail,      0x0038
 .equiv  SMO_buff_data,      0x003C
-# ^^^ Details of above buffer (variable sized tail of shared memory) ^^^
-.equiv  K_SHBUF_SIZEB,          0x0100
-.equiv  K_SHBUF_ROLLOVERB,      0x00FF
 .equiv  SMO_buff_last_byte, SMO_buff_data + K_SHBUF_ROLLOVERB
 .equiv  SMO_magic2,         SMO_buff_data + K_SHBUF_SIZEB
 .equiv  SMO_PAST_END,       SMO_magic2 + 4
@@ -55,8 +54,8 @@
 .equiv  SMA_clock,          SM_BASE + SMO_clock
 .equiv  SMA_player_y,         SM_BASE + SMO_player_y
 .equiv  SMA_player_x,         SM_BASE + SMO_player_x
-.equiv  SMA_max_opponents,    SM_BASE + SMO_max_opponents
-.equiv  SMA_num_opponents,    SM_BASE + SMO_num_opponents
+.equiv  SMA_max_bouncers,     SM_BASE + SMO_max_bouncers
+.equiv  SMA_num_bouncers,     SM_BASE + SMO_num_bouncers
 .equiv  SMA_buff_size,      SM_BASE + SMO_buff_size
 .equiv  SMA_buff_head,      SM_BASE + SMO_buff_head
 .equiv  SMA_buff_tail,      SM_BASE + SMO_buff_tail

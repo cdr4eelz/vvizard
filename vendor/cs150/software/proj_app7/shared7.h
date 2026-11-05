@@ -23,13 +23,15 @@
 //#define DBG_UWAIT_MAX (0x0Fu)
 
 // Basic constants:
-#define K_CPU_HZ           (50000000u)
-#define K_TIMER_HZ         (1u)
-#define K_TIMER_CYC        (K_TIMER_HZ * K_CPU_HZ)
+#define K_CPU_HZ            (50000000u)
+#define K_TIMER_HZ          (1u)
+#define K_TIMER_CYC         (K_TIMER_HZ * K_CPU_HZ)
 
 // Shared memory constants:
-#define K_MAJOR_VERSION    7
-#define K_MAGIC_VERSION    (0xFEDBEEF3u)
+#define K_MAJOR_VERSION     7
+#define K_MAGIC_VERSION     (0xFEDBEEF3u)
+#define K_SHBUF_SIZEB       (0x0100u)
+#define K_SHBUF_ROLLOVERB   (K_SHBUF_SIZEB - 1)
 
 // Shared memory BASE and field offsets (for manual pointer arithmetic):
 #define SM_BASE_ADDR      (0x50000000u)
@@ -46,15 +48,12 @@
 #define SMO_clock           (0x0024u)
 #define SMO_player_y          (0x0028u)
 #define SMO_player_x          (0x002Au)
-#define SMO_max_opponents     (0x002Cu)
-#define SMO_num_opponents     (0x002Eu)
+#define SMO_max_bouncers      (0x002Cu)
+#define SMO_num_bouncers      (0x002Eu)
 #define SMO_buff_size       (0x0030u)
 #define SMO_buff_head       (0x0034u)
 #define SMO_buff_tail       (0x0038u)
 #define SMO_buff_data       (0x003Cu)
-// ^^^ Details of above buffer (at end of shared memory) ^^^
-#define K_SHBUF_SIZEB           (0x0100u)
-#define K_SHBUF_ROLLOVERB       (K_SHBUF_SIZEB - 1)
 #define SMO_buff_last_byte  (SMO_buff_data + K_SHBUF_ROLLOVERB)
 #define SMO_magic2          (SMO_buff_data + K_SHBUF_SIZEB)
 #define SMO_PAST_END        (SMO_magic2 + 4)
@@ -73,8 +72,8 @@ struct SM_DATA {
     volatile uint32_t clock;
     volatile int16_t    player_y;
     volatile int16_t    player_x;
-    volatile uint16_t   max_opponents;
-    volatile uint16_t   num_opponents;
+    volatile uint16_t   max_bouncers;
+    volatile uint16_t   num_bouncers;
     volatile uint32_t buff_size;            // K_SHBUF_SIZEB
     volatile uint32_t buff_head;
     volatile uint32_t buff_tail;
@@ -96,16 +95,18 @@ struct SM_DATA {
 #define SMI_flags_quit      ((uint16_t)(~SMM_flags_quit))
 
 
+//TODO: Define in traditional C style or __asm__ snippet?
 #define SM_BASE ((struct SM_DATA *)SM_BASE_ADDR)
 
 void SM_INIT7(struct SM_DATA *sm);
 
 void uwrite_int8s_ISR(int8_t* src);
 void uwait_ISR(void);
-void uwrite_clock_ISR(uint32_t clk_bcd);
+
+void uwrite_clock_ISR(uint32_t clk_bcd, int8_t* buf); // Caller ensures >= 6 bytes
 
 // This buffer is used to hold strings for output to UART (uwrite et.al.)
-#define TBUF_SIZE (256)
-extern int8_t tbuff[TBUF_SIZE]; // Can be confusing as to where this gets located
+#define K_TBUF_SIZE (256)
+extern int8_t gTBUF[K_TBUF_SIZE]; // Can be confusing as to where this gets located
 
 #endif // PROJ_SHARED7_H_
