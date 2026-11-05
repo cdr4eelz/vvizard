@@ -35,8 +35,8 @@
 #define VV_SM7_clock         0x0024u
 #define VV_SM7_player_y      0x0028u   /* i16 */
 #define VV_SM7_player_x      0x002Au   /* i16 */
-#define VV_SM7_max_opponents 0x002Cu   /* u16 */
-#define VV_SM7_num_opponents 0x002Eu   /* u16 */
+#define VV_SM7_max_bouncers 0x002Cu   /* u16 */
+#define VV_SM7_num_bouncers 0x002Eu   /* u16 */
 #define VV_SM7_buff_size     0x0030u
 #define VV_SM7_buff_head     0x0034u
 #define VV_SM7_buff_tail     0x0038u
@@ -69,7 +69,7 @@ typedef struct {
     uint16_t state, flags;
     uint32_t rtc_count, seconds, clock;   /* clock: BCD mm:ss in the low 16 bits */
     int16_t  player_y, player_x;
-    uint16_t max_opponents, num_opponents;  /* proj7 only */
+    uint16_t max_bouncers, num_bouncers;  /* proj7 only */
     uint32_t buff_size, buff_head, buff_tail;
     int      nwarn;
     char     warn[4][224];         /* consistency problems (stamp, magic2, buffer) */
@@ -79,7 +79,7 @@ typedef struct {
 typedef uint32_t (*vv_sm_reader)(void *ctx, uint32_t addr, unsigned n);
 /* Decode the structure at base; returns s->layout. */
 int  vv_sm_read(vv_sm_reader rd, void *ctx, uint32_t base, vv_sm *s);
-/* Short form for the status strip, e.g. "proj7 graphics running  clock 01:23  player 400,300  opp 0/127". */
+/* Short form for the status strip, e.g. "proj7 graphics running  clock 01:23  player 400,300  bncrs 0/127". */
 void vv_sm_status(const vv_sm *s, uint32_t base, char *out, size_t n);
 /* Multi-line report to stderr ("[sm] ..."), for --dump-sm. */
 void vv_sm_dump(const vv_sm *s, uint32_t base);

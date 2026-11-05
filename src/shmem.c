@@ -29,8 +29,8 @@ int vv_sm_read(vv_sm_reader rd, void *ctx, uint32_t base, vv_sm *s) {
         s->clock = rd(ctx, base + VV_SM7_clock, 4);
         s->player_y = (int16_t)rd(ctx, base + VV_SM7_player_y, 2);
         s->player_x = (int16_t)rd(ctx, base + VV_SM7_player_x, 2);
-        s->max_opponents = (uint16_t)rd(ctx, base + VV_SM7_max_opponents, 2);
-        s->num_opponents = (uint16_t)rd(ctx, base + VV_SM7_num_opponents, 2);
+        s->max_bouncers = (uint16_t)rd(ctx, base + VV_SM7_max_bouncers, 2);
+        s->num_bouncers = (uint16_t)rd(ctx, base + VV_SM7_num_bouncers, 2);
         s->buff_size = rd(ctx, base + VV_SM7_buff_size, 4);
         s->buff_head = rd(ctx, base + VV_SM7_buff_head, 4);
         s->buff_tail = rd(ctx, base + VV_SM7_buff_tail, 4);
@@ -74,7 +74,7 @@ void vv_sm_status(const vv_sm *s, uint32_t base, char *out, size_t n) {
                      s->flags & VV_SM_FLAG_PAUSE ? "PAUSED" : "running", c >> 12 & 15, c >> 8 & 15, c >> 4 & 15, c & 15,
                      s->flags & VV_SM_FLAG_NOTIMER ? " (uart off)" : "", s->player_x, s->player_y);
     if (k > 0 && (size_t)k < n && s->layout == 7)
-        k += snprintf(out + k, n - k, "  opp %u/%u%s", s->num_opponents, s->max_opponents, s->flags & VV_SM_FLAG_QUIT ? "  QUIT" : "");
+        k += snprintf(out + k, n - k, "  bncrs %u/%u%s", s->num_bouncers, s->max_bouncers, s->flags & VV_SM_FLAG_QUIT ? "  QUIT" : "");
     if (k > 0 && (size_t)k < n && s->nwarn)
         snprintf(out + k, n - k, "  STAMP?");
 }
@@ -101,7 +101,7 @@ void vv_sm_dump(const vv_sm *s, uint32_t base) {
     vv_eprintf("[sm]   RTC_count %u  seconds %u  clock 0x%04x (%X%X:%X%X)\n", s->rtc_count, s->seconds, c & 0xFFFFu,
                c >> 12 & 15, c >> 8 & 15, c >> 4 & 15, c & 15);
     if (s->layout == 7)
-        vv_eprintf("[sm]   player x %d y %d  opponents %u/%u\n", s->player_x, s->player_y, s->num_opponents, s->max_opponents);
+        vv_eprintf("[sm]   player x %d y %d  bouncers %u/%u\n", s->player_x, s->player_y, s->num_bouncers, s->max_bouncers);
     else
         vv_eprintf("[sm]   player x %d y %d\n", s->player_x, s->player_y);
     vv_eprintf("[sm]   buff size %u head %u tail %u\n", s->buff_size, s->buff_head, s->buff_tail);
