@@ -67,7 +67,7 @@ def t_magic2():
     q = hwprog("sm_magic2")                      # warnings also without --dump-sm, only those
     s = "\n".join(sm_lines(r))
     return r.returncode == 0 and "[sm] proj7 shared memory" in s and "magic1 0xfedbeef3  majorvers 7  magic2 0x00000000" in s \
-        and "player x 12 y 34  opponents 5/9" in s and re.search(r"WARNING .*magic2 \(\+0x13c\) 0x00000000 != magic1", s) \
+        and "player x 12 y 34  bouncers 5/9" in s and re.search(r"WARNING .*magic2 \(\+0x13c\) 0x00000000 != magic1", s) \
         and "stamp" not in s and q.returncode == 0 and [l for l in sm_lines(q)] == [l for l in sm_lines(r) if "WARNING" in l]
 def t_none():
     r = hwprog("uart_tx", "--dump-sm")
@@ -106,7 +106,7 @@ def t_player_sm():          # d: notimer, i x2: player_y 300 -> 288, space: paus
     s = "\n".join(sm_lines(r))
     return r.returncode == 0 and "[sm] proj7 shared memory at 0x50000000 (shared7.h layout, 0x140 bytes)" in s \
         and f"magic1 0x{H7[0]:08x}  majorvers {H7[1]}  magic2 0x{H7[0]:08x}" in s \
-        and "flags 0x0003 (pause 1 notimer 1 quit 0)" in s and "player x 400 y 288  opponents 0/127" in s \
+        and "flags 0x0003 (pause 1 notimer 1 quit 0)" in s and "player x 400 y 288  bouncers 1/127" in s \
         and "buff size 256" in s and "WARNING" not in r.err
 def gios_prints_haltval():
     return b"HALTVAL: " in open(os.path.join(SW, "gios", "gios.inst.bin"), "rb").read() + \
