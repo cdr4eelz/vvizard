@@ -22,6 +22,7 @@
 #include "display.h"
 #include "gpu.h"
 #include "quirk.h"
+#include "cpu/fast.h"
 #include "prng.h"
 #include "lcd.h"
 #include "shmem.h"
@@ -373,6 +374,7 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
 /* --threads (docs/MULTITHREADING-PLAN.md): with a window, uc_emu_start runs on an emulator thread
  * and the main thread draws (display.c); --sync / --threads=1 keeps everything on one thread. */
 static int opt_threads = 1;
+static int opt_cpu = VV_CPU_UNICORN;  /* --cpu=unicorn|fast */
 static uc_err emu_err;
 static uint32_t emu_entry; static uint64_t emu_until;
 static void *emu_thread(void *a) {
@@ -625,6 +627,8 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --little / --big   CPU endianness (default %s)\n"
 "\n"
 "Run control (defaults: unlimited, interrupts on, random DDR, window with keys):\n"
+"  --cpu=unicorn|fast  CPU backend (default unicorn).  fast = predecoded basic-block\n"
+"                     interpreter (L0); Unicorn stays default until a measured win\n"
 "  --max-insns N      stop after N instructions (default 0 = unlimited)\n"
 "  --until ADDR       stop when PC reaches ADDR\n"
 "  --max-seconds S    stop after S seconds of wall time (checked every 4096 instructions)\n"
@@ -729,7 +733,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_DUMP_SM, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -757,7 +761,7 @@ int main(int argc, char **argv) {
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
-        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
+        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
@@ -823,6 +827,10 @@ int main(int argc, char **argv) {
             else if (is_uint(optarg) && strtoul(optarg, 0, 0) >= 1) opt_threads = strtoul(optarg, 0, 0) > 1;
             else { vv_eprintf("--threads: expected on, off or a count (1 = off), not '%s'\n", optarg); return 2; } break;
         case O_SYNC: opt_threads = 0; break;
+        case O_CPU:
+            if (!strcmp(optarg, "unicorn")) opt_cpu = VV_CPU_UNICORN;
+            else if (!strcmp(optarg, "fast")) opt_cpu = VV_CPU_FAST;
+            else { vv_eprintf("--cpu: expected unicorn or fast, not '%s'\n", optarg); return 2; } break;
         case O_EVENT_TRACE:
             if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
             setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
@@ -905,10 +913,12 @@ int main(int argc, char **argv) {
     }
     uc_hook h;
     uc_hook_add(uc, &h, UC_HOOK_TLB_FILL, tlb_fill, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_CODE, hook_code, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_INTR, hook_intr, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, hook_bios_write, NULL, 0x40000000ull, 0x4FFFFFFFull);
+    if (opt_cpu == VV_CPU_UNICORN) {
+        uc_hook_add(uc, &h, UC_HOOK_CODE, hook_code, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_INTR, hook_intr, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, hook_bios_write, NULL, 0x40000000ull, 0x4FFFFFFFull);
+    }
 
     for (int i = optind; i < argc; i++) {
         uint32_t e; if (vv_load_elf(uc, argv[i], &e, big)) return 1;
@@ -948,7 +958,8 @@ int main(int argc, char **argv) {
     vv_disp_init(want_window);
     /* wall frame clock: the ~60/s frame ends redraw; the vv_disp_tick timer is only a fallback */
     if (vv_frame_clock == VV_FRAME_CLOCK_WALL && vv_pf_period && !vv_legacy_io) vv_disp_redraw_period = 0.1;
-    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n", big ? "big" : "little",
+    vv_eprintf("[run] cpu=%s %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n",
+            opt_cpu == VV_CPU_FAST ? "fast" : "unicorn", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
             vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
             !opt_threads ? "off (--sync)" : vv_legacy_io ? (vv_disp_has_window() ? "on (emulator + display; GPU synchronous: --legacy-io)" : "on (no window, --legacy-io: one thread)")
@@ -963,14 +974,48 @@ int main(int argc, char **argv) {
     }
     pthread_t emu_tid; pthread_attr_t ta;
     int threaded_disp = opt_threads && vv_disp_has_window();
-    if (threaded_disp) {                       /* emulator thread; raylib stays on this one */
+    if (threaded_disp && opt_cpu == VV_CPU_UNICORN) {                       /* emulator thread; raylib stays on this one */
         pthread_attr_init(&ta);
         pthread_attr_setstacksize(&ta, 64u << 20);   /* (macOS secondary threads default to 512 KiB) */
         vv_disp_threaded = 1;
         if (pthread_create(&emu_tid, &ta, emu_thread, uc)) { vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n"); vv_disp_threaded = threaded_disp = 0; }
         pthread_attr_destroy(&ta);
+    } else if (threaded_disp && opt_cpu == VV_CPU_FAST) {
+        threaded_disp = 0; /* fast path runs on this thread for now */
     }
-    if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
+    if (opt_cpu == VV_CPU_FAST) {
+        if (threaded_disp) {
+            vv_eprintf("[run] --cpu=fast with threaded display not supported yet; using --sync path\n");
+            vv_disp_threaded = threaded_disp = 0;
+            /* emu thread was not started */
+        }
+        vv_fast_cpu fcpu;
+        vv_fast_env fenv = {0};
+        fenv.uc = uc;
+        fenv.insn_count = &insn_count;
+        fenv.hook_calls = &hook_calls;
+        fenv.max_insns = max_insns;
+        fenv.stopped_max = &stopped_max;
+        fenv.stop_req = &stop_req;
+        fenv.stopped_wall = &stopped_wall;
+        fenv.max_wall_ns = max_wall_ns;
+        fenv.run_t0 = run_t0;
+        fenv.have_until = have_stop;
+        fenv.until_addr = stop_addr;
+        fenv.opt_irq = opt_irq;
+        fenv.opt_trace = opt_trace;
+        fenv.trace_left = &trace_left;
+        fenv.guest_big = guest_big;
+        fenv.mmio_read = mmio_read;
+        fenv.mmio_write = mmio_write;
+        fenv.note_ddr_exec = note_ddr_exec;
+        fenv.run_due_events = run_due_events;
+        fenv.nevents = nevents;
+        int frc = vv_fast_run(&fenv, &fcpu, entry);
+        vv_fast_sync_to_uc(uc, &fcpu);
+        if (fcpu.stop_break) stop_reason_intr = 18;
+        err = frc ? UC_ERR_EXCEPTION : UC_ERR_OK;
+    } else if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
     else err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
     vv_gpu_worker_stop();                      /* finish a draw in flight; one thread from here on */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */

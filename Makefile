@@ -14,10 +14,14 @@ CPPFLAGS   ?= -I$(SRC_DIR)
 # Host (vvizard) build: optimized by default; make DEBUG=1 builds the old unoptimized debug flavour.
 # (The MIPS test programs use T_ASOPTS below, unaffected.)  Objects rebuild when the flags change.
 DEBUG      ?= 0
+PROFILE    ?= 0
 ifeq ($(DEBUG),1)
 OPTFLAGS   ?= -O0 -g3 -fno-omit-frame-pointer
 else
 OPTFLAGS   ?= -O3 -g
+endif
+ifeq ($(PROFILE),1)
+OPTFLAGS   += -fno-omit-frame-pointer -DVV_PROFILE
 endif
 CFLAGS     ?= -std=gnu99 -Wall -Wextra $(OPTFLAGS)
 # pthreads (docs/MULTITHREADING-PLAN.md): always linked; --sync / --threads=1 just starts none.
@@ -31,8 +35,8 @@ UNICORN_LIBS   := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config --libs
 RAYLIB_CFLAGS  := $(shell pkg-config --cflags raylib)
 RAYLIB_LIBS    := $(shell pkg-config --libs raylib)
 
-SRCS := $(wildcard $(SRC_DIR)/*.c)
-HDRS := $(wildcard $(SRC_DIR)/*.h)
+SRCS := $(wildcard $(SRC_DIR)/*.c) $(wildcard $(SRC_DIR)/cpu/*.c)
+HDRS := $(wildcard $(SRC_DIR)/*.h) $(wildcard $(SRC_DIR)/cpu/*.h)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 # Run settings are vvizard's own command-line arguments (./vvizard --help); with no arguments it
@@ -155,6 +159,7 @@ $(TARGET): $(OBJS) $(FLAGS_STAMP) $(CHECK_OBJS) | vendor-cmp
 	$(CC) $(CFLAGS) $(THREAD_FLAGS) $(LDFLAGS) $(OBJS) -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
 
 $(BUILD_DIR):
