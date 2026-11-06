@@ -17,6 +17,8 @@
 #include "memmap.h"
 #include "hw.h"
 #include "dcache.h"
+#include "cpu/mips_decode.h"
+#include "profile.h"
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -111,6 +113,7 @@ int vv_quirk_list_ok(const char *list) { uint32_t m; return list && *list && !pa
 /* ---------------- tiny MIPS disassembler (for the diagnostic only) ---------------- */
 static const char *R[32] = {"zero","at","v0","v1","a0","a1","a2","a3","t0","t1","t2","t3","t4","t5","t6","t7",
     "s0","s1","s2","s3","s4","s5","s6","s7","t8","t9","k0","k1","gp","sp","fp","ra"};
+const char *vv_gpr_name(unsigned r) { return r < 32 ? R[r] : "?"; }
 static void disasm(uint32_t pc, uint32_t i, char *o, size_t n) {
     unsigned op = i >> 26, rs = (i >> 21) & 31, rt = (i >> 16) & 31, rd = (i >> 11) & 31, sa = (i >> 6) & 31, fn = i & 63;
     int16_t imm = (int16_t)(i & 0xFFFF); uint32_t bt = pc + 4 + ((int32_t)imm << 2);
@@ -184,8 +187,9 @@ static void report(int cat, uint32_t pc, uint32_t insn, const char *detail) {
     uc_emu_stop(g_uc);
 }
 /* A quirk event: count it, report it if detected. Returns 1 if the run halted (caller returns). */
-static int ev(int cat, uint32_t pc, uint32_t insn, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
-static int ev(int cat, uint32_t pc, uint32_t insn, const char *fmt, ...) {
+#define ev vv_quirk_hit
+#define not_emulated vv_quirk_not_emulated
+int vv_quirk_hit(int cat, uint32_t pc, uint32_t insn, const char *fmt, ...) {
     qhits[cat]++;
     if (!((vv_quirk_detect >> cat) & 1) || vv_quirk_halted) return vv_quirk_halted;
     char detail[256]; va_list ap; va_start(ap, fmt); vsnprintf(detail, sizeof detail, fmt, ap); va_end(ap);
@@ -200,7 +204,7 @@ int vv_quirk_report(int cat, uint32_t pc, const char *fmt, ...) {
     return vv_quirk_halted;
 }
 /* An enabled quirk that vvizard cannot reproduce at this site: say so once per (quirk, pc). */
-static void not_emulated(int cat, uint32_t pc, uint32_t insn, const char *why) {
+void vv_quirk_not_emulated(int cat, uint32_t pc, uint32_t insn, const char *why) {
     qnoemu[cat]++;
     if (!seen_add(cat + 32, pc)) return;
     char d[64]; disasm(pc, insn, d, sizeof d);
@@ -226,49 +230,10 @@ static uint32_t fetch(uc_engine *uc, uint32_t a) {
     return vv_ram_be32(vv_canon_inl(a), &ok);
 }
 
-/* Registers read by insn i (bitmask of GPRs), for the load-use check. */
-static uint32_t reads(uint32_t i) {
-    unsigned op = i >> 26, rs = (i >> 21) & 31, rt = (i >> 16) & 31, fn = i & 63;
-    uint32_t S = 1u << rs, T = 1u << rt;
-    switch (op) {
-    case 0:
-        if (fn <= 3) return T;                       /* sll/srl/sra */
-        if (fn == 8 || fn == 9 || fn == 17 || fn == 19) return S;
-        if (fn == 12 || fn == 13 || fn == 16 || fn == 18) return 0;
-        return S | T;
-    case 1: case 6: case 7: return S;
-    case 2: case 3: case 15: return 0;
-    case 4: case 5: return S | T;
-    case 0x10: return rs == 4 ? T : 0;               /* mtc0 reads rt */
-    default:
-        if (op >= 8 && op <= 14) return S;
-        if (op == 0x22 || op == 0x26) return S | T;  /* lwl/lwr merge rt */
-        if (op >= 0x20 && op <= 0x27) return S;
-        if (op >= 0x28 && op <= 0x2F) return S | T;
-        return 0;
-    }
-}
-/* Registers written by insn i as Unicorn executes it (for the load-use restore). */
-static uint32_t writes(uint32_t i) {
-    unsigned op = i >> 26, rs = (i >> 21) & 31, rt = (i >> 16) & 31, rd = (i >> 11) & 31, fn = i & 63;
-    switch (op) {
-    case 0:
-        if (fn == 8 || fn == 12 || fn == 13 || fn == 17 || fn == 19 || (fn >= 24 && fn <= 27)) return 0;
-        return 1u << rd;
-    case 1: return (rt & 0x10) ? 1u << 31 : 0;
-    case 3: return 1u << 31;
-    case 0x10: return rs == 0 ? 1u << rt : 0;
-    default:
-        if ((op >= 8 && op <= 15) || (op >= 0x20 && op <= 0x27)) return 1u << rt;
-        return 0;
-    }
-}
-/* Control-transfer insn as Unicorn executes it (the next insn is its delay slot). */
-static int is_cti(uint32_t i) {
-    unsigned op = i >> 26, rt = (i >> 16) & 31, fn = i & 63;
-    return (op == 0 && (fn == 8 || fn == 9)) || (op == 1 && (rt & 0xC) == 0)
-        || (op >= 2 && op <= 7) || (op >= 20 && op <= 23);
-}
+#define reads vv_reads
+#define writes vv_writes
+#define is_cti vv_is_cti
+#define value_reads vv_value_reads
 
 /* ---------------- per-insn state ---------------- */
 static struct {
@@ -287,6 +252,7 @@ static struct { unsigned rt; uint32_t old, newv, pc; } L;   /* the previous insn
 static int prev_cti;
 static struct { int pend; uint32_t ds, target; } B;   /* emulated taken branch: after the delay slot at ds */
 static uint32_t q_last_pc = 0xFFFFFFFFu;   /* last instruction decoded by pre() */
+void vv_quirk_set_last_pc(uint32_t pc) { q_last_pc = pc; }
 
 static void p_rest(uc_engine *uc, unsigned r) { if (r && P.nrest < 4) { P.rr[P.nrest] = r; P.rv[P.nrest++] = gr(uc, r); P.active = 1; } }
 static void p_set(unsigned r, uint32_t v) { if (r && P.nset < 3) { P.qr[P.nset] = r; P.qv[P.nset++] = v; P.active = 1; } }
@@ -294,22 +260,14 @@ static void p_set(unsigned r, uint32_t v) { if (r && P.nset < 3) { P.qr[P.nset] 
 void vv_quirk_init(uc_engine *uc) { g_uc = uc; }
 
 /* undef-reg: GPRs written since reset (bit r).  $zero is always defined. */
-static uint32_t reg_defined = 1;
-void vv_quirk_reg_defined(unsigned r) { if (r < 32) reg_defined |= 1u << r; }
-/* Registers whose VALUE insn i uses (for undef-reg): reads() minus the data operand of a store
- * (saving a never-written register, e.g. a prologue spill or the ISR stash, is harmless) and minus
- * xor/sub/subu rd,rs,rs whose result does not depend on rs. */
-static uint32_t value_reads(uint32_t i) {
-    unsigned op = i >> 26, rs = (i >> 21) & 31, rt = (i >> 16) & 31, fn = i & 63;
-    if (op >= 0x28 && op <= 0x2E) return 1u << rs;
-    if (op == 0 && rs == rt && (fn == 34 || fn == 35 || fn == 38)) return 0;
-    return reads(i);
-}
+uint32_t vv_reg_defined = 1;
+void vv_quirk_reg_defined(unsigned r) { if (r < 32) vv_reg_defined |= 1u << r; }
 
 void vv_quirk_cancel(void) { L.rt = 0; prev_cti = 0; B.pend = 0; memset(&P, 0, sizeof P); }
 
 static void post_fix(uc_engine *uc);
 int vv_quirk_post(uc_engine *uc, uint32_t pc) {
+    VV_PROF_COUNT(VV_PS_QUIRK_POST);
     g_uc = uc;
     if (P.active) post_fix(uc);
     if (B.pend && pc != B.ds) {                      /* (the hook at ds itself runs the delay slot) */
@@ -372,6 +330,7 @@ static int known_special(unsigned fn) {
 }
 
 void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
+    VV_PROF_COUNT(VV_PS_QUIRK_PRE);
     g_uc = uc; q_last_pc = pc;
     if (vv_quirk_halted) return;
     uint32_t i = fetch(uc, pc);
@@ -381,14 +340,14 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
     memset(&P, 0, sizeof P); P.pc = pc; P.insn = i;
 
     /* undef-reg: reading a register no instruction has written since reset */
-    uint32_t und = value_reads(i) & ~reg_defined;
+    uint32_t und = value_reads(i) & ~vv_reg_defined;
     if (und) {
         unsigned r = (unsigned)__builtin_ctz(und);
-        reg_defined |= und;                              /* each register is reported once */
+        vv_reg_defined |= und;                           /* each register is reported once */
         if (ev(VV_Q_UNDEF_REG, pc, i, "reads $%s, never written since reset (HW: 0 after FPGA configuration, the old value after a reset button press)%s",
                R[r], und & ~(1u << r) ? " (and more)" : "")) return;
     }
-    reg_defined |= writes(i);
+    vv_reg_defined |= writes(i);
 
     /* load-use: this insn reads the rt of the load right before it */
     if (L.rt) {

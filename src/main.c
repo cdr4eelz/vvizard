@@ -27,6 +27,10 @@
 #include "shmem.h"
 #include "hw.h"
 #include "dcache.h"
+#include "profile.h"
+#include "cpu/backend.h"
+#include "cpu/service.h"
+#include "cpu/irq.h"
 
 /* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
  * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
@@ -79,12 +83,17 @@ uint32_t vv_canon(uint32_t a) { return vv_canon_inl(a); }
 
 /* ---------------- state ---------------- */
 static int opt_trace, opt_quiet_mmio, opt_trace_regs;
+static int opt_profile, opt_prof_bare, opt_prof_no_unmapped;
+int vv_rtl_cache = 1;
 /* --mmio-decode=ise: the cs150 ISE branch MemMapIO.v (proj7 era), which compares only addra[5:0]: the
  * registers repeat every 0x100 across the 16 KiB map and there is no LCD.  Default: lcd-text decode
  * (registers only at addra[11:6]==0, LCD at 0x100-0x17C). */
 static int opt_mmio_ise;
 static uint32_t prev_regs[32];
 static uint64_t insn_count, cnt_base_insn;
+#ifdef VV_FIDELITY_RTL
+static uint64_t cnt_base_cycle;          /* CNT_CYCLE base; distinct from the instruction counter */
+#endif
 static uint64_t max_insns;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
@@ -162,6 +171,15 @@ static void run_due_events(uc_engine *uc, int frame_kind) {
         if (e->when <= (frame_kind ? pf_writes : insn_count)) { run_event(uc, e); free(e->arg); e->arg = NULL; }
     }
 }
+/* Next instruction-count at which a script event is still waiting, or UINT64_MAX. */
+static uint64_t next_script_insn(void) {
+    uint64_t h = UINT64_MAX;
+    for (int i = 0; i < nevents; i++) {
+        if (!events[i].arg || events[i].is_frame) continue;
+        if (events[i].when > insn_count && events[i].when < h) h = events[i].when;
+    }
+    return h;
+}
 static int load_script(const char *path) {
     FILE *f = fopen(path, "r"); if (!f) { perror(path); return -1; }
     char line[1024]; int ln = 0;
@@ -183,84 +201,15 @@ static int load_script(const char *path) {
     fclose(f); (void)ev_next_f; (void)ev_next_i; return 0;
 }
 
-/* ---- Interrupt entry (COP0150 + CPUMIPS.v DO_ISR) ----
- * The Cause latch, Count/Compare and the device interrupt sources are in src/hw.c.  Unicorn 2.1.1
- * can't set Cause IP bits or expose Cause/EPC (NOTES.md), and its exception entry (MIPS vector, EXL)
- * differs from COP0150, so the entry is done here: when Status.IE and any Status.IM & Cause.IP bit
- * are set (and the deferral rules of CPUMIPS.v:114 allow it, below), EPC = pc, Status.IE = 0 and the PC
- * jumps to PC_ISR (0xC0000180); the insn at pc runs after the ISR returns.  With the cop0
- * quirk on (default) mfc0/mtc0 use the hw.c registers (quirk.c); with it off, Status is Unicorn's
- * and mfc0/mtc0 $13/$14 inside the ISR BRAM are patched to the hw.c Cause/EPC.  The ISR returns
- * with `jr $k0; mtc0 Status` (eret is a nop on the MIPS150).  Leaving the ISR (IE 0 -> 1) with the
- * entry's Cause bit still pending and enabled is the irq-storm guest bug. */
-static int fix_rt = -1; static uint32_t fix_val;
-#define NOPC 0xFFFFFFFFu
-static uint32_t last_pc = NOPC, last2_pc = NOPC, last3_pc = NOPC;   /* the last three insns run */
-static uint64_t irq_count;
-static uint32_t prev_status;
+/* Interrupt entry lives in src/cpu/irq.c (vv_irq_step) so Unicorn and --cpu=fast share it. */
 /* The word at a as the hardware fetches it: 0 for undecoded / MMIO (and no MMIO side effects). */
 static uint32_t read_insn(uc_engine *uc, uint32_t a) { (void)uc; int ok; return vv_ram_be32(vv_canon_inl(a), &ok); }
-static int is_mtc0(uint32_t i) { return (i >> 21) == 0x204; }   /* 010000 00100 (CPUMIPS.v:113) */
-static int is_branch(uint32_t i) {
-    unsigned op = i >> 26, fn = i & 0x3F;
-    return (op == 0 && (fn == 8 || fn == 9)) || op == 1 || (op >= 2 && op <= 7) || (op >= 20 && op <= 23);
-}
 void vv_mmio_side_read(uint32_t canon) {         /* a HW read of UARX_DATA pops the RX holding register */
     if ((canon & VV_MMIO_DECODE) == VV_OW_UARX_DATA) (void)vv_uart_rx_read();
 }
-static void irq_step(uc_engine *uc, uint32_t pc) {
-    int cop0 = vv_quirk_on(VV_Q_COP0);
-    if (fix_rt > 0) { uc_reg_write(uc, UC_MIPS_REG_0 + fix_rt, &fix_val); }
-    fix_rt = -1;
-    if (!cop0 && (pc >> 28) == 0xC) {                    /* COP0 shadowing only needed in the ISR BRAM */
-        uint32_t i = read_insn(uc, pc);
-        if ((i >> 26) == 0x10 && (i & 0x7FF) == 0) {
-            unsigned rs = (i >> 21) & 31, rt = (i >> 16) & 31, rd = (i >> 11) & 31;
-            uint32_t v;
-            if (rs == 0 && (rd == 13 || rd == 14)) {      /* mfc0 */
-                fix_rt = rt; fix_val = rd == 14 ? vv_hw_epc() : vv_hw_cause();
-            } else if (rs == 4 && (rd == 13 || rd == 14)) { /* mtc0 */
-                uc_reg_read(uc, UC_MIPS_REG_0 + rt, &v);
-                if (rd == 13) vv_cop0_write(13, v);       /* COP0150: IP bits 15:10 only clear */
-                else vv_hw_set_epc(v);
-            }
-        }
-    }
-    /* Fast path: no Cause IP bit latched and not inside an ISR.  Then no interrupt can be requested
-     * (vv_hw_irq_request needs Status & Cause & IP) and the IE-edge check below has nothing to do
-     * (vv_hw_isr_exit_check returns at once outside an ISR; prev_status is set again at ISR entry
-     * before it matters), so Status need not be read. */
-    if (!vv_hw_irq_possible()) {
-        if (vv_quirk_halted) return;
-        last3_pc = last2_pc; last2_pc = last_pc; last_pc = pc;
-        return;
-    }
-    uint32_t st;
-    if (cop0) st = vv_hw_status(); else uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
-    if ((st & 1) && !(prev_status & 1)) vv_hw_isr_exit_check(st, pc, "IE re-enabled");   /* irq-storm */
-    prev_status = st;
-    if (vv_quirk_halted) return;
-    /* CPUMIPS.v:114 DO_ISR replaces the fetch AFTER the instruction in F (X, the one that just ran here),
-     * so EPC = pc.  Not when X could branch, X is an mtc0, or X is a taken branch's target (WAS_Branch:
-     * the branch two instructions back was taken); WAS_ISR needs IE, which entry cleared. */
-    if (vv_hw_irq_request(st)) {
-        int defer = 0;
-        if (last_pc != NOPC) { uint32_t x = read_insn(uc, last_pc); defer = is_branch(x) || is_mtc0(x); }
-        if (!defer && last3_pc != NOPC && is_branch(read_insn(uc, last3_pc)) && last_pc != last3_pc + 8) defer = 1;
-        if (!defer) {
-            VV_EVT("irq-enter cause 0x%04x status 0x%08x", vv_hw_cause() & 0xFFFFu, st);
-            vv_hw_isr_enter(pc, st); st &= ~1u; prev_status = st;
-            if (!cop0) uc_reg_write(uc, UC_MIPS_REG_CP0_STATUS, &st);
-            uint32_t npc = VV_PC_ISR; irq_count++;
-            last_pc = last2_pc = last3_pc = NOPC;
-            uc_reg_write(uc, UC_MIPS_REG_PC, &npc);   /* insn at pc not executed yet; resumes at ISR */
-            return;
-        }
-    }
-    last3_pc = last2_pc; last2_pc = last_pc; last_pc = pc;
-}
 
 static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
+    VV_PROF_COUNT(VV_PS_MMIO_R);
     (void)uc; (void)u; (void)size;
     uint32_t w = off & VV_MMIO_DECODE;          /* addra[11:0]; registers only at addra[11:6]==0 */
     if (opt_mmio_ise) w &= 0xFCu;               /* ISE: addra[5:0] only */
@@ -274,11 +223,18 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     case VV_OW_UATX_READY: v = vv_uart_tx_ready(); break;   /* low while a byte shifts out (hw.c) */
     case VV_OW_UARX_VALID: v = vv_uart_rx_valid(); break;
     case VV_OW_UARX_DATA:  v = vv_uart_rx_read(); break;
-    case VV_OW_CNT_CYCLE: /* no cycle model: cycles == instructions */
+    case VV_OW_CNT_CYCLE: /* default and --cpu=fast: cycles == instructions.  FIDELITY=rtl: real cycles. */
+#ifdef VV_FIDELITY_RTL
+        v = (uint32_t)(vv_hw_now() - cnt_base_cycle); break;
+#endif
     case VV_OW_CNT_INST:  v = (uint32_t)(insn_count - cnt_base_insn); break;
     case VV_OW_PF_FRAME:  v = 0x10000000u | vv_pf_frame() << VV_FSHIFT; break;   /* frame being scanned (MemMapIO.v:162) */
     case VV_OW_GP_STATE:  v = vv_gp_status_word(); break;   /* graphics.h gstate_s layout (hw.c) */
+#ifdef VV_FIDELITY_RTL
+    case VV_OW_RANDOM32:  v = vv_prng_read(vv_hw_now()); break;
+#else
     case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
+#endif
     case VV_OW_HALTVAL: v = halt_val; break;  /* HaltVal: the last stored word (0 at reset) */
     case 0xFFFFFFFFu: break;
     default:
@@ -297,6 +253,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     return v;
 }
 static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val, void *u) {
+    VV_PROF_COUNT(VV_PS_MMIO_W);
     (void)u;
     uint32_t w = off & VV_MMIO_DECODE, v = (uint32_t)val;   /* addra[11:0] */
     if (opt_mmio_ise) w &= 0xFCu;               /* ISE: addra[5:0] only */
@@ -315,7 +272,12 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     }
     switch (w) {
     case VV_OW_UATX_DATA: vv_uart_tx_write(v & 0xFF); return;    /* dina[7:0]; lost while TX busy */
-    case VV_OW_CNT_RESET: cnt_base_insn = insn_count; break;
+    case VV_OW_CNT_RESET:
+        cnt_base_insn = insn_count;
+#ifdef VV_FIDELITY_RTL
+        cnt_base_cycle = vv_hw_now();
+#endif
+        break;
     case VV_OW_PF_FRAME:  pf_frame = v; vv_pf_write(uc, v); pf_writes++;   /* takes effect at the frame end (hw.c) */
         if (dump_every && pf_writes % dump_every == 0) { char fn[PATH_MAX];
             snprintf(fn, sizeof fn, "%s%06llu.ppm", dump_prefix, (unsigned long long)pf_writes); vv_disp_dump_ppm(uc, fn); }
@@ -326,7 +288,11 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
                            * data in its big-endian lane and zeros the rest (seed 0 -> 1 in RTL) */
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;   /* (already placed when lane_hw) */
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
+#ifdef VV_FIDELITY_RTL
+        vv_prng_write(vv_hw_now(), v); break;
+#else
         vv_prng_write(insn_count, v); break;
+#endif
     case VV_OW_HALTVAL:   /* sb/sh: the lane-placed dina word (as RANDOM32), e.g. sb at +3 = the byte */
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
@@ -375,14 +341,16 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
 static int opt_threads = 1;
 static uc_err emu_err;
 static uint32_t emu_entry; static uint64_t emu_until;
+static uc_err run_cpu(uc_engine *uc);   /* defined with the service split, below */
 static void *emu_thread(void *a) {
     uc_engine *uc = a;
-    emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    emu_err = run_cpu(uc);
     vv_disp_emu_done(uc);                    /* publishes the last frame */
     return NULL;
 }
 static int stop_reason_intr = -1;
 static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *u) {
+    VV_PROF_COUNT(VV_PS_TLB);
     (void)uc; (void)t; (void)u;
     uint32_t pa = vv_canon((uint32_t)va);
     int fetch = t == UC_MEM_FETCH, hole = pa == 0xFFFFFFFFu;
@@ -418,63 +386,146 @@ static uint64_t hook_calls;
 static int stopped_max;
 static uint64_t max_wall_ns, run_t0;         /* --max-seconds */
 static int stopped_wall;
-static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
-    (void)size; (void)u;
-    if (stop_req) { uc_emu_stop(uc); return; }   /* guest exit: nothing after the store runs */
-    if (max_insns && ++hook_calls > max_insns) { stopped_max = 1; uc_emu_stop(uc); return; }
+
+static void stop_engine(uc_engine *uc) {
+    if (uc && vv_cpu_kind == VV_CPU_UNICORN) uc_emu_stop(uc);
+}
+/* Returns 1 when this instruction must not run.  It is not counted in that case. */
+static int count_insn(uc_engine *uc, uint32_t pc) {
+    if (stop_req) { stop_engine(uc); return 1; }
+    if (max_insns && ++hook_calls > max_insns) { stopped_max = 1; stop_engine(uc); return 1; }
     insn_count++;
-    vv_cur_pc = (uint32_t)addr;
-    if ((uint32_t)addr - 0x10000000u < 0x30000000u) note_ddr_exec((uint32_t)addr);   /* code in DDR */
-    vv_hw_tick(uc, insn_count);              /* devices advance one cycle (UART, PixelFeeder, timer) */
-    if (vv_quirk_halted) { uc_emu_stop(uc); return; }
+    vv_cur_pc = pc;
+    if (pc - 0x10000000u < 0x30000000u) note_ddr_exec(pc);
+    return 0;
+}
+int vv_svc_enter_at(uc_engine *uc, uint32_t pc, uint64_t tick_at) {
+    VV_PROF_COUNT(VV_PS_HOOK);
+    if (count_insn(uc, pc)) return 1;
+    vv_hw_tick(uc, tick_at);
+    if (vv_quirk_halted) { stop_engine(uc); return 1; }
     if (nevents) run_due_events(uc, 0);
-    if (!vv_quirk_decode) {                  /* no quirk needs the per-instruction decode (quirk.h) */
-        uint64_t irqs = irq_count;
-        if (opt_irq) irq_step(uc, (uint32_t)addr);
-        if (vv_quirk_active()) {             /* device-side detectors only: eret irq-storm check */
-            if (irqs == irq_count && !vv_quirk_halted) vv_quirk_pre_lite(uc, (uint32_t)addr);
-            if (vv_quirk_halted) return;
-        }
-    } else {                                 /* emulated quirks and/or decode-based detectors */
-        if (vv_quirk_halted) { uc_emu_stop(uc); return; }
-        if (vv_quirk_post(uc, (uint32_t)addr)) { insn_count--; return; }   /* fix up the previous insn; emulated branch */
-        uint64_t irqs = irq_count;
-        if (opt_irq) irq_step(uc, (uint32_t)addr);
-        if (irqs != irq_count) vv_quirk_cancel();   /* redirected to the ISR: insn at addr not run */
-        else if (!vv_quirk_halted) vv_quirk_pre(uc, (uint32_t)addr);
-        if (vv_quirk_halted) return;
-    }
+    return 0;
+}
+int vv_svc_quiet(uint32_t pc) { return count_insn(NULL, pc); }
+int vv_svc_leave(uc_engine *uc, uint32_t pc) {
+    int skip_trace = 0;
     if ((insn_count & 0xFFF) == 0) {
-        if (max_wall_ns && vv_mono_ns() - run_t0 >= max_wall_ns) { stopped_wall = stop_req = 1; uc_emu_stop(uc); return; }
-        vv_term_tick();                      /* flush pending UART text (e.g. a prompt with no newline) */
-        int why = vv_disp_tick(uc);
-        if (why) { vv_eprintf(why == VV_DISP_ESC ? "[stop] Esc pressed\n" : "[stop] window closed\n"); stop_req = 1; uc_emu_stop(uc); }   /* stop_req hides the fetch Unicorn makes on the way out */
+        if (max_wall_ns && vv_mono_ns() - run_t0 >= max_wall_ns) {
+            stopped_wall = stop_req = 1; stop_engine(uc); skip_trace = 1;
+        } else {
+            vv_term_tick();
+            int why = vv_disp_tick(uc);
+            if (why) {
+                vv_eprintf(why == VV_DISP_ESC ? "[stop] Esc pressed\n" : "[stop] window closed\n");
+                stop_req = 1; stop_engine(uc);
+            }
+        }
     }
-    if (opt_trace && trace_left != 0) {
-        uint32_t insn = read_insn(uc, (uint32_t)addr);
-        vv_eprintf("[trace] %8llu pc=0x%08x insn=%08x", (unsigned long long)insn_count, (uint32_t)addr, insn);
-        if (opt_trace_regs) { /* GPRs changed by the PREVIOUS instruction (debug aid) */
-            for (int i = 1; i < 32; i++) { uint32_t v; uc_reg_read(uc, UC_MIPS_REG_0 + i, &v);
+    if (!skip_trace && opt_trace && trace_left != 0) {
+        uint32_t insn = read_insn(uc, pc);
+        vv_eprintf("[trace] %8llu pc=0x%08x insn=%08x", (unsigned long long)insn_count, pc, insn);
+        if (opt_trace_regs) {
+            for (int i = 1; i < 32; i++) {
+                uint32_t v = vv_view_gpr(uc, i);
                 if (v != prev_regs[i]) { char n[8], b[32]; snprintf(n, sizeof n, "r%d", i);
-                    vv_eprintf(" | %s=%08x", vv_creg(n, b, sizeof b), v); prev_regs[i] = v; } }
+                    vv_eprintf(" | %s=%08x", vv_creg(n, b, sizeof b), v); prev_regs[i] = v; }
+            }
         }
         vv_eprintf("\n");
         if (trace_left > 0) trace_left--;
     }
+    return stop_req ? 1 : 0;
 }
-static void hook_intr(uc_engine *uc, uint32_t intno, void *u) {
-    (void)u; uint32_t pc; uc_reg_read(uc, UC_MIPS_REG_PC, &pc);
+uint64_t vv_svc_quiet_budget(void) {
+    if (opt_trace || opt_prof_bare || stop_req || vv_quirk_halted) return 0;
+    /* Cause IP stays latched after Compare, but DO_ISR still needs IE (COP0150).
+     * Quiet only skips vv_hw_tick; the span still irq_steps every instruction, and
+     * mtc0 is a block fence, so enabling IE is sampled on the following instruction.
+     * Do not fold IE into vv_hw_irq_possible(): irq_step uses that to skip Status. */
+    if (opt_irq && vv_hw_irq_possible() && (vv_hw_status() & 1u)) return 0;
+    uint64_t now = insn_count;
+    uint64_t h = vv_hw_next_event();
+    uint64_t sh = next_script_insn();
+    if (sh < h) h = sh;
+    uint64_t n = h > now + 1 ? h - now - 1 : 0;
+    if (max_insns) {
+        if (now >= max_insns) n = 0;
+        else if (n > max_insns - now) n = max_insns - now;
+    }
+    if (vv_disp_has_window() && vv_disp_keys_enabled && n > 64) n = 64;
+    return n;
+}
+int vv_irqs_on(void) { return opt_irq; }
+int vv_guest_stopping(void) { return stop_req; }
+int vv_guest_intr(void) { return stop_reason_intr; }
+uint64_t vv_mmio_read(uc_engine *uc, uint64_t off, unsigned size) { return mmio_read(uc, off, size, NULL); }
+void vv_mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val) { mmio_write(uc, off, size, val, NULL); }
+void vv_warn_bios_write(uint32_t addr, int size, uint64_t val) {
+    VV_PROF_COUNT(VV_PS_BIOS_W);
+    vv_eprintf("[warn] data write to BIOS 0x%08x size %d val 0x%llx (HW drops this; %s)\n", addr, size,
+            (long long)val, vv_quirk_on(VV_Q_BIOS_STORE) ? "dropped: bios-store quirk on" : "kept: bios-store quirk off");
+}
+void vv_report_exception(uint32_t intno, uint32_t pc) {
     stop_reason_intr = intno;
-    if (vv_quirk_halted) { uc_emu_stop(uc); return; }   /* already reported by --halt-on-quirk */
     /* QEMU-MIPS EXCP_* numbering: 8=EXT_INTERRUPT 12=AdEL 13=AdES 14=TLBF 17=SYSCALL 18=BREAK 20=RI
-     * (pc reported here is not reliable inside the hook; Unicorn may show 0). */
+     * (the pc Unicorn reports is not reliable inside the hook; it may be 0). */
     const char *nm = intno == 18 ? "BREAK" : intno == 17 ? "SYSCALL" : intno == 8 ? "EXT_INTERRUPT" :
                      intno == 12 ? "AdEL" : intno == 13 ? "AdES" : intno == 20 ? "RI" : "?";
     vv_eprintf("[stop] CPU exception intno=%u (%s) pc=0x%08x\n", intno, nm, pc);
+}
+static int take_irq(uc_engine *uc, uint32_t pc) {
+    uint32_t npc;
+    if (!vv_irq_step(uc, pc, &npc)) return 0;
+    uc_reg_write(uc, UC_MIPS_REG_PC, &npc);
+    return 1;
+}
+static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
+    (void)size; (void)u;
+    if (opt_prof_bare) {
+        VV_PROF_COUNT(VV_PS_HOOK);
+        if (stop_req) { uc_emu_stop(uc); return; }
+        if (max_insns && ++hook_calls > max_insns) { stopped_max = 1; uc_emu_stop(uc); return; }
+        insn_count++;
+        vv_cur_pc = (uint32_t)addr;
+        return;
+    }
+    if (vv_svc_enter_at(uc, (uint32_t)addr, insn_count + 1)) return;
+    if (!vv_quirk_decode) {
+        uint64_t irqs = vv_irq_count;
+        if (opt_irq) take_irq(uc, (uint32_t)addr);
+        if (vv_quirk_active()) {
+            if (irqs == vv_irq_count && !vv_quirk_halted) vv_quirk_pre_lite(uc, (uint32_t)addr);
+            if (vv_quirk_halted) return;
+        }
+    } else {
+        if (vv_quirk_halted) { uc_emu_stop(uc); return; }
+        if (vv_quirk_post(uc, (uint32_t)addr)) { insn_count--; return; }
+        uint64_t irqs = vv_irq_count;
+        if (opt_irq) take_irq(uc, (uint32_t)addr);
+        if (irqs != vv_irq_count) vv_quirk_cancel();
+        else if (!vv_quirk_halted) vv_quirk_pre(uc, (uint32_t)addr);
+        if (vv_quirk_halted) return;
+    }
+    vv_svc_leave(uc, (uint32_t)addr);
+}
+static uc_err run_cpu(uc_engine *uc) {
+    vv_prof_emu_begin();
+    uc_err e = vv_cpu_kind == VV_CPU_UNICORN
+        ? uc_emu_start(uc, emu_entry, emu_until, 0, 0)
+        : vv_cpu_run(uc, emu_entry, (uint32_t)emu_until, have_stop);
+    vv_prof_emu_end();
+    return e;
+}
+static void hook_intr(uc_engine *uc, uint32_t intno, void *u) {
+    (void)u; uint32_t pc; uc_reg_read(uc, UC_MIPS_REG_PC, &pc);
+    if (vv_quirk_halted) { uc_emu_stop(uc); return; }
+    vv_report_exception(intno, pc);
     uc_emu_stop(uc);
 }
 static bool hook_unmapped(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int64_t v, void *u) {
     (void)uc; (void)u;
+    VV_PROF_COUNT(VV_PS_UNMAPPED);
     if (vv_quirk_halted) return false;
     vv_eprintf("[fault] unmapped %s at 0x%08x size %d val 0x%llx\n",
             t == UC_MEM_FETCH_UNMAPPED ? "fetch" : t == UC_MEM_WRITE_UNMAPPED ? "write" : "read",
@@ -483,8 +534,7 @@ static bool hook_unmapped(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int6
 }
 static void hook_bios_write(uc_engine *uc, uc_mem_type t, uint64_t a, int sz, int64_t v, void *u) {
     (void)uc; (void)t; (void)u;
-    vv_eprintf("[warn] data write to BIOS 0x%08x size %d val 0x%llx (HW drops this; %s)\n", (uint32_t)a, sz, (long long)v,
-            vv_quirk_on(VV_Q_BIOS_STORE) ? "dropped: bios-store quirk on" : "kept: bios-store quirk off");
+    vv_warn_bios_write((uint32_t)a, sz, (uint64_t)v);
 }
 
 /* DDR power-up contents: random by default (real DRAM is not zeroed). splitmix64, seed printed for repeatability. */
@@ -515,13 +565,13 @@ static void dump_regs(uc_engine *uc) {
     uint32_t v; char b[32];
     vv_eprintf("---- registers (insns=%llu) ----\n", (unsigned long long)insn_count);
     for (int i = 0; i < 32; i++) {                /* "%4s=" with the name highlighted (term.c) */
-        uc_reg_read(uc, UC_MIPS_REG_0 + i, &v);
+        v = vv_view_gpr(uc, i);
         vv_eprintf("%*s%s=%08x%s", 4 - (int)strlen(gpr[i]), "", vv_creg(gpr[i], b, sizeof b), v, (i % 4 == 3) ? "\n" : "  ");
     }
-    uc_reg_read(uc, UC_MIPS_REG_PC, &v); vv_eprintf("  %s=%08x  ", vv_creg("pc", b, sizeof b), v);
-    uc_reg_read(uc, UC_MIPS_REG_HI, &v); vv_eprintf("%s=%08x  ", vv_creg("hi", b, sizeof b), v);
-    uc_reg_read(uc, UC_MIPS_REG_LO, &v); vv_eprintf("%s=%08x  ", vv_creg("lo", b, sizeof b), v);
-    uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &v); vv_eprintf("%s=%08x  ", vv_creg("c0_status", b, sizeof b), v);
+    v = vv_view_pc(uc); vv_eprintf("  %s=%08x  ", vv_creg("pc", b, sizeof b), v);
+    v = vv_view_hi(uc); vv_eprintf("%s=%08x  ", vv_creg("hi", b, sizeof b), v);
+    v = vv_view_lo(uc); vv_eprintf("%s=%08x  ", vv_creg("lo", b, sizeof b), v);
+    v = vv_view_status(uc); vv_eprintf("%s=%08x  ", vv_creg("c0_status", b, sizeof b), v);
     vv_eprintf("\n"); /* Unicorn 2.1 exposes no Cause/EPC/Count reg ids */
 }
 void vv_dump_regs(uc_engine *uc) { dump_regs(uc); }
@@ -529,6 +579,7 @@ void vv_dump_regs(uc_engine *uc) { dump_regs(uc); }
 /* ---- status strip text (display.c) ---- */
 static const char *run_state = "RUN";
 static int guest_big = VV_DEFAULT_BIG_ENDIAN;
+int vv_guest_be(void) { return guest_big; }
 static uint32_t rd_guest(uc_engine *uc, uint32_t a, unsigned n) {
     unsigned char b[4] = { 0 }; uint32_t v = 0;
     if (uc_mem_read(uc, a, b, n)) return 0;
@@ -539,7 +590,7 @@ static uint32_t sm_reader(void *ctx, uint32_t a, unsigned n) { return rd_guest((
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2) {
     snprintf(l1, n1, "%s  insns %llu  PF_FRAME %u (writes %llu)  GP %u  IRQ %llu%s",
              vv_quirk_halted ? "HALTED (quirk)" : run_state, (unsigned long long)insn_count, vv_disp_frame(),
-             (unsigned long long)pf_writes, gp_launches, (unsigned long long)irq_count,
+             (unsigned long long)pf_writes, gp_launches, (unsigned long long)vv_irq_count,
              vv_disp_keys_enabled ? "" : "  keys->UART off");
     /* proj6/proj7 shared memory (shared6.h / shared7.h layouts, src/shmem.c) */
     vv_sm sm; vv_sm_read(sm_reader, uc, VV_SM_BASE_ADDR, &sm);
@@ -696,6 +747,14 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     or shared6.h) decoded, at exit; its consistency warnings (magic/majorvers\n"
 "                     stamp vs shared7.h, magic2, buffer) are printed at exit even without it\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
+"  --cpu=KIND         unicorn (default), fast (predecoded block interpreter, same 1 CPI results)\n"
+"                     or rtl (approximate I-cache and D-cache stalls; needs `make FIDELITY=rtl`).\n"
+"                     Env VVIZARD_CPU is used when --cpu is absent.  Unicorn stays the default.\n"
+"  --rtl-cache=on|off with --cpu=rtl, model cache-miss stalls (default on).  off keeps cycles\n"
+"                     equal to the instruction count.  Ignored by unicorn and fast.\n"
+"  --profile          print per-slot counts (needs `make PROFILE=1`).  Timers stay off without this.\n"
+"  --profile-bare-hook  PROFILE build: the code hook only counts (emulation is wrong; for probes)\n"
+"  --profile-no-mem-unmapped  PROFILE build: do not install the unmapped-memory hook\n"
 "  --threads=on|off   on (default): GPU command lists are drawn by a worker thread and, with a\n"
 "                     window, the emulator runs on its own thread while the main thread draws (frame\n"
 "                     copied at each frame end).  The GPU is then busy (GP_STATE ready bits 0) until\n"
@@ -729,7 +788,8 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_DUMP_SM, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC,
+       O_CPU, O_RTL_CACHE, O_PROFILE, O_PROF_BARE, O_PROF_NOUNMAP };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -758,11 +818,15 @@ int main(int argc, char **argv) {
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
         {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
+        {"cpu",1,0,O_CPU},{"rtl-cache",1,0,O_RTL_CACHE},
+        {"profile",0,0,O_PROFILE},{"profile-bare-hook",0,0,O_PROF_BARE},
+        {"profile-no-mem-unmapped",0,0,O_PROF_NOUNMAP},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
     const char *qenv = getenv("VVIZARD_QUIRKS"), *qdet = NULL, *qquiet = NULL;
     int qdet_on = 1, qwarn = 0;                  /* default: --halt-on-quirk (emulated set) */
+    int cpu_set = 0;
     if (qenv && vv_quirk_parse(qenv, emul, qdflt, &emul)) { vv_eprintf("bad VVIZARD_QUIRKS\n"); return 2; }
     const char *henv = getenv("VVIZARD_EXIT_ON_HALT");   /* 1/on/yes/true or 0/off/no/false/empty */
     if (henv) {
@@ -823,6 +887,21 @@ int main(int argc, char **argv) {
             else if (is_uint(optarg) && strtoul(optarg, 0, 0) >= 1) opt_threads = strtoul(optarg, 0, 0) > 1;
             else { vv_eprintf("--threads: expected on, off or a count (1 = off), not '%s'\n", optarg); return 2; } break;
         case O_SYNC: opt_threads = 0; break;
+        case O_CPU:
+            cpu_set = 1;
+            if (!strcmp(optarg, "unicorn")) vv_cpu_kind = VV_CPU_UNICORN;
+            else if (!strcmp(optarg, "fast")) vv_cpu_kind = VV_CPU_FAST;
+            else if (!strcmp(optarg, "rtl")) vv_cpu_kind = VV_CPU_RTL;
+            else { vv_eprintf("--cpu: expected unicorn, fast or rtl, not '%s'\n", optarg); return 2; }
+            break;
+        case O_RTL_CACHE:
+            if (!strcmp(optarg, "on")) vv_rtl_cache = 1;
+            else if (!strcmp(optarg, "off")) vv_rtl_cache = 0;
+            else { vv_eprintf("--rtl-cache: expected on or off, not '%s'\n", optarg); return 2; }
+            break;
+        case O_PROFILE: opt_profile = 1; break;
+        case O_PROF_BARE: opt_prof_bare = 1; break;
+        case O_PROF_NOUNMAP: opt_prof_no_unmapped = 1; break;
         case O_EVENT_TRACE:
             if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
             setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
@@ -842,6 +921,35 @@ int main(int argc, char **argv) {
         case 'h': usage(stdout, argv[0]); return 0;
         default: usage(stderr, argv[0]); return 2;
     } }
+    if (!cpu_set) {
+        const char *cenv = getenv("VVIZARD_CPU");
+        if (cenv && *cenv) {
+            if (!strcmp(cenv, "unicorn")) vv_cpu_kind = VV_CPU_UNICORN;
+            else if (!strcmp(cenv, "fast")) vv_cpu_kind = VV_CPU_FAST;
+            else if (!strcmp(cenv, "rtl")) vv_cpu_kind = VV_CPU_RTL;
+            else { vv_eprintf("bad VVIZARD_CPU '%s' (expected unicorn, fast or rtl)\n", cenv); return 2; }
+        }
+    }
+#ifndef VV_FIDELITY_RTL
+    if (vv_cpu_kind == VV_CPU_RTL) {
+        vv_eprintf("--cpu=rtl needs a rebuild: make FIDELITY=rtl\n");
+        return 2;
+    }
+#endif
+    if (!big && vv_cpu_kind != VV_CPU_UNICORN) {
+        vv_eprintf("--cpu=%s does not support --little\n", vv_cpu_kind == VV_CPU_FAST ? "fast" : "rtl");
+        return 2;
+    }
+    if (opt_profile || opt_prof_bare || opt_prof_no_unmapped) {
+#ifndef VV_PROFILE
+        vv_eprintf("--profile needs a rebuild: make PROFILE=1\n");
+        return 2;
+#else
+        if (opt_profile) vv_prof_enable_timing();
+        if (opt_prof_bare)
+            vv_eprintf("[profile] --profile-bare-hook: emulation is wrong (the hook returns after the count)\n");
+#endif
+    }
     /* The default program applies unless --bare, or the command line names a program itself. */
     int user_prog = nloads > 0 || optind < argc;
     int use_default_app = !bare && !user_prog;
@@ -907,7 +1015,8 @@ int main(int argc, char **argv) {
     uc_hook_add(uc, &h, UC_HOOK_TLB_FILL, tlb_fill, NULL, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_CODE, hook_code, NULL, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_INTR, hook_intr, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
+    if (!opt_prof_no_unmapped)
+        uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
     uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, hook_bios_write, NULL, 0x40000000ull, 0x4FFFFFFFull);
 
     for (int i = optind; i < argc; i++) {
@@ -948,11 +1057,14 @@ int main(int argc, char **argv) {
     vv_disp_init(want_window);
     /* wall frame clock: the ~60/s frame ends redraw; the vv_disp_tick timer is only a fallback */
     if (vv_frame_clock == VV_FRAME_CLOCK_WALL && vv_pf_period && !vv_legacy_io) vv_disp_redraw_period = 0.1;
-    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n", big ? "big" : "little",
+    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s cpu=%s%s%s\n", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
             vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
             !opt_threads ? "off (--sync)" : vv_legacy_io ? (vv_disp_has_window() ? "on (emulator + display; GPU synchronous: --legacy-io)" : "on (no window, --legacy-io: one thread)")
-            : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)");
+            : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)",
+            vv_cpu_kind == VV_CPU_FAST ? "fast" : vv_cpu_kind == VV_CPU_RTL ? "rtl" : "unicorn",
+            vv_cpu_kind == VV_CPU_RTL ? " rtl-cache=" : "",
+            vv_cpu_kind == VV_CPU_RTL ? (vv_rtl_cache ? "on" : "off") : "");
     vv_quirk_decode = vv_quirk_needs_decode();
     run_t0 = vv_mono_ns();
     emu_entry = entry; emu_until = have_stop ? stop_addr : 0xFFFFFFFFull;   /* max_insns: hook_code */
@@ -971,7 +1083,7 @@ int main(int argc, char **argv) {
         pthread_attr_destroy(&ta);
     }
     if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
-    else err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    else err = run_cpu(uc);
     vv_gpu_worker_stop();                      /* finish a draw in flight; one thread from here on */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
@@ -984,9 +1096,10 @@ int main(int argc, char **argv) {
         if (!err) vv_eprintf("[stop] max-seconds %.3f reached\n", max_wall_ns * 1e-9); }
     if (err) vv_eprintf("[stop] uc_emu_start: %s\n", uc_strerror(err));
     if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
-                         (unsigned long long)irq_count, (unsigned long long)pf_writes);
+                         (unsigned long long)vv_irq_count, (unsigned long long)pf_writes);
     vv_hw_summary();
     if (vv_quirk_active()) vv_quirk_summary();
+    if (opt_profile) vv_prof_report();
     if (!vv_quirk_halted) dump_regs(uc);
     if (halt_stores)                            /* after the register dump (also after a quirk halt's) */
         vv_eprintf("[halt] HaltVal = 0x%08x (%u), last stored at pc=0x%08x (%llu store%s)%s\n", halt_val, halt_val, halt_pc,
@@ -1008,7 +1121,7 @@ int main(int argc, char **argv) {
         char *s = strdup(expects[i]), *eq = strchr(s, '=');
         int r = eq ? (*eq = 0, reg_index(s)) : -1;
         if (r < 0) { vv_eprintf("bad --expect %s\n", expects[i]); return 2; }
-        uint32_t want = strtoul(eq + 1, 0, 0), got; uc_reg_read(uc, UC_MIPS_REG_0 + r, &got);
+        uint32_t want = strtoul(eq + 1, 0, 0), got = vv_view_gpr(uc, r);
         vv_eprintf("[expect] $%s = 0x%08x (want 0x%08x) %s\n", s, got, want, got == want ? "PASS" : "FAIL");
         if (got != want) rc = 3;
         free(s);

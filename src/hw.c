@@ -5,6 +5,8 @@
 #include "memmap.h"
 #include "display.h"
 #include "gpu.h"
+#include "profile.h"
+#include "cpu/backend.h"
 #include <stdio.h>
 #include <time.h>
 #include <stdarg.h>
@@ -156,6 +158,8 @@ static void gp_complete(void) {             /* the ready rising edge (irq_gp_don
          * translations made from half-drawn pages (host stores do not invalidate them) */
         if (!gp_exec0 && vv_ddr_exec_overlaps(gp_fb, gp_fb + (1u << VV_FSHIFT))) {
             uc_ctl_remove_cache(g_uc, gp_fb, (uint64_t)gp_fb + (1u << VV_FSHIFT));
+            if (vv_code_invalidate)
+                vv_code_invalidate(gp_fb, gp_fb + (1u << VV_FSHIFT));
             VV_EVT("gp-tb-flush 0x%08x", gp_fb);
         }
     }
@@ -217,7 +221,43 @@ void vv_hw_isr_exit_check(uint32_t st, uint32_t pc, const char *how) {
 }
 
 /* ---------------- per-cycle step ---------------- */
+static uint64_t minu64(uint64_t a, uint64_t b) { return a < b ? a : b; }
+/* Next cycle at which Count, wrapped, equals `target`.  cnt0_at is the cycle Count == cnt0_val. */
+static uint64_t next_match(uint64_t now, uint32_t target) {
+    uint64_t t = cnt0_at + (uint32_t)(target - cnt0_val);
+    if (t <= now) t += 0x100000000ull;
+    return t;
+}
+uint64_t vv_hw_now(void) { return now_c; }
+void vv_hw_set_now(uint64_t now) { now_c = now; }
+uint64_t vv_hw_next_event(void) {
+    uint64_t now = now_c;
+    if (now == 0) return 1;                    /* the first instruction is always a real tick */
+    uint64_t step = (vv_frame_clock == VV_FRAME_CLOCK_WALL && !vv_legacy_io && vv_pf_period)
+        ? (uint64_t)VV_PF_WALL_CHECK : 4096ull;
+    uint64_t e = (now / step + 1) * step;
+    if (vv_legacy_io) return e;                /* untimed devices: only the service grid */
+    e = minu64(e, next_match(now, compare));
+    e = minu64(e, next_match(now, 0xFFFFFFFFu));
+    if (gp_busy) e = minu64(e, gp_done_at > now ? gp_done_at : now);
+    if (rx_busy) e = minu64(e, rx_land > now ? rx_land : now);
+    else {
+        int paced_block = rx_has && vv_host_rx_paced();
+        if (!paced_block && vv_host_rx_avail(0))
+            e = minu64(e, rx_next_ok > now ? rx_next_ok : now + 1);
+        else
+            e = minu64(e, rx_last_poll + 4096);
+    }
+    if (tx_irq_due) e = minu64(e, tx_ready_at > now ? tx_ready_at : now + 1);
+    if (vv_pf_period && vv_frame_clock != VV_FRAME_CLOCK_WALL) {
+        if (!pf_t0) e = minu64(e, now + 1);
+        else e = minu64(e, pf_boundary > now ? pf_boundary : now);
+    }
+    return e;
+}
+
 void vv_hw_tick(uc_engine *uc, uint64_t now) {
+    VV_PROF_COUNT(VV_PS_HW_TICK);
     g_uc = uc;
     uint64_t prev = now_c; now_c = now;
     if (now <= prev && prev) return;
@@ -293,5 +333,7 @@ void vv_hw_summary(void) {
                (unsigned long long)pf_frames, el, fps, rt, fps / rt, el > 0 ? now_c / el * 1e-6 : 0.0,
                pf_frames ? (double)now_c / pf_frames : 0.0, VV_PF_PERIOD);
     if (wall) vv_eprintf("; %llu deadlines skipped", (unsigned long long)pf_skipped);
+    if (vv_cpu_kind == VV_CPU_RTL)
+        vv_eprintf("; rtl cycles %llu insns %llu", (unsigned long long)now_c, (unsigned long long)vv_insns());
     vv_eprintf("\n");
 }

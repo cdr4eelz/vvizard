@@ -1,6 +1,7 @@
 /* dcache.c - see dcache.h */
 #include "dcache.h"
 #include "memmap.h"
+#include "profile.h"
 #include <string.h>
 
 static struct {
@@ -16,6 +17,7 @@ static uint32_t tag(uint32_t a) { return (a >> 13) & 0x7FFFu; }
 static int hit(uint32_t a) { unsigned i = idx(a); return line[i].valid && line[i].tag == tag(a); }
 
 int vv_dc_load(uint32_t a, uint32_t *old) {
+    VV_PROF_COUNT(VV_PS_DC_LOAD);
     unsigned i = idx(a), w = (a >> 2) & 7;
     if (!hit(a)) { line[i].valid = 1; line[i].tag = tag(a); line[i].stale = 0; return 0; }   /* miss: fill from DDR */
     if (!(line[i].stale >> w & 1)) return 0;
@@ -23,6 +25,7 @@ int vv_dc_load(uint32_t a, uint32_t *old) {
     return 1;
 }
 void vv_dc_store(uint32_t a, unsigned size, uint32_t v) {
+    VV_PROF_COUNT(VV_PS_DC_STORE);
     unsigned i = idx(a), w = (a >> 2) & 7;
     if (!hit(a) || !(line[i].stale >> w & 1)) return;      /* miss (no allocate) or coherent word */
     if (size >= 4) { line[i].stale &= (uint8_t)~(1u << w); return; }   /* the whole word is new in both */

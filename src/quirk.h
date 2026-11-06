@@ -95,6 +95,13 @@ void vv_quirk_summary(void);
 int  vv_quirk_report(int cat, uint32_t pc, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 void vv_quirk_reg_defined(unsigned r);
 void vv_quirk_init(uc_engine *uc);   /* the host set GPR r (e.g. --sp): not undefined */
+/* Same event the Unicorn path counts in pre(): always increments the hit counter, prints when
+ * the category is detected, returns 1 if the run halted. */
+int  vv_quirk_hit(int cat, uint32_t pc, uint32_t insn, const char *fmt, ...) __attribute__((format(printf, 4, 5)));
+void vv_quirk_not_emulated(int cat, uint32_t pc, uint32_t insn, const char *why);
+extern uint32_t vv_reg_defined;      /* bit r set once GPR r has been written (bit 0 always set) */
+void vv_quirk_set_last_pc(uint32_t pc);
+const char *vv_gpr_name(unsigned r);
 
 /* VOID page: undecoded addresses (unmapped / unmapped-fetch) and redirected accesses
  * (unaligned, lwlr) land here; it reads 0 and is re-zeroed after every store. */

@@ -20,6 +20,18 @@ else
 OPTFLAGS   ?= -O3 -g
 endif
 CFLAGS     ?= -std=gnu99 -Wall -Wextra $(OPTFLAGS)
+# make PROFILE=1 instruments the slots in src/profile.h (docs/PROFILING-PLAN.md).  Counts are
+# compiled in; --profile turns on the timers.  The default build leaves the macros empty.
+PROFILE    ?= 0
+# make FIDELITY=rtl compiles the optional approximate I$/D$ stall model (src/cpu/rtl).
+# The default (l0) binary has no cache-timing code on the fast path.
+FIDELITY   ?= l0
+ifeq ($(PROFILE),1)
+CFLAGS += -fno-omit-frame-pointer -DVV_PROFILE
+endif
+ifeq ($(FIDELITY),rtl)
+CFLAGS += -DVV_FIDELITY_RTL
+endif
 # pthreads (docs/MULTITHREADING-PLAN.md): always linked; --sync / --threads=1 just starts none.
 # make TSAN=1: ThreadSanitizer build (Linux; compile and link).
 TSAN       ?= 0
@@ -32,8 +44,13 @@ RAYLIB_CFLAGS  := $(shell pkg-config --cflags raylib)
 RAYLIB_LIBS    := $(shell pkg-config --libs raylib)
 
 SRCS := $(wildcard $(SRC_DIR)/*.c)
-HDRS := $(wildcard $(SRC_DIR)/*.h)
+HDRS := $(wildcard $(SRC_DIR)/*.h $(SRC_DIR)/cpu/*.h $(SRC_DIR)/cpu/fast/*.h $(SRC_DIR)/cpu/rtl/*.h)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
+# Sources under src/cpu are not picked up by the wildcard above.
+CPU_OBJS := $(BUILD_DIR)/cpu/irq.o $(BUILD_DIR)/cpu/fast/decode.o $(BUILD_DIR)/cpu/fast/exec.o
+ifeq ($(FIDELITY),rtl)
+CPU_OBJS += $(BUILD_DIR)/cpu/rtl/rtl.o
+endif
 
 # Run settings are vvizard's own command-line arguments (./vvizard --help); with no arguments it
 # runs the proj7 player from <vvizard dir>/../../software.  The run-* targets below are canned
@@ -42,7 +59,7 @@ EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
 .PHONY: vendor-cmp check-vendor vendor-update test-vendor
-.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-fast tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -151,10 +168,15 @@ FLAGS_LINE   = $(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(
 $(FLAGS_STAMP): FORCE | $(BUILD_DIR)
 	@echo '$(subst ','\'',$(FLAGS_LINE))' | cmp -s - $@ || echo '$(subst ','\'',$(FLAGS_LINE))' > $@
 
-$(TARGET): $(OBJS) $(FLAGS_STAMP) $(CHECK_OBJS) | vendor-cmp
-	$(CC) $(CFLAGS) $(THREAD_FLAGS) $(LDFLAGS) $(OBJS) -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
+$(TARGET): $(OBJS) $(CPU_OBJS) $(FLAGS_STAMP) $(CHECK_OBJS) | vendor-cmp
+	$(CC) $(CFLAGS) $(THREAD_FLAGS) $(LDFLAGS) $(OBJS) $(CPU_OBJS) -o $@ $(UNICORN_LIBS) $(RAYLIB_LIBS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
+
+$(BUILD_DIR)/cpu/%.o: $(SRC_DIR)/cpu/%.c $(HDRS) $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
 
 $(BUILD_DIR):
@@ -204,8 +226,12 @@ test-threads: $(TARGET) tests
 	python3 tests/test_threads.py
 
 # All tests (vendored cs150 headers vs the originals, hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
-# proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode tests
+# proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode tests.
+# test-fast is not part of this: the default binary stays on Unicorn.
 test: check-vendor test-vendor check-hex test-hex test-hw test-quirks test-player test-sm test-threads
+
+test-fast: $(TARGET) tests
+	python3 tests/compare_runs.py "./vvizard --cpu=unicorn --sync" "./vvizard --cpu=fast --sync" --insns 2000000
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

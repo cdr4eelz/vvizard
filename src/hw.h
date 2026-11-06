@@ -1,7 +1,9 @@
 /* hw.h - cycle-timed MIPS150 devices: COP0150 interrupt latch (+ Count/Compare timer and RTC),
  * UART RX/TX (UAReceive.v / UATransmit.v / UARTRVA.v), PixelFeeder frame timing and the GPU status
- * word.  Time is the CPU cycle count, taken as the instruction count (1 CPI: vvizard has no stall
- * or cache-miss model).  RTL references are hardware/src (cs150 ISE fcdda7f / lcd-text).
+ * word.  Time is the CPU cycle count.  The default and --cpu=fast paths are 1 CPI: that count is
+ * the instruction count.  --cpu=rtl (make FIDELITY=rtl) may insert cache-miss stall cycles, so
+ * vv_hw_now() can run ahead of the instruction count.  RTL references are hardware/src
+ * (cs150 ISE fcdda7f / lcd-text).
  * --legacy-io restores the old untimed model (always-ready TX, level RX interrupt, instant
  * PF_FRAME, UARX the only interrupt). */
 #ifndef VV_HW_H
@@ -52,7 +54,11 @@ extern FILE *vv_evt;
 void vv_evt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #define VV_EVT(...) do { if (vv_evt) vv_evt_log(__VA_ARGS__); } while (0)
 
-void     vv_hw_tick(uc_engine *uc, uint64_t now);   /* advance devices to cycle `now` (every insn) */
+void     vv_hw_tick(uc_engine *uc, uint64_t now);   /* advance devices to cycle `now` */
+uint64_t vv_hw_now(void);                           /* cycle of the last tick (0 before the first) */
+void     vv_hw_set_now(uint64_t now);               /* commit quiet instructions with no per-insn tick */
+/* Next cycle that must run vv_hw_tick.  The fast runner may execute up to, but not past, it. */
+uint64_t vv_hw_next_event(void);
 /* COP0150 */
 uint32_t vv_cop0_read(unsigned rd);
 void     vv_cop0_write(unsigned rd, uint32_t v);
