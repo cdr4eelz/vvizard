@@ -152,6 +152,58 @@ class Turbo(unittest.TestCase):
         self.assertIn(b'HaltVal = 0x00000001', r.stderr)
         self.assertIn(b'quit 1', r.stderr)
 
+    def test_mhz_rejected_on_non_turbo(self):
+        for cpu in ('fast', 'unicorn'):
+            with self.subTest(cpu=cpu):
+                r = subprocess.run([VV, f'--cpu={cpu}', '--mhz=5', '--no-window', '--bare',
+                                    '--max-insns', '1'], capture_output=True, env=ENV)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn(b'--mhz requires --cpu=turbo', r.stderr)
+        # Default backend is fast when --cpu is omitted.
+        r = subprocess.run([VV, '--mhz=5', '--no-window', '--bare', '--max-insns', '1'],
+                           capture_output=True, env=ENV)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn(b'--mhz requires --cpu=turbo', r.stderr)
+
+    def test_mhz_invalid(self):
+        for bad in ('0', '-1', '-0.5', 'abc', ''):
+            with self.subTest(bad=bad):
+                args = [VV, '--cpu=turbo', '--no-window', f'--mhz={bad}'] if bad else \
+                       [VV, '--cpu=turbo', '--no-window', '--mhz=']
+                r = subprocess.run(args, capture_output=True, env=ENV)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertTrue(b'--mhz' in r.stderr)
+
+    def test_mhz_throttle_wall_time(self):
+        # Spin forever (beq $0,$0,-1; nop); --max-insns cuts the run.
+        # 1e6 insns at 5 MHz => ~0.2 s. Also confirm unconstrained stays fast.
+        import time
+        with tempfile.NamedTemporaryFile(suffix='.bin') as f:
+            f.write(struct.pack('>2I', 0x1000ffff, 0x00000000)); f.flush()
+            base = ['--no-bios', '--load', f'{f.name}@0x60000000', '--entry', '0x60000000',
+                    '--max-insns', '1000000']
+            t0 = time.monotonic()
+            r = run(*base)
+            unc = time.monotonic() - t0
+            self.check(r)
+            self.assertRegex(r.stderr, rb'\[turbo\] insns 1000000')
+            self.assertLess(unc, 0.15, f'unconstrained 1e6 insns took {unc:.3f}s')
+
+            t0 = time.monotonic()
+            r = run(*base, '--mhz=5')
+            wall = time.monotonic() - t0
+            self.check(r)
+            self.assertIn(b'mhz=5', r.stderr)
+            self.assertRegex(r.stderr, rb'\[turbo\] insns 1000000')
+            # Expect ~0.2s; allow scheduler jitter but reject unconstrained speeds and multi-second stalls.
+            self.assertGreaterEqual(wall, 0.15, f'throttled wall {wall:.3f}s too fast')
+            self.assertLess(wall, 1.0, f'throttled wall {wall:.3f}s too slow')
+            m = re.search(rb'in ([0-9.]+) s: ([0-9.]+) Mcyc/s', r.stderr)
+            self.assertIsNotNone(m, r.stderr)
+            observed = float(m.group(2))
+            self.assertGreater(observed, 3.5)
+            self.assertLess(observed, 7.0)
+
     @unittest.skipUnless(shutil.which('xvfb-run'), 'optional xvfb-run missing')
     def test_window(self):
         p, addr = prog('loop')

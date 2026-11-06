@@ -35,11 +35,16 @@ static int dump_frame(turbo *t, const char *path) {
     return fclose(f) ? -1 : 0;
 }
 int turbo_run(turbo *t, const turbo_opts *o) {
-    t->pc = o->entry; t->gpr[29] = o->sp; t->max_insns = o->max_insns; t->max_ns = o->max_ns;
+    t->pc = o->entry; t->gpr[29] = o->sp; t->max_insns = o->max_insns; t->max_ns = o->max_ns; t->mhz = o->mhz;
     t->exit_on_halt = o->exit_on_halt;
     vv_disp_init(o->window); t->window = vv_disp_has_window();
     if (turbo_gpu_start(t)) { vv_eprintf("[turbo] cannot start GPU worker\n"); vv_disp_close(); return 1; }
-    vv_eprintf("[run] cpu=turbo big-endian entry=0x%08x max-insns=%llu (fixed MIPS150, CPU + GPU%s)\n", t->pc, (unsigned long long)t->max_insns, t->window ? " + display" : "");
+    if (t->mhz > 0)
+        vv_eprintf("[run] cpu=turbo big-endian entry=0x%08x max-insns=%llu mhz=%.3g (fixed MIPS150, CPU + GPU%s)\n",
+            t->pc, (unsigned long long)t->max_insns, t->mhz, t->window ? " + display" : "");
+    else
+        vv_eprintf("[run] cpu=turbo big-endian entry=0x%08x max-insns=%llu (fixed MIPS150, CPU + GPU%s)\n",
+            t->pc, (unsigned long long)t->max_insns, t->window ? " + display" : "");
     t->t0 = vv_mono_ns();
     if (t->window) {
         pthread_t cpu;

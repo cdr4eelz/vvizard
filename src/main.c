@@ -89,6 +89,7 @@ static int opt_mmio_ise;
 static uint32_t prev_regs[32];
 static uint64_t insn_count, cnt_base_insn, cnt_base_cycle;
 static uint64_t max_insns;
+static double opt_mhz;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
 static int trace_left = -1;
@@ -681,6 +682,8 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     interpreter (L0); use --cpu=unicorn for the Unicorn reference\n"
 "                     turbo = fixed MIPS150, own MMIO + GPU thread, speed only.\n"
 "                     No quirk/fidelity/thread knobs; binary images, big-endian only.\n"
+"  --mhz=N            turbo only: throttle wall clock to N million instructions/sec (MHz).\n"
+"                     Default unconstrained (omit the flag; 0 is rejected).\n"
 "  --ddr-stalls[=R,W]  approximate DDR2 + I$/D$ miss stalls (caches ONLY with this flag).\n"
 "                     Omit the flag for off (1 cycle/insn, no cache tax). Bare --ddr-stalls\n"
 "                     or --ddr-stalls=R,W enables 256x32B WT caches; R = read/miss-fill\n"
@@ -808,7 +811,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_DUMP_SM, O_DUMP_BE32, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU, O_DDR_STALLS };
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU, O_DDR_STALLS, O_MHZ };
 
 /* Validate turbo before getopt can act on --list-quirks, open trace files, or
  * consult the quirk environment. Closed-world options are order independent. */
@@ -821,7 +824,7 @@ static int turbo_requested(int argc, char **argv) {
     return yes;
 }
 static int turbo_check_args(int argc, char **argv) {
-    static const char *allowed[] = {"cpu", "load", "entry", "sp", "max-insns", "max-seconds",
+    static const char *allowed[] = {"cpu", "load", "entry", "sp", "max-insns", "max-seconds", "mhz",
         "window", "no-window", "no-window-keys", "bios", "no-bios", "bare", "sw-dir",
         "uart-in", "no-autorun", "exit-on-halt", "no-exit-on-halt", "dump-sm", "dump-lcd",
         "dump-frame", "expect", "dump-be32", "quiet-mmio", "big", "color", "help"};
@@ -845,6 +848,7 @@ int main(int argc, char **argv) {
     const char *expects[32]; int nexp = 0;
     int bare = 0, uart_in_set = 0; const char *sw_dir = NULL;
     max_insns = 0;                               /* unlimited */
+    opt_mhz = 0;                                 /* unconstrained (turbo only) */
     opt_quiet_mmio = 1;
     init_sw_default(argv[0]);
     static struct option lo[] = {
@@ -863,7 +867,7 @@ int main(int argc, char **argv) {
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
-        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},
+        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},{"mhz",1,0,O_MHZ},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = is_turbo ? 0 : vv_quirk_default(), qdflt = is_turbo ? 0 : vv_quirk_default();
@@ -949,6 +953,14 @@ int main(int argc, char **argv) {
             }
             vv_ms_enable(rd, wr);
             break; }
+        case O_MHZ: {
+            if (!is_turbo) { vv_eprintf("--mhz requires --cpu=turbo\n"); return 2; }
+            char *e; double mhz = strtod(optarg, &e);
+            if (e == optarg || *e || !(mhz > 0)) {
+                vv_eprintf("--mhz: expected a positive number (omit for unconstrained), not '%s'\n", optarg);
+                return 2;
+            }
+            opt_mhz = mhz; break; }
         case O_EVENT_TRACE:
             if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
             setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
@@ -1020,7 +1032,7 @@ int main(int argc, char **argv) {
         }
         if (!rc) {
             turbo_opts opts = {.entry=entry, .sp=have_sp ? sp : 0, .max_insns=max_insns,
-                .max_ns=max_wall_ns, .window=want_window, .exit_on_halt=opt_exit_on_halt,
+                .max_ns=max_wall_ns, .mhz=opt_mhz, .window=want_window, .exit_on_halt=opt_exit_on_halt,
                 .dump_sm=dump_sm, .dump_lcd=dump_lcd, .dump_frame=dump_path};
             rc = turbo_run(&t, &opts);
             for (int i = 0; i < dump_be32_n; i++) {

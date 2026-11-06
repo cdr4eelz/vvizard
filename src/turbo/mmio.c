@@ -4,6 +4,7 @@
 #include "display.h"
 #include "prng.h"
 #include <limits.h>
+#include <time.h>
 
 /* Cold devices are out of the dispatch graph. Events are deadline-based;
  * Count is advanced in bulk by the CPU, not by a per-cycle callback. */
@@ -21,7 +22,18 @@ void turbo_events(turbo *t) {
         if (!t->rx_busy && t->insns >= t->rx_next && !(t->rx_has && vv_host_rx_paced()) && vv_host_rx_avail(1)) {
             t->rx_incoming = vv_host_rx_take(); t->rx_busy = 1; t->rx_at = t->insns + VV_UART_RX_FRAME;
         }
-        if (t->max_ns && vv_mono_ns() - t->t0 >= t->max_ns) t->stopped = 1;
+        if (t->mhz > 0) {
+            /* cycles == insns: due wall time is t0 + insns / (mhz * 1e6) seconds. */
+            uint64_t due = t->t0 + (uint64_t)(t->insns * (1000.0 / t->mhz));
+            uint64_t now = vv_mono_ns();
+            if (due > now) {
+                struct timespec ts = { .tv_sec = (time_t)(due / 1000000000ull),
+                                      .tv_nsec = (long)(due % 1000000000ull) };
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+                now = due;
+            }
+            if (t->max_ns && now - t->t0 >= t->max_ns) t->stopped = 1;
+        } else if (t->max_ns && vv_mono_ns() - t->t0 >= t->max_ns) t->stopped = 1;
         vv_term_tick();
         if (t->window) turbo_publish(t);
     }

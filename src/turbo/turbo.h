@@ -16,6 +16,7 @@ typedef struct turbo {
     int gp_pending;
     uint64_t insns, max_insns, max_ns, t0, event_at, pf_at, pf_frames, cnt_base;
     uint64_t tx_at, rx_at, rx_next, host_at, irqs;
+    double mhz; /* 0 = unconstrained; else target Mcyc/s (== Minsn/s) */
     int tx_pending, rx_busy, rx_has; uint8_t rx_byte, rx_incoming;
     uint32_t pf_cur, pf_next, gp_frame, gp_code, gp_rframe, halt, halt_pc, random;
     uint64_t halt_stores, launches, drops;
@@ -36,6 +37,7 @@ typedef struct turbo {
 typedef struct {
     uint32_t entry, sp;
     uint64_t max_insns, max_ns;
+    double mhz;
     int window, exit_on_halt, dump_sm, dump_lcd;
     const char *dump_frame;
 } turbo_opts;
