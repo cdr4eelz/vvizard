@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Hex program tests (make test-hex): the pass conditions listed in NOTES.md "Test pass
 conditions", plus tests/hwprobe (MIPS150 behaviour probe, must pass with the default quirks).
-Each test runs with the default quirk set (= current hardware) and --halt-on-quirk off."""
+Each test runs with the default quirk set (= current hardware) and --halt-on-quirk off.
+Deterministic expect tests run on both default (fast) and explicit --cpu=unicorn."""
 import os, subprocess, sys, tempfile
 from vvprog import prog
 
@@ -29,7 +30,16 @@ def ppm_px(path, x, y):
 
 
 def at(name, addr, *extra):
-    return vv("--load", f"{binfile(name)}@{addr:#x}", "--entry", f"{addr:#x}", *extra)
+    """Run on default CPU (fast) and explicit unicorn; both must pass."""
+    common = ("--load", f"{binfile(name)}@{addr:#x}", "--entry", f"{addr:#x}", *extra)
+    rd = vv(*common)  # default = fast
+    ru = vv("--cpu=unicorn", *common)
+    if rd.returncode != 0:
+        return rd
+    if ru.returncode != 0:
+        return ru
+    # Prefer default result for stdout/lcd checks (should match)
+    return rd
 
 
 def t_loop():   return at("loop", 0x40000000, "--expect", "t0=30", "--expect", "t2=0x11e").returncode == 0
@@ -58,10 +68,14 @@ def t_prng():
     return at("prng", 0x40000000, "--max-insns", "300000", *args).returncode == 0
 def t_gp():
     f = os.path.join(TMP, "gp.ppm")
-    r = vv("--load", f"{binfile('gpcmds')}@0x12003000", "--load", f"{binfile('gplaunch')}@0x40000000",
-           "--entry", "0x40000000", "--dump-frame", f)
-    return r.returncode == 0 and subprocess.run([sys.executable, os.path.join(HERE, "check_gp.py"), f],
-                                                capture_output=True).returncode == 0
+    common = ("--load", f"{binfile('gpcmds')}@0x12003000", "--load", f"{binfile('gplaunch')}@0x40000000",
+              "--entry", "0x40000000", "--dump-frame", f)
+    rd = vv(*common)
+    ru = vv("--cpu=unicorn", *common)
+    if rd.returncode != 0 or ru.returncode != 0:
+        return False
+    return subprocess.run([sys.executable, os.path.join(HERE, "check_gp.py"), f],
+                          capture_output=True).returncode == 0
 def t_hwprobe():
     return at("hwprobe", 0x60000000, "--expect", "s5=0", "--expect", "s3=45").returncode == 0
 

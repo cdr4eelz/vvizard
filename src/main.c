@@ -374,7 +374,7 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
 /* --threads (docs/MULTITHREADING-PLAN.md): with a window, uc_emu_start runs on an emulator thread
  * and the main thread draws (display.c); --sync / --threads=1 keeps everything on one thread. */
 static int opt_threads = 1;
-static int opt_cpu = VV_CPU_UNICORN;  /* --cpu=unicorn|fast */
+static int opt_cpu = VV_CPU_FAST;  /* --cpu=unicorn|fast; default fast */
 static uc_err emu_err;
 static uint32_t emu_entry; static uint64_t emu_until;
 static void *emu_thread(void *a) {
@@ -635,8 +635,8 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --little / --big   CPU endianness (default %s)\n"
 "\n"
 "Run control (defaults: unlimited, interrupts on, random DDR, window with keys):\n"
-"  --cpu=unicorn|fast  CPU backend (default unicorn).  fast = predecoded basic-block\n"
-"                     interpreter (L0); Unicorn stays default until a measured win\n"
+"  --cpu=unicorn|fast  CPU backend (default fast).  fast = predecoded basic-block\n"
+"                     interpreter (L0); use --cpu=unicorn for the Unicorn reference\n"
 "  --max-insns N      stop after N instructions (default 0 = unlimited)\n"
 "  --until ADDR       stop when PC reaches ADDR\n"
 "  --max-seconds S    stop after S seconds of wall time (checked every 4096 instructions)\n"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fast CPU backend tests vs Unicorn reference (default quirks = MIPS150 L0).
 
-Unicorn remains the default. These exercise --cpu=fast differential behavior:
+Default CPU is fast. Unicorn is the explicit reference (--cpu=unicorn). These exercise fast and differential behavior:
 hwprobe (45 checks), quirk on/off matrices, ALU/memory/branch edges, and
 explicit unsupported diagnostics. MIPS-I "spec" oracles are not invented for
 undefined cases (branch-in-delay, uninitialized regs).
@@ -79,17 +79,38 @@ def differential(name, addr, *extra, label=None, expect_same_rc=True):
 def t_help_mentions_cpu():
     r = subprocess.run([VV, "--help"], capture_output=True, env=ENV)
     text = (r.stdout + r.stderr).decode(errors="replace")
-    ok = "--cpu=" in text and "fast" in text and "unicorn" in text
+    ok = "--cpu=" in text and "default fast" in text and "unicorn" in text
     print(f"  help_cpu: {'PASS' if ok else 'FAIL'}")
     return ok
 
 
-def t_default_is_unicorn_loop():
+def t_default_is_fast_loop():
     r = subprocess.run(
         [VV, *BASE, "--load", f"{binfile('loop')}@0x40000000", "--entry", "0x40000000",
          "--expect", "t0=30", "--expect", "t2=0x11e"],
         stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
-    return expect_pass(r, "default_unicorn_loop")
+    err = r.stderr.decode(errors="replace")
+    if "cpu=fast" not in err:
+        print(f"  default_fast_loop: FAIL run line not fast\n{err[-400:]}")
+        return False
+    return expect_pass(r, "default_fast_loop")
+
+
+def t_default_matches_explicit_fast():
+    bil = binfile("loop")
+    args = [VV, *BASE, "--load", f"{bil}@0x40000000", "--entry", "0x40000000",
+            "--expect", "t0=30", "--expect", "t2=0x11e"]
+    rd = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+    rf = subprocess.run(args[:1] + BASE + ["--cpu=fast"] + args[1+len(BASE):],
+                        stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+    # rebuild cleanly
+    common = ["--load", f"{bil}@0x40000000", "--entry", "0x40000000",
+              "--expect", "t0=30", "--expect", "t2=0x11e"]
+    rd = subprocess.run([VV, *BASE, *common], stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+    rf = subprocess.run([VV, *BASE, "--cpu=fast", *common], stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+    ok = rd.returncode == 0 and rf.returncode == 0 and b"cpu=fast" in rd.stderr and b"cpu=fast" in rf.stderr
+    print(f"  default_matches_explicit_fast: {'PASS' if ok else 'FAIL'}")
+    return ok
 
 
 def t_unicorn_loop_explicit():
@@ -358,7 +379,8 @@ def main():
         return 1
     tests = [
         t_help_mentions_cpu,
-        t_default_is_unicorn_loop,
+        t_default_is_fast_loop,
+        t_default_matches_explicit_fast,
         t_unicorn_loop_explicit,
         t_unicorn_hwprobe,
         t_fast_loop,

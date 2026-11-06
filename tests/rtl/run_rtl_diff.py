@@ -13,6 +13,11 @@ from __future__ import annotations
 
 import argparse, hashlib, os, re, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
+import importlib.util as _ilu
+_od_path = Path(__file__).resolve().parent.parent / "optional_deps.py"
+_od_spec = _ilu.spec_from_file_location("optional_deps", _od_path)
+_od = _ilu.module_from_spec(_od_spec)
+_od_spec.loader.exec_module(_od)
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent

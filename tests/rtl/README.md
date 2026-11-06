@@ -44,6 +44,14 @@ RTL prints `SIG` lines; emulators dump the same table via `--dump-be32`.
 Compared: each backend’s actual==expected, and actuals equal across all three.
 Not compared: wall time, cycle count, IRQ/device timing (out of scope).
 
+## CPU backend
+
+vvizard default CPU is **fast**. The harness always compares explicit
+`--cpu=unicorn` and `--cpu=fast` (and Icarus). Use `--cpu=unicorn` outside
+the harness when exercising reference-only quirk/exception masks.
+`--cpu=fast` with `--threads=on` prints a diagnostic and forces `--sync`
+(not a silent option drop).
+
 ## Quirks
 
 Default vvizard quirks match current MIPS150 RTL behavior used by the corpus:

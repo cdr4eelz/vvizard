@@ -11,6 +11,9 @@ C. The proj7 player (default program: GIOS + bench + isr7 + proj7) after keys: s
    fields; 'q' sets the quit flag and proj7 calls HALT(1): HaltVal 1, GIOS restarts and (if this
    GIOS prints it) shows "HALTVAL: 00000001"; with --exit-on-halt the run ends at that store."""
 import os, re, subprocess, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import optional_deps
+from pathlib import Path as _Path
 from vvprog import prog
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -129,12 +132,28 @@ def t_quit_exit_on_halt():  # the same with --exit-on-halt: stops at proj7's HAL
 TESTS = [t_proj6, t_magic2, t_none, t_isr7_entry, t_player_sm, t_quit, t_quit_exit_on_halt]
 
 
+SW_DEPENDENT = {t_isr7_entry, t_player_sm, t_quit, t_quit_exit_on_halt}
+
+
 def main():
-    fails = 0
+    if not os.path.isfile(VV):
+        print(f"FAIL: missing vvizard binary at {VV}; run make first", file=sys.stderr)
+        return 1
+    gaps = optional_deps.software_tree_gaps(_Path(SW))
+    fails = skipped = ran = 0
     for t in TESTS:
-        ok = t(); fails += not ok
+        if t in SW_DEPENDENT and gaps:
+            print(f"  {t.__name__[2:]:18s} SKIP missing {gaps[0]}")
+            skipped += 1
+            continue
+        ok = t()
+        fails += not ok
+        ran += 1
         print(f"  {t.__name__[2:]:18s} {'PASS' if ok else 'FAIL'}")
-    print(f"{'PASS' if not fails else 'FAIL'}: {len(TESTS) - fails}/{len(TESTS)}")
+    if skipped and ran == 0 and fails == 0:
+        return optional_deps.print_skip(
+            f"cs150 software tree incomplete at {SW} (missing {', '.join(gaps)})")
+    print(f"{'PASS' if not fails else 'FAIL'}: {ran - fails}/{ran} ran, skipped={skipped}")
     return 1 if fails else 0
 
 
