@@ -254,6 +254,62 @@ def t_duty_cycle_reported():
     return ok
 
 
+
+def t_sync_overlap_delay():
+    """[sync] approx overlap% vs blocked/delayed%; --sync overlap ~0; threaded windowed sane."""
+    import shutil
+    # --sync headless gpcmds: expect [sync] line, non-neg, overlap near 0
+    ok = True
+    for cpu in ("fast", "unicorn"):
+        args = [VV, *BASE, f"--cpu={cpu}",
+                "--load", f"{binfile('gpcmds')}@0x12003000",
+                "--load", f"{binfile('gplaunch')}@0x40000000",
+                "--entry", "0x40000000"]
+        r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+        e = r.stderr.decode(errors="replace")
+        m = re.search(
+            r"\[sync\] approx overlap ([0-9.]+) ms \(([0-9.]+)% of wall\), "
+            r"blocked/delayed ([0-9.]+) ms \(([0-9.]+)% of wall\)", e)
+        if r.returncode != 0 or not m:
+            print(f"  sync_sync_{cpu}: FAIL\n{e[-800:]}"); ok = False; continue
+        ovr, ovr_pct, blk, blk_pct = map(float, m.groups())
+        if ovr < 0 or blk < 0 or ovr_pct < 0 or blk_pct < 0:
+            print(f"  sync_sync_{cpu}: FAIL negative {m.group(0)}"); ok = False; continue
+        # --sync: no parallel threads for display; overlap proxy should be ~0
+        if ovr_pct > 5.0 or ovr > 1.0:
+            print(f"  sync_sync_{cpu}: FAIL expected ~0 overlap got {m.group(0)}"); ok = False; continue
+        if "--sync (expect ~0 overlap)" not in e:
+            print(f"  sync_sync_{cpu}: FAIL missing --sync note"); ok = False; continue
+        print(f"  sync_sync_{cpu}: PASS ({m.group(0)})")
+
+    if not shutil.which("xvfb-run"):
+        print("  sync_threads_windowed: SKIP (no xvfb-run)")
+        return ok
+
+    for cpu in ("fast", "unicorn"):
+        args = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24",
+                VV, "--window", "--threads=on", "--frame-clock=emulated", "--quiet-mmio",
+                "--no-random-ddr", "--no-bios", "--no-halt-on-quirk", f"--cpu={cpu}",
+                "--max-insns", "500000",
+                "--load", f"{binfile('gpcmds')}@0x12003000",
+                "--load", f"{binfile('gplaunch')}@0x40000000",
+                "--entry", "0x40000000"]
+        r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, env=ENV, timeout=60)
+        e = r.stderr.decode(errors="replace")
+        m = re.search(
+            r"\[sync\] approx overlap ([0-9.]+) ms \(([0-9.]+)% of wall\), "
+            r"blocked/delayed ([0-9.]+) ms \(([0-9.]+)% of wall\)", e)
+        if r.returncode != 0 or not m:
+            print(f"  sync_threads_{cpu}: FAIL\n{e[-800:]}"); ok = False; continue
+        ovr, ovr_pct, blk, blk_pct = map(float, m.groups())
+        if ovr < 0 or blk < 0:
+            print(f"  sync_threads_{cpu}: FAIL negative"); ok = False; continue
+        if "emulator + display" not in e:
+            print(f"  sync_threads_{cpu}: FAIL not threaded display\n{e[-400:]}"); ok = False; continue
+        print(f"  sync_threads_{cpu}: PASS ({m.group(0)})")
+    return ok
+
+
 # ---- Quirk on matrices (MIPS150 intentional deviations; Unicorn reference under +quirk) ----
 EMU_ON = [
     ("quirk/emu_hilo", 0x40000000, ["--quirks=+hilo"], ["t2=0"]),
@@ -434,6 +490,7 @@ def main():
         t_fast_lwlr_mmio_side_read,
         t_fast_threads_windowed,
         t_duty_cycle_reported,
+        t_sync_overlap_delay,
         t_emu_on_matrix,
         t_emu_off_matrix,
         t_diff_loop_alias,

@@ -93,11 +93,15 @@ uint32_t vv_gp_status_word(void);                   /* GP_STATE (0x8000005C) rea
 void     vv_hw_summary(void);
 /* Host wall-clock duty: MIPS CPU vs GPU model vs display present (CLOCK_MONOTONIC).
  * CPU span is exclusive of nested GPU/display work on the emu thread; GPU worker and
- * main-thread present are parallel and not subtracted. Percentages are of bucket sum. */
+ * main-thread present are parallel and not subtracted. Percentages are of bucket sum.
+ * [sync] approx: overlap = max(0, bucket_sum - wall); delay = GPU/frame waits + inline GPU. */
+void     vv_duty_run_begin(void);                       /* mark wall t0 (call at run start) */
 void     vv_duty_add_gpu_ns(uint64_t ns, int nested);   /* GPU command walk; nested=1 if on emu thread */
 void     vv_duty_add_disp_ns(uint64_t ns, int nested);  /* raylib present / publish copy */
+void     vv_duty_add_delay_ns(uint64_t ns);             /* condvar/GPU settle / frame-wait stall */
+void     vv_duty_note_pub(void);                       /* one triple-buffer publish / present */
 void     vv_duty_commit_cpu_span(uint64_t span_ns);     /* exclusive CPU = span - nested */
-void     vv_duty_summary(void);
+void     vv_duty_summary(void);                         /* [duty] then [sync] approx line */
 /* provided by main.c: the host side of the serial line */
 int      vv_host_rx_avail(int poll_stdin);
 int      vv_host_rx_take(void);

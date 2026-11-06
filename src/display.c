@@ -225,6 +225,7 @@ static void draw(uc_engine *uc) {
     UpdateTexture(tex, rgba);
     BeginDrawing(); render(uc); EndDrawing();
     vv_duty_add_disp_ns(vv_mono_ns() - t0, 1);  /* --sync: same thread as CPU */
+    vv_duty_note_pub();
     collect_keys();                         /* EndDrawing polled; queues reset next poll */
     last_draw = last_poll = now();
 }
@@ -270,6 +271,7 @@ static void publish(uc_engine *uc) {
     sl->frame = cur_frame;
     tb_back = atomic_exchange_explicit(&tb_mid, tb_back | SLOT_FRESH, memory_order_acq_rel) & 3u;
     vv_duty_add_disp_ns(vv_mono_ns() - t0, 1);  /* emu-thread publish (nested in CPU span) */
+    vv_duty_note_pub();
     last_pub = t;
     wake_main();
 }
@@ -313,12 +315,14 @@ static int draw_fresh(void) {               /* main: draw the middle slot if it 
     UpdateTexture(tex, rgba);
     BeginDrawing(); ClearBackground(BLACK); DrawTexture(tex, 0, 0, WHITE); draw_strip(sl->l1, sl->l2, sl->lcd); EndDrawing();
     vv_duty_add_disp_ns(vv_mono_ns() - t0, 0);  /* main thread: parallel with emu CPU */
+    vv_duty_note_pub();
     collect_keys();                          /* EndDrawing polled */
     return 1;
 }
 static void wait_publish(void) {            /* up to POLL_PERIOD for the emulator's next publish */
     pthread_mutex_lock(&pub_mx);
     if (!(atomic_load_explicit(&tb_mid, memory_order_acquire) & SLOT_FRESH) && !atomic_load(&emu_done)) {
+        uint64_t t0 = vv_mono_ns();
 #ifdef __APPLE__
         struct timespec rel = { 0, (long)(POLL_PERIOD * 1e9) };
         pthread_cond_timedwait_relative_np(&pub_cv, &pub_mx, &rel);
@@ -328,6 +332,7 @@ static void wait_publish(void) {            /* up to POLL_PERIOD for the emulato
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&pub_cv, &pub_mx, &ts);
 #endif
+        vv_duty_add_delay_ns(vv_mono_ns() - t0);   /* display blocked waiting for fresh publish */
     }
     pthread_mutex_unlock(&pub_mx);
 }

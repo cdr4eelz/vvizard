@@ -254,9 +254,11 @@ void vv_gpu_submit(uint32_t gp_frame, uint32_t code, int ncmds) {
 int vv_gpu_done(void) { return atomic_load_explicit(&wk_done, memory_order_acquire); }
 void vv_gpu_wait(void) {
     for (int i = 0; i < 2000; i++) if (vv_gpu_done()) return;   /* usually already done */
+    uint64_t t0 = vv_mono_ns();
     pthread_mutex_lock(&wk_mx);
     while (!atomic_load_explicit(&wk_done, memory_order_acquire)) pthread_cond_wait(&wk_fin, &wk_mx);
     pthread_mutex_unlock(&wk_mx);
+    vv_duty_add_delay_ns(vv_mono_ns() - t0);   /* blocked waiting on GPU worker */
 }
 void vv_gpu_settle(uint32_t fn) {
     if (wk_started && !vv_gpu_done() && job_fn == fn) vv_gpu_wait();

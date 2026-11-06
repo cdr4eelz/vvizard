@@ -995,6 +995,7 @@ int main(int argc, char **argv) {
             : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)");
     vv_quirk_decode = vv_quirk_needs_decode();
     run_t0 = vv_mono_ns();
+    vv_duty_run_begin();
     emu_entry = entry; emu_until = have_stop ? stop_addr : 0xFFFFFFFFull;   /* max_insns: hook_code */
     /* threaded GPU: headless too (the ready bit and gp-busy exist without a window) */
     if (opt_threads && !vv_legacy_io) {
