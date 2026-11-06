@@ -28,6 +28,7 @@
 #include "shmem.h"
 #include "hw.h"
 #include "dcache.h"
+#include "memstall.h"
 
 /* --uart-in STR: bytes fed to UART RX before stdin (e.g. auto-type a GIOS command).
  * Escapes \r \n \t \\ are decoded. GIOS ends tokens on space or CR (not LF). */
@@ -85,7 +86,7 @@ static int opt_trace, opt_quiet_mmio, opt_trace_regs;
  * (registers only at addra[11:6]==0, LCD at 0x100-0x17C). */
 static int opt_mmio_ise;
 static uint32_t prev_regs[32];
-static uint64_t insn_count, cnt_base_insn;
+static uint64_t insn_count, cnt_base_insn, cnt_base_cycle;
 static uint64_t max_insns;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
@@ -275,7 +276,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     case VV_OW_UATX_READY: v = vv_uart_tx_ready(); break;   /* low while a byte shifts out (hw.c) */
     case VV_OW_UARX_VALID: v = vv_uart_rx_valid(); break;
     case VV_OW_UARX_DATA:  v = vv_uart_rx_read(); break;
-    case VV_OW_CNT_CYCLE: /* no cycle model: cycles == instructions */
+    case VV_OW_CNT_CYCLE: v = (uint32_t)((vv_ddr_stalls ? vv_ms_cycles() : insn_count) - cnt_base_cycle); break;
     case VV_OW_CNT_INST:  v = (uint32_t)(insn_count - cnt_base_insn); break;
     case VV_OW_PF_FRAME:  v = 0x10000000u | vv_pf_frame() << VV_FSHIFT; break;   /* frame being scanned (MemMapIO.v:162) */
     case VV_OW_GP_STATE:  v = vv_gp_status_word(); break;   /* graphics.h gstate_s layout (hw.c) */
@@ -316,7 +317,7 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     }
     switch (w) {
     case VV_OW_UATX_DATA: vv_uart_tx_write(v & 0xFF); return;    /* dina[7:0]; lost while TX busy */
-    case VV_OW_CNT_RESET: cnt_base_insn = insn_count; break;
+    case VV_OW_CNT_RESET: cnt_base_insn = insn_count; cnt_base_cycle = vv_ddr_stalls ? vv_ms_cycles() : insn_count; break;
     case VV_OW_PF_FRAME:  pf_frame = v; vv_pf_write(uc, v); pf_writes++;   /* takes effect at the frame end (hw.c) */
         if (dump_every && pf_writes % dump_every == 0) { char fn[PATH_MAX];
             snprintf(fn, sizeof fn, "%s%06llu.ppm", dump_prefix, (unsigned long long)pf_writes); vv_disp_dump_ppm(uc, fn); }
@@ -440,7 +441,12 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     insn_count++;
     vv_cur_pc = (uint32_t)addr;
     if ((uint32_t)addr - 0x10000000u < 0x30000000u) note_ddr_exec((uint32_t)addr);   /* code in DDR */
-    vv_hw_tick(uc, insn_count);              /* devices advance one cycle (UART, PixelFeeder, timer) */
+    if (vv_ddr_stalls) {
+        unsigned st = vv_ms_ifetch((uint32_t)addr) + vv_ms_dside_uc(uc, (uint32_t)addr);
+        vv_hw_tick(uc, vv_ms_advance(st));   /* CNT_CYCLE / devices include stall cycles */
+    } else {
+        vv_hw_tick(uc, insn_count);          /* devices advance one cycle (UART, PixelFeeder, timer) */
+    }
     if (vv_quirk_halted) { uc_emu_stop(uc); return; }
     if (nevents) run_due_events(uc, 0);
     if (!vv_quirk_decode) {                  /* no quirk needs the per-instruction decode (quirk.h) */
@@ -650,6 +656,11 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "Run control (defaults: unlimited, interrupts on, random DDR, window with keys):\n"
 "  --cpu=unicorn|fast  CPU backend (default fast).  fast = predecoded basic-block\n"
 "                     interpreter (L0); use --cpu=unicorn for the Unicorn reference\n"
+"  --ddr-stalls[=R,W]  approximate DDR2 + I$/D$ miss stalls (caches ONLY with this flag).\n"
+"                     Omit the flag for off (1 cycle/insn, no cache tax). Bare --ddr-stalls\n"
+"                     or --ddr-stalls=R,W enables 256x32B WT caches; R = read/miss-fill\n"
+"                     cycles (default 16), W = write-through cycles (default 3); hits = 0.\n"
+"                     CNT_CYCLE / device time advance by stall cycles (can exceed insn count).\n"
 "  --max-insns N      stop after N instructions (default 0 = unlimited)\n"
 "  --until ADDR       stop when PC reaches ADDR\n"
 "  --max-seconds S    stop after S seconds of wall time (checked every 4096 instructions)\n"
@@ -744,6 +755,21 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
  * (so `--trace prog.elf` still treats prog.elf as a program). */
 static int is_uint(const char *s) { char *e; if (!*s || *s == '-') return 0; strtoull(s, &e, 0); return !*e; }
 static int is_color(const char *s) { return vv_color_parse(s) >= 0; }
+/* --ddr-stalls[=R,W]: "16,3" or empty (defaults). Rejects garbage. */
+static int parse_ddr_stalls(const char *s, unsigned *rd, unsigned *wr) {
+    *rd = VV_MS_READ_STALLS_DFLT; *wr = VV_MS_WRITE_STALLS_DFLT;
+    if (!s || !*s) return 0;
+    char *e; unsigned long r = strtoul(s, &e, 0);
+    if (e == s || *e != ',') return -1;
+    const char *p2 = e + 1;
+    unsigned long w = strtoul(p2, &e, 0);
+    if (e == p2 || *e) return -1;
+    *rd = (unsigned)r; *wr = (unsigned)w;
+    return 0;
+}
+static int is_ddr_stalls_arg(const char *s) {
+    unsigned r, w; return parse_ddr_stalls(s, &r, &w) == 0;
+}
 static const char *opt_next(int argc, char **argv, int (*ok)(const char *)) {
     if (optarg) return optarg;
     if (optind < argc && argv[optind][0] != '-' && ok(argv[optind])) return argv[optind++];
@@ -755,7 +781,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_DUMP_SM, O_DUMP_BE32, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU };
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU, O_DDR_STALLS };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
@@ -784,7 +810,7 @@ int main(int argc, char **argv) {
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
-        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},
+        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
@@ -854,6 +880,15 @@ int main(int argc, char **argv) {
             if (!strcmp(optarg, "unicorn")) opt_cpu = VV_CPU_UNICORN;
             else if (!strcmp(optarg, "fast")) opt_cpu = VV_CPU_FAST;
             else { vv_eprintf("--cpu: expected unicorn or fast, not '%s'\n", optarg); return 2; } break;
+        case O_DDR_STALLS: {
+            unsigned rd = VV_MS_READ_STALLS_DFLT, wr = VV_MS_WRITE_STALLS_DFLT;
+            const char *v = optarg ? optarg : opt_next(argc, argv, is_ddr_stalls_arg);
+            if (v && parse_ddr_stalls(v, &rd, &wr)) {
+                vv_eprintf("--ddr-stalls: expected R,W (non-negative read,write stall cycles), not '%s'\n", v);
+                return 2;
+            }
+            vv_ms_enable(rd, wr);
+            break; }
         case O_EVENT_TRACE:
             if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
             setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
@@ -987,15 +1022,21 @@ int main(int argc, char **argv) {
     vv_disp_init(want_window);
     /* wall frame clock: the ~60/s frame ends redraw; the vv_disp_tick timer is only a fallback */
     if (vv_frame_clock == VV_FRAME_CLOCK_WALL && vv_pf_period && !vv_legacy_io) vv_disp_redraw_period = 0.1;
-    vv_eprintf("[run] cpu=%s %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n",
+    { char ddr_buf[32];
+      if (vv_ddr_stalls) snprintf(ddr_buf, sizeof ddr_buf, "%u,%u", vv_ms_read_stalls, vv_ms_write_stalls);
+      else snprintf(ddr_buf, sizeof ddr_buf, "off");
+    vv_eprintf("[run] cpu=%s %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s ddr-stalls=%s\n",
             opt_cpu == VV_CPU_FAST ? "fast" : "unicorn", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
             vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
             !opt_threads ? "off (--sync)" : vv_legacy_io ? (vv_disp_has_window() ? "on (emulator + display; GPU synchronous: --legacy-io)" : "on (no window, --legacy-io: one thread)")
-            : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)");
+            : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)",
+            ddr_buf); }
     vv_quirk_decode = vv_quirk_needs_decode();
     run_t0 = vv_mono_ns();
     vv_duty_run_begin();
+    cnt_base_cycle = 0;
+    if (vv_ddr_stalls) vv_ms_reset();
     emu_entry = entry; emu_until = have_stop ? stop_addr : 0xFFFFFFFFull;   /* max_insns: hook_code */
     /* threaded GPU: headless too (the ready bit and gp-busy exist without a window) */
     if (opt_threads && !vv_legacy_io) {
@@ -1070,6 +1111,7 @@ int main(int argc, char **argv) {
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
     vv_hw_summary();
     vv_duty_summary();
+    vv_ms_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
 
