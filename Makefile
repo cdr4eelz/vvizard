@@ -37,8 +37,8 @@ UNICORN_LIBS   := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config --libs
 RAYLIB_CFLAGS  := $(shell pkg-config --cflags raylib)
 RAYLIB_LIBS    := $(shell pkg-config --libs raylib)
 
-SRCS := $(wildcard $(SRC_DIR)/*.c) $(wildcard $(SRC_DIR)/cpu/*.c)
-HDRS := $(wildcard $(SRC_DIR)/*.h) $(wildcard $(SRC_DIR)/cpu/*.h)
+SRCS := $(wildcard $(SRC_DIR)/*.c) $(wildcard $(SRC_DIR)/cpu/*.c) $(wildcard $(SRC_DIR)/turbo/*.c)
+HDRS := $(wildcard $(SRC_DIR)/*.h) $(wildcard $(SRC_DIR)/cpu/*.h) $(wildcard $(SRC_DIR)/turbo/*.h)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 # Run settings are vvizard's own command-line arguments (./vvizard --help); with no arguments it
