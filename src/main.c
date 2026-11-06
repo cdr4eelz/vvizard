@@ -696,6 +696,7 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
+"  --dump-be32=A:N    dump N big-endian words from guest address A at exit (harness)\n"
 "  --dump-sm          print the proj6/proj7 shared memory at 0x50000000 (shared7.h struct SM_DATA,\n"
 "                     or shared6.h) decoded, at exit; its consistency warnings (magic/majorvers\n"
 "                     stamp vs shared7.h, magic2, buffer) are printed at exit even without it\n"
@@ -732,12 +733,13 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_EXPECT, O_SCRIPT, O_IRQ, O_NO_IRQ, O_DUMP_EVERY, O_DUMP_PREFIX, O_WINDOW, O_NO_WINDOW,
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
-       O_DUMP_LCD, O_DUMP_SM, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
+       O_DUMP_LCD, O_DUMP_SM, O_DUMP_BE32, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
        O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
     const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0, dump_sm = 0;
+    uint32_t dump_be32_addr = 0; int dump_be32_n = 0;
     uint32_t entry = VV_PC_BOOT, sp = 0; int have_entry = 0, have_elf_entry = 0, have_sp = 0;
     const char *loads[32]; int nloads = 0;
     const char *expects[32]; int nexp = 0;
@@ -756,7 +758,7 @@ int main(int argc, char **argv) {
         {"random-ddr",2,0,O_RANDOM_DDR},{"no-random-ddr",0,0,O_NO_RANDOM_DDR},{"uart-in",1,0,O_UART_IN},
         {"no-autorun",0,0,O_NO_AUTORUN},{"halt-on-quirk",2,0,O_HALT},{"warn-on-quirk",2,0,O_WARN},
         {"no-halt-on-quirk",0,0,O_NO_HALT},{"quirks",1,0,O_QUIRKS},{"no-quirks",0,0,O_NO_QUIRKS},
-        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"dump-sm",0,0,O_DUMP_SM},{"screenshot",1,0,O_SCREENSHOT},
+        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"dump-sm",0,0,O_DUMP_SM},{"dump-be32",1,0,O_DUMP_BE32},{"screenshot",1,0,O_SCREENSHOT},
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
@@ -839,6 +841,12 @@ int main(int argc, char **argv) {
         case O_LIST_QUIRKS: vv_quirk_list(stdout); return 0;
         case O_DUMP_LCD: dump_lcd = 1; break;
         case O_DUMP_SM: dump_sm = 1; break;
+        case O_DUMP_BE32: {
+            char *colon = strchr(optarg, ':');
+            if (!colon) { vv_eprintf("--dump-be32 needs ADDR:COUNT\n"); return 2; }
+            *colon = 0; dump_be32_addr = strtoul(optarg, 0, 0); dump_be32_n = (int)strtol(colon + 1, 0, 0);
+            if (dump_be32_n < 0 || dump_be32_n > 4096) { vv_eprintf("--dump-be32 COUNT out of range\n"); return 2; }
+            break; }
         case O_SCREENSHOT: shot_path = optarg; break;
         case O_COLOR: v = opt_next(argc, argv, is_color);
             if ((color = vv_color_parse(v)) < 0) {
@@ -1032,6 +1040,15 @@ int main(int argc, char **argv) {
     vv_hw_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
+
+    if (dump_be32_n > 0) {
+        for (int i = 0; i < dump_be32_n; i++) {
+            uint32_t a = dump_be32_addr + (uint32_t)i * 4u;
+            /* Use the same guest read path as --dump-sm (uc_mem_read), not only host vv_ram. */
+            uint32_t v = rd_guest(uc, a, 4);
+            vv_eprintf("[dump-be32] a=0x%08x v=0x%08x ok=1\n", a, v);
+        }
+    }
     if (halt_stores)                            /* after the register dump (also after a quirk halt's) */
         vv_eprintf("[halt] HaltVal = 0x%08x (%u), last stored at pc=0x%08x (%llu store%s)%s\n", halt_val, halt_val, halt_pc,
                    (unsigned long long)halt_stores, halt_stores == 1 ? "" : "s", guest_exited ? "; run ended by --exit-on-halt" : "");

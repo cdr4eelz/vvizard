@@ -46,7 +46,7 @@ EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
 .PHONY: vendor-cmp check-vendor vendor-update test-vendor
-.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-cpu-rtl tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -196,6 +196,12 @@ test-quirks: $(TARGET) tests
 
 test-hex: $(TARGET) tests
 	python3 tests/test_hex.py
+
+# Tri-way Unicorn/fast/Icarus CPU differential (requires CS150_ROOT + iverilog + mips binutils).
+# Hard-fails if deps missing (not a silent skip). Does not modify cs150 Verilog.
+test-cpu-rtl: $(TARGET)
+	python3 tests/test_cpu_rtl.py $(if $(CS150_ROOT),--cs150-root $(CS150_ROOT),)
+
 
 test-hw: $(TARGET) tests
 	python3 tests/test_hw.py
