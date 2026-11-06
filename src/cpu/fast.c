@@ -7,6 +7,9 @@
 #include "hw.h"
 #include "quirk.h"
 #include "dcache.h"
+#include "memstall.h"
+
+static unsigned pending_stall;
 #include "term.h"
 #include "display.h"
 
@@ -275,8 +278,9 @@ static uint32_t mem_load(vv_fast_env *e, uint32_t va, unsigned size, int signed_
         uint32_t sh = 32 - 8 * size;
         v = (uint32_t)((int32_t)(v << sh) >> sh);
     }
-    if (size == 4 && ((c >> 28) == 0x1 || (c >> 28) == 0x3)) {
-        uint32_t stale; (void)vv_dc_load(c, &stale);
+    if ((c >> 28) == 0x1 || (c >> 28) == 0x3) {
+        if (size == 4) { uint32_t stale; (void)vv_dc_load(c, &stale); }
+        pending_stall += vv_ms_load(c);
     }
     return v;
 }
@@ -305,7 +309,10 @@ static void mem_store(vv_fast_env *e, vv_fast_cpu *cpu, uint32_t va, unsigned si
     if (!p) { if (vv_quirk_on(VV_Q_UNMAPPED)) return; *fault = 1; return; }
     if (e->guest_big) for (unsigned i = 0; i < size; i++) p[i] = (uint8_t)(val >> (8 * (size - 1 - i)));
     else for (unsigned i = 0; i < size; i++) p[i] = (uint8_t)(val >> (8 * i));
-    if ((c >> 28) == 0x1 || (c >> 28) == 0x3) vv_dc_store(c, size, val);
+    if ((c >> 28) == 0x1 || (c >> 28) == 0x3) {
+        vv_dc_store(c, size, val);
+        pending_stall += vv_ms_store(c);
+    }
     vv_fast_invalidate(c, size);
 }
 
@@ -564,8 +571,14 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
         vv_cur_pc = pc;
         if (pc - 0x10000000u < 0x30000000u && env->note_ddr_exec) env->note_ddr_exec(pc);
 
+        pending_stall = 0;
+        unsigned ifetch_st = vv_ms_ifetch(pc);
+        pending_stall = ifetch_st;
         (*env->insn_count)++;
-        vv_hw_tick(env->uc, *env->insn_count);
+        if (vv_ddr_stalls)
+            vv_hw_tick(env->uc, vv_ms_advance(ifetch_st));
+        else
+            vv_hw_tick(env->uc, *env->insn_count);
         if (vv_quirk_halted) break;
         if (env->nevents && env->run_due_events) env->run_due_events(env->uc, 0);
 
@@ -589,6 +602,11 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
         if (was_delay) cpu->in_delay = 0;
 
         int rc = exec_one(env, cpu, o);
+        if (vv_ddr_stalls && pending_stall > ifetch_st) {
+            unsigned extra = pending_stall - ifetch_st;
+            vv_ms_add_cycles(extra);
+            vv_hw_tick(env->uc, vv_ms_cycles());   /* catch devices up past D$ stalls */
+        }
         if (rc < 0) { vv_fast_live_cpu = NULL; return 1; }
         if (cpu->stop_break) { cpu->pc = o->pc + 4; break; }
 

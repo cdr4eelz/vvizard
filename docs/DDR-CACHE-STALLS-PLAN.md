@@ -82,3 +82,12 @@ All tests PASSED. These are the best current **approx miss/hit stall** numbers f
 - Full MIG timing / multi-master arbitration fidelity.
 - Changing default backend away from fast.
 - Editing cs150 Verilog or `proj7.c`.
+
+## Implementation status
+
+Landed on this branch as `--ddr-stalls` (default off):
+
+- `src/memstall.c`: I$/D$ tag arrays (256×32B), miss=`VV_MS_MISS_CYCLES` (20), write=`VV_MS_WRITE_CYCLES` (3)
+- Gated on `vv_ddr_stalls`; fast/Unicorn paths call `vv_ms_*` only when set (early out)
+- `vv_hw_tick` / CNT_CYCLE use `vv_ms_cycles()` when on so cycles can exceed insn count
+- `[ddr]` summary line; `tests/test_ddr_stalls.py` + `tests/ddr_stall.s`
