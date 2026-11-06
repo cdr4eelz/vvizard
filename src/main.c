@@ -981,13 +981,12 @@ int main(int argc, char **argv) {
         if (pthread_create(&emu_tid, &ta, emu_thread, uc)) { vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n"); vv_disp_threaded = threaded_disp = 0; }
         pthread_attr_destroy(&ta);
     } else if (threaded_disp && opt_cpu == VV_CPU_FAST) {
+        vv_eprintf("[run] --cpu=fast does not support threaded display yet; forcing --sync (single-threaded)\n");
         threaded_disp = 0; /* fast path runs on this thread for now */
     }
     if (opt_cpu == VV_CPU_FAST) {
         if (threaded_disp) {
-            vv_eprintf("[run] --cpu=fast with threaded display not supported yet; using --sync path\n");
             vv_disp_threaded = threaded_disp = 0;
-            /* emu thread was not started */
         }
         vv_fast_cpu fcpu;
         vv_fast_env fenv = {0};

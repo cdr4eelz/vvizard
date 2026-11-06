@@ -25,6 +25,11 @@ enum {
     OP_J, OP_JAL, OP_JR, OP_JALR,
     OP_MFC0, OP_MTC0,
     OP_MFHI0, OP_MFLO0, OP_SYSCALL_NOP, OP_MULT_NOP, OP_DIV_NOP,
+    /* lwlr quirk: lwl/lwr write 0; swl/swr drop */
+    OP_LWL0, OP_LWR0, OP_SWL_DROP, OP_SWR_DROP,
+    /* reserved quirk: ops 0x27/0x2C/0x2D/0x2F access address 0 */
+    OP_LOAD0, OP_STORE0_DROP,
+    OP_RD0, /* unknown SPECIAL funct -> rd = 0 */
 };
 
 typedef struct {
@@ -79,20 +84,23 @@ static void decode_one(uint32_t pc, uint32_t insn, vv_ir *o) {
     int hilo0 = vv_quirk_on(VV_Q_HILO);
     int sysnop = vv_quirk_on(VV_Q_SYSCALL);
     int resnop = vv_quirk_on(VV_Q_RESERVED);
+    int lwlr = vv_quirk_on(VV_Q_LWLR);
 
     if (insn == 0) { o->op = OP_NOP; return; }
 
     switch (op) {
-    case 0x00:
+    case 0x00: /* SPECIAL */
         switch (fn) {
         case 0x00: o->op = OP_SLL; o->uimm = sa; break;
-        case 0x02: o->op = OP_SRL; o->uimm = sa; break;
+        case 0x02: o->op = OP_SRL; o->uimm = sa; break; /* rotr (rs!=0) acts as srl under reserved */
         case 0x03: o->op = OP_SRA; o->uimm = sa; break;
         case 0x04: o->op = OP_SLLV; break;
-        case 0x06: o->op = OP_SRLV; break;
+        case 0x06: o->op = OP_SRLV; break; /* rotrv acts as srlv under reserved */
         case 0x07: o->op = OP_SRAV; break;
         case 0x08: o->op = OP_JR; break;
         case 0x09: o->op = OP_JALR; if (!o->rd) o->rd = 31; break;
+        case 0x0a: case 0x0b: /* movz/movn */
+            o->op = resnop ? OP_RD0 : OP_SLOW; break;
         case 0x0c: o->op = sysnop ? OP_SYSCALL_NOP : OP_SLOW; break;
         case 0x0d: o->op = OP_BREAK; break;
         case 0x10: o->op = hilo0 ? OP_MFHI0 : OP_SLOW; break;
@@ -111,18 +119,23 @@ static void decode_one(uint32_t pc, uint32_t insn, vv_ir *o) {
         case 0x2a: o->op = OP_SLT; break;
         case 0x2b: o->op = OP_SLTU; break;
         default:
-            if (resnop) { o->op = OP_ADDU; o->rs = 0; o->rt = 0; } /* rd=0 */
-            else o->op = OP_SLOW;
+            o->op = resnop ? OP_RD0 : OP_SLOW;
             break;
         }
         break;
-    case 0x01:
+    case 0x01: /* REGIMM */
         switch (rt) {
         case 0x00: o->op = OP_BLTZ; break;
         case 0x01: o->op = OP_BGEZ; break;
         case 0x10: o->op = OP_BLTZAL; break;
         case 0x11: o->op = OP_BGEZAL; break;
-        default: o->op = resnop ? ((rt & 1) ? OP_BGEZ : OP_BLTZ) : OP_SLOW; break;
+        default:
+            /* reserved: rt[0] selects bltz/bgez; rt[4] links. bltzl/bgezl are NOT "likely". */
+            if (resnop) {
+                o->op = (rt & 1) ? OP_BGEZ : OP_BLTZ;
+                if (rt & 16) o->op = (rt & 1) ? OP_BGEZAL : OP_BLTZAL;
+            } else o->op = OP_SLOW;
+            break;
         }
         break;
     case 0x02: o->op = OP_J; o->uimm = insn & 0x03FFFFFF; break;
@@ -139,21 +152,50 @@ static void decode_one(uint32_t pc, uint32_t insn, vv_ir *o) {
     case 0x0d: o->op = OP_ORI; break;
     case 0x0e: o->op = OP_XORI; break;
     case 0x0f: o->op = OP_LUI; break;
-    case 0x10:
-        if ((rs == 0 || rs == 4) && (insn & 0x7FF) == 0) {
+    case 0x10: /* COP0 */
+        /* sel (bits 2:0) is ignored on COP0150; bits 10:3 must be 0 for mfc0/mtc0. */
+        if ((rs == 0 || rs == 4) && (insn & 0x7F8) == 0) {
             o->op = (rs == 0) ? OP_MFC0 : OP_MTC0;
             o->rd = (uint8_t)((insn >> 11) & 31);
-        } else o->op = resnop ? OP_NOP : OP_SLOW;
+        } else {
+            /* eret / other COP0: nop under reserved */
+            o->op = resnop ? OP_NOP : OP_SLOW;
+        }
+        break;
+    case 0x14: case 0x15: case 0x16: case 0x17: /* beql/bnel/blezl/bgtzl */
+        o->op = resnop ? OP_NOP : OP_SLOW;
+        break;
+    case 0x1c: case 0x1f: /* SPECIAL2/3 */
+        o->op = resnop ? OP_NOP : OP_SLOW;
         break;
     case 0x20: o->op = OP_LB; break;
     case 0x21: o->op = OP_LH; break;
+    case 0x22: /* lwl */
+        o->op = lwlr ? OP_LWL0 : OP_SLOW; break;
     case 0x23: o->op = OP_LW; break;
     case 0x24: o->op = OP_LBU; break;
     case 0x25: o->op = OP_LHU; break;
+    case 0x26: /* lwr */
+        o->op = lwlr ? OP_LWR0 : OP_SLOW; break;
+    case 0x27: /* reserved: lw from address 0 */
+        o->op = resnop ? OP_LOAD0 : OP_SLOW; break;
     case 0x28: o->op = OP_SB; break;
     case 0x29: o->op = OP_SH; break;
+    case 0x2a: /* swl */
+        o->op = lwlr ? OP_SWL_DROP : OP_SLOW; break;
     case 0x2b: o->op = OP_SW; break;
-    default: o->op = resnop ? OP_NOP : OP_SLOW; break;
+    case 0x2c: case 0x2d: case 0x2f: /* reserved: store to address 0 dropped */
+        o->op = resnop ? OP_STORE0_DROP : OP_SLOW; break;
+    case 0x2e: /* swr */
+        o->op = lwlr ? OP_SWR_DROP : OP_SLOW; break;
+    case 0x30: case 0x31: case 0x32: case 0x33: /* ll/lwc* */
+    case 0x38: case 0x39: case 0x3a: case 0x3b: /* sc/swc* */
+    case 0x11: case 0x12: case 0x13: /* COP1-3 */
+        o->op = resnop ? OP_NOP : OP_SLOW;
+        break;
+    default:
+        o->op = resnop ? OP_NOP : OP_SLOW;
+        break;
     }
 }
 
@@ -280,9 +322,13 @@ static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
     switch (o->op) {
     case OP_NOP: case OP_SYSCALL_NOP: case OP_MULT_NOP: case OP_DIV_NOP: break;
     case OP_BREAK: c->stop_break = 1; break;
-    case OP_SLOW:
-        vv_eprintf("[fast] unsupported insn at pc=0x%08x\n", o->pc);
+    case OP_SLOW: {
+        int ok = 1; uint32_t raw = 0;
+        { uint32_t caddr = vv_canon_inl(o->pc); if (caddr != 0xFFFFFFFFu) raw = vv_ram_be32(caddr, &ok); }
+        vv_eprintf("[fast] unsupported insn at pc=0x%08x insn=0x%08x (not implemented for this quirk mask; use --cpu=unicorn)\n",
+                   o->pc, ok ? raw : 0);
         return -1;
+    }
     case OP_ADDIU: case OP_ADDI_WRAP: sr(c, o->rt, rs + (uint32_t)(int32_t)o->imm); break;
     case OP_ADDU: case OP_ADD_WRAP: sr(c, o->rd, rs + rt); break;
     case OP_SUBU: case OP_SUB_WRAP: sr(c, o->rd, rs - rt); break;
@@ -348,14 +394,18 @@ static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
     case OP_JR:
         taken = 1; target = rs; break;
     case OP_JALR:
-        sr(c, o->rd, link);
+        /* jalr-rd quirk (old HW): always link to $ra, ignore rd. Off: standard rd. */
+        sr(c, vv_quirk_on(VV_Q_JALR_RD) ? 31 : o->rd, link);
         taken = 1; target = rs; break;
     case OP_MFC0: {
-        uint32_t v = vv_cop0_read(o->rd);
-        if (!vv_quirk_on(VV_Q_COP0)) {
-            if (o->rd == 12) v = vv_hw_status();
+        uint32_t v = 0;
+        if (vv_quirk_on(VV_Q_COP0)) v = vv_cop0_read(o->rd);
+        else {
+            if (o->rd == 12) uc_reg_read(e->uc, UC_MIPS_REG_CP0_STATUS, &v);
             else if (o->rd == 13) v = vv_hw_cause();
             else if (o->rd == 14) v = vv_hw_epc();
+            else if (o->rd == 9 || o->rd == 11) v = vv_cop0_read(o->rd);
+            else v = 0;
         }
         sr(c, o->rt, v);
         break;
@@ -363,10 +413,37 @@ static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
     case OP_MTC0:
         if (vv_quirk_on(VV_Q_COP0)) vv_cop0_write(o->rd, rt);
         else {
-            if (o->rd == 12) vv_hw_set_status(rt);
+            if (o->rd == 12) uc_reg_write(e->uc, UC_MIPS_REG_CP0_STATUS, &rt);
+            else if (o->rd == 13) { /* Cause: only clear IP bits via hw helper path */ vv_cop0_write(13, rt); }
             else if (o->rd == 14) vv_hw_set_epc(rt);
-            else vv_cop0_write(o->rd, rt);
+            else if (o->rd == 9 || o->rd == 11) vv_cop0_write(o->rd, rt);
+            else { /* other COP0 ignored */ }
         }
+        break;
+    case OP_LWL0: case OP_LWR0: {
+        /* lwlr on: write 0 to rt (load-delay still applies) */
+        uint32_t old = c->gpr[o->rt];
+        if (o->rt) {
+            if (vv_quirk_on(VV_Q_LOAD_USE)) { next_load_rt = o->rt; next_load_old = old; }
+            c->gpr[o->rt] = 0;
+        }
+        break;
+    }
+    case OP_SWL_DROP: case OP_SWR_DROP:
+        /* store dropped */
+        break;
+    case OP_LOAD0: {
+        uint32_t old = c->gpr[o->rt];
+        if (o->rt) {
+            if (vv_quirk_on(VV_Q_LOAD_USE)) { next_load_rt = o->rt; next_load_old = old; }
+            c->gpr[o->rt] = 0; /* load from undecoded addr 0 */
+        }
+        break;
+    }
+    case OP_STORE0_DROP:
+        break;
+    case OP_RD0:
+        sr(c, o->rd, 0);
         break;
     default: return -1;
     }
@@ -382,10 +459,9 @@ static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
 }
 
 static int is_branch_word(uint32_t i) {
-    unsigned op = i >> 26, rt = (i >> 16) & 31, fn = i & 63;
-    if (op == 0 && (fn == 8 || fn == 9)) return 1;
-    if (op == 1 && (rt == 0 || rt == 1 || rt == 16 || rt == 17)) return 1;
-    return op >= 2 && op <= 7;
+    /* Match main.c is_branch: include branch-likely (op 20-23) for IRQ deferral. */
+    unsigned op = i >> 26, fn = i & 0x3F;
+    return (op == 0 && (fn == 8 || fn == 9)) || op == 1 || (op >= 2 && op <= 7) || (op >= 20 && op <= 23);
 }
 static int is_mtc0_word(uint32_t i) { return (i >> 21) == 0x204; }
 
@@ -400,7 +476,10 @@ static void irq_step_fast(vv_fast_env *e, vv_fast_cpu *c) {
         c->last3_pc = c->last2_pc; c->last2_pc = c->last_pc; c->last_pc = c->pc;
         return;
     }
-    uint32_t st = vv_hw_status();
+    int cop0 = vv_quirk_on(VV_Q_COP0);
+    uint32_t st;
+    if (cop0) st = vv_hw_status();
+    else uc_reg_read(e->uc, UC_MIPS_REG_CP0_STATUS, &st);
     if ((st & 1) && !(prev_status & 1)) vv_hw_isr_exit_check(st, c->pc, "IE re-enabled");
     prev_status = st;
     if (vv_quirk_halted) return;
@@ -417,6 +496,7 @@ static void irq_step_fast(vv_fast_env *e, vv_fast_cpu *c) {
         if (!defer) {
             VV_EVT("irq-enter cause 0x%04x status 0x%08x", vv_hw_cause() & 0xFFFFu, st);
             vv_hw_isr_enter(c->pc, st); st &= ~1u; prev_status = st;
+            if (!cop0) uc_reg_write(e->uc, UC_MIPS_REG_CP0_STATUS, &st);
             c->pc = VV_PC_ISR;
             c->in_delay = 0;
             c->load_rt = -1;
