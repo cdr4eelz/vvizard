@@ -387,9 +387,12 @@ These are found by RTL reading. vvizard keeps its standard or simplified behavio
 - **Stale load via 0x2** (`cpu/MemBank.v:130`): reported under `ddr2`, but not reproduced.
 - **Split write-through caches:** the I-cache doesn't see D-path writes, so self-modifying code or freshly copied
   code can run stale instructions on hardware. vvizard has one coherent memory.
-- **CNT_CYCLE** (`cpu/MemMapIO.v`) counts every clock, including stalls. vvizard returns the instruction count for
-  both CNT_CYCLE and CNT_INST, and COP0 Count also counts instructions. All device timing (UART, PixelFeeder,
-  timer) uses this one-cycle-per-instruction clock, so it runs early wherever the hardware stalls.
+- **CNT_CYCLE** (`cpu/MemMapIO.v`) counts every clock, including stalls. By default vvizard returns the instruction
+  count for both CNT_CYCLE and CNT_INST, and COP0 Count also counts instructions (one cycle per insn; no stall
+  model). With `--ddr-stalls[=R,W]`, CNT_CYCLE / COP0 Count / device ticks advance by host cycles that include
+  approximate I$/D$ miss and write-through stalls (R default 16, W default 3; hits 0); CNT_INST stays the insn
+  count. Without that flag, device timing still uses one cycle per instruction, so it runs early vs hardware
+  wherever the FPGA stalls.
 - **GPU busy time:** with `--sync` a launch completes at once (all engines ready, Cause bit 12 at the launch). The
   default `--threads=on` models a busy time (`launch + pixels/4 + 32 x commands` cycles, README "Threads"), not the
   engines' real DDR timing.

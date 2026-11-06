@@ -43,11 +43,11 @@ UNICORN_LIBS   := $(shell PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" pkg-config --libs
 RAYLIB_CFLAGS  := $(shell pkg-config --cflags raylib)
 RAYLIB_LIBS    := $(shell pkg-config --libs raylib)
 
-SRCS := $(wildcard $(SRC_DIR)/*.c)
+SRCS := $(wildcard $(SRC_DIR)/*.c) $(wildcard $(SRC_DIR)/cpu/*.c)
 HDRS := $(wildcard $(SRC_DIR)/*.h $(SRC_DIR)/cpu/*.h $(SRC_DIR)/cpu/fast2/*.h $(SRC_DIR)/cpu/rtl/*.h)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
-# Sources under src/cpu are not picked up by the wildcard above.
-CPU_OBJS := $(BUILD_DIR)/cpu/irq.o $(BUILD_DIR)/cpu/fast2/decode.o $(BUILD_DIR)/cpu/fast2/exec.o
+# fast.c and irq.c are in SRCS (src/cpu/*.c). Nested fast2/rtl objects are not.
+CPU_OBJS := $(BUILD_DIR)/cpu/fast2/decode.o $(BUILD_DIR)/cpu/fast2/exec.o
 ifeq ($(FIDELITY),rtl)
 CPU_OBJS += $(BUILD_DIR)/cpu/rtl/rtl.o
 endif
@@ -59,7 +59,7 @@ EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
 .PHONY: vendor-cmp check-vendor vendor-update test-vendor
-.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-fast2 tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-fast2 test-cpu-rtl tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -175,10 +175,6 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS) $(FLAGS_STAMP) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
 
-$(BUILD_DIR)/cpu/%.o: $(SRC_DIR)/cpu/%.c $(HDRS) $(FLAGS_STAMP)
-	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(UNICORN_CFLAGS) $(RAYLIB_CFLAGS) $(CFLAGS) $(THREAD_FLAGS) -c $< -o $@
-
 $(BUILD_DIR):
 	mkdir -p $@
 
@@ -214,6 +210,13 @@ test-quirks: $(TARGET) tests
 test-hex: $(TARGET) tests
 	python3 tests/test_hex.py
 
+# Tri-way Unicorn/fast/Icarus CPU differential (optional: CS150_ROOT + iverilog + mips binutils).
+# Missing optional deps → SKIP exit 0 with reason; real sim/compile/mismatch → FAIL.
+# Missing vvizard → build via $(TARGET). Does not modify cs150 Verilog.
+test-cpu-rtl: $(TARGET)
+	python3 tests/test_cpu_rtl.py $(if $(CS150_ROOT),--cs150-root $(CS150_ROOT),)
+
+
 test-hw: $(TARGET) tests
 	python3 tests/test_hw.py
 
@@ -227,7 +230,8 @@ test-threads: $(TARGET) tests
 
 # All tests (vendored cs150 headers vs the originals, hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
 # proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode tests.
-# test-fast2 is not part of this: the default binary stays on Unicorn.
+# test-fast2 is not part of this: it diffs --cpu=unicorn against --cpu=fast2.
+# The product default is --cpu=fast (main's interpreter). test-cpu-rtl is optional too.
 test: check-vendor test-vendor check-hex test-hex test-hw test-quirks test-player test-sm test-threads
 
 test-fast2: $(TARGET) tests

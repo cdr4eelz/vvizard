@@ -42,24 +42,28 @@ void vv_fast2_set_c0(uint32_t v) { c0_status = v; }
 uint32_t vv_fast2_pc(void) { return pc; }
 void vv_fast2_cancel_lu(void) { lu_on = lu_hold_sub = 0; br_pend = nullify = 0; }
 
+/* --cpu=fast syncs its registers into Unicorn before a dump. fast2 and rtl keep their own file. */
+static int view_uc(void) {
+    return vv_cpu_kind == VV_CPU_UNICORN || vv_cpu_kind == VV_CPU_FAST;
+}
 uint32_t vv_view_gpr(uc_engine *uc, int r) {
-    if (vv_cpu_kind == VV_CPU_UNICORN) { uint32_t v = 0; if (r > 0) uc_reg_read(uc, UC_MIPS_REG_0 + r, &v); return v; }
+    if (view_uc()) { uint32_t v = 0; if (r > 0) uc_reg_read(uc, UC_MIPS_REG_0 + r, &v); return v; }
     return vv_fast2_gpr((unsigned)r);
 }
 uint32_t vv_view_pc(uc_engine *uc) {
-    if (vv_cpu_kind == VV_CPU_UNICORN) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_PC, &v); return v; }
+    if (view_uc()) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_PC, &v); return v; }
     return pc;
 }
 uint32_t vv_view_hi(uc_engine *uc) {
-    if (vv_cpu_kind == VV_CPU_UNICORN) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_HI, &v); return v; }
+    if (view_uc()) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_HI, &v); return v; }
     return hi;
 }
 uint32_t vv_view_lo(uc_engine *uc) {
-    if (vv_cpu_kind == VV_CPU_UNICORN) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_LO, &v); return v; }
+    if (view_uc()) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_LO, &v); return v; }
     return lo;
 }
 uint32_t vv_view_status(uc_engine *uc) {
-    if (vv_cpu_kind == VV_CPU_UNICORN) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &v); return v; }
+    if (view_uc()) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &v); return v; }
     return c0_status;
 }
 

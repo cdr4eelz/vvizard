@@ -219,7 +219,7 @@ The quirk list, defaults, evidence and test coverage are in [QUIRKS.md](QUIRKS.m
     PRNG reseed placement is unchanged.
   - **COP0150 model** (`vv_cop0_read`/`vv_cop0_write` in main.c): shadow Status, Compare, Count, Cause and EPC.
     `irq_step` uses the shadow Status for IE/IM when `cop0` is on, and keeps its old ISR-only mfc0/mtc0 shadowing
-    when `cop0` is off. Count is one tick per instruction (no stall model).
+    when `cop0` is off. Count is one tick per instruction by default (no stall model); with `--ddr-stalls` it follows host cycles including approx cache stalls (see README / `--help`).
 - **Not emulated:** see [QUIRKS.md](QUIRKS.md#differences-that-are-not-emulated) for the hardware differences vvizard does not reproduce.
 - **Halting:** `uc_emu_stop()` from the code hook stops before the flagged instruction runs. Exit status 4.
 - **Speed:** see "Performance" below (Oct 31 2026, -O3: 22M instr/s with the default quirks on Debian 13, 38M

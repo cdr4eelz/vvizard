@@ -1,12 +1,14 @@
 # Implementation report
 
-Branch `feat/custom-mips-backend`. Implementation commit `c0329201f114b0aea72cbceb927b4c60eff41d21` (base `731faab48f947bfc3f122294812791e06fc0deed`). Unicorn stays the default CPU. `--cpu=fast2` is optional. `--cpu=rtl` exists only in a `make FIDELITY=rtl` build.
+Branch `feat/custom-mips-backend`. Implementation commit `c0329201f114b0aea72cbceb927b4c60eff41d21` (base `731faab48f947bfc3f122294812791e06fc0deed`). The measurements below were taken before `origin/main` was merged. They compare Unicorn with this branch's interpreter, which is now `--cpu=fast2`. `--cpu=rtl` exists only in a `make FIDELITY=rtl` build.
 
 This host is Debian 13, x86_64, Unicorn 2.1.1, raylib. `LD_LIBRARY_PATH=$HOME/.local/lib`. Numbers below are MEASURED on this machine unless marked ESTIMATE. No other host was available, so the plan's two-of-three-hosts bar was not run.
 
 ## Decision
 
-Do not flip the default.
+Do not make `--cpu=fast2` the default.
+
+After the merge of `origin/main`, the product default is main's `--cpu=fast` interpreter. `--cpu=unicorn` is the reference. `--cpu=fast2` stays optional. `--ddr-stalls` applies to unicorn and `--cpu=fast` only. The numbers in this report are not a reason to replace main's default with fast2.
 
 `--cpu=fast2` is faster than Unicorn on the corpora that could be run here. The straight ALU loop is 1.509× on guest instructions/s. The two-instruction branch loop is 1.343×. Headless wall-clock instructions/frame are 1.438×. Windowed instructions/frame are 1.277×. Both CPUs still finish a wall-clock run at about 60.2 frames/s, because the frame period is 16.5792 ms. The frames/s ratio is 0.999×.
 
@@ -19,14 +21,14 @@ An earlier fast build, before quiet spans were allowed while IE was clear and be
 | Path | Role |
 |---|---|
 | `src/cpu/fast2/` | Predecoded basic-block interpreter (`--cpu=fast2`) |
-| `src/cpu/irq.c` | Shared interrupt entry for Unicorn and fast |
+| `src/cpu/irq.c` | Shared interrupt entry for Unicorn and fast2 |
 | `src/cpu/rtl/rtl.c` | Approximate I-cache and D-cache stalls (`--cpu=rtl`) |
 | `src/cpu/service.h`, `src/cpu/backend.h` | Service and backend hooks |
 | `src/profile.c`, `src/profile.h` | Counters from `docs/PROFILING-PLAN.md` |
 | `src/main.c`, `src/hw.c`, `src/quirk.c` | `--cpu`, quiet budget, shared quirk helpers |
 | `Makefile` | `PROFILE=1`, `FIDELITY=rtl` |
 
-`make` does not pass `-DVV_FIDELITY_RTL` and does not link `rtl.o`. After the final `make -j4 PROFILE=0 FIDELITY=l0`, `nm vvizard` has no `vv_rtl_run` and no `icache`. The data symbol `vv_rtl_cache` is only the CLI flag. `CNT_CYCLE` and the PRNG use the instruction count in that binary. Under `FIDELITY=rtl` they use `vv_hw_now()`.
+`make` does not pass `-DVV_FIDELITY_RTL` and does not link `rtl.o`. After `make -j4 PROFILE=0 FIDELITY=l0`, `nm vvizard` has no `vv_rtl_run`. The data symbol `vv_rtl_cache` is only the CLI flag. On that binary, `CNT_CYCLE` is the instruction count unless `--ddr-stalls` is on (`--cpu=unicorn` or `--cpu=fast`). Under `FIDELITY=rtl`, `--cpu=rtl` uses `vv_hw_now()` for `CNT_CYCLE` and the PRNG. The other CPUs still use the instruction count.
 
 The functional D-cache in `src/dcache.c` is unchanged except for two profile counts. It is not the RTL tag array.
 
@@ -35,17 +37,19 @@ Intentional shared7 mismatch is untouched: C `FEDBEEF3` / major 7 in `vendor/cs1
 ## How to build and run
 
 ```
-make -j4                         # Unicorn default, no cache-stall code
+make -j4                         # default --cpu=fast; no rtl stall code linked
 make -j4 FIDELITY=rtl            # also --cpu=rtl
 make -j4 PROFILE=1               # counters; run with --profile
 ```
 
 ```
+./vvizard --cpu=fast --no-window --sync ...    # default; same as omitting --cpu
+./vvizard --cpu=unicorn --no-window --sync ...
 ./vvizard --cpu=fast2 --no-window --sync ...
-./vvizard --cpu=rtl --rtl-cache=on|off ...    # only after FIDELITY=rtl
+./vvizard --cpu=rtl --rtl-cache=on|off ...     # only after FIDELITY=rtl
 ```
 
-`--cpu` defaults to `unicorn`. `VVIZARD_CPU` is used when `--cpu` is absent. `--cpu=fast2` and `--cpu=rtl` reject `--little` (exit 2). `--cpu=rtl` on a default build exits 2 with `make FIDELITY=rtl`. Do not export `VVIZARD_CPU` for `make test`. `tests/compare_runs.py` clears `VVIZARD_QUIRKS` and leaves `VVIZARD_CPU` in the environment.
+`--cpu` defaults to `fast`. `VVIZARD_CPU` is used when `--cpu` is absent (`unicorn`, `fast`, `fast2`, or `rtl`). `--cpu=fast2` and `--cpu=rtl` reject `--little` (exit 2). `--cpu=fast` accepts `--little`. `--cpu=rtl` on a default build exits 2 with `make FIDELITY=rtl`. `--ddr-stalls` with `--cpu=fast2` or `--cpu=rtl` exits 2. Do not export `VVIZARD_CPU` for `make test`. `tests/compare_runs.py` clears `VVIZARD_QUIRKS` and leaves `VVIZARD_CPU` in the environment.
 
 `make test` does not include `make test-fast2`. `test-fast2` is `compare_runs.py` of `--cpu=unicorn --sync` against `--cpu=fast2 --sync`.
 

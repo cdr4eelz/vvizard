@@ -22,11 +22,13 @@
 #include "display.h"
 #include "gpu.h"
 #include "quirk.h"
+#include "cpu/fast.h"
 #include "prng.h"
 #include "lcd.h"
 #include "shmem.h"
 #include "hw.h"
 #include "dcache.h"
+#include "memstall.h"
 #include "profile.h"
 #include "cpu/backend.h"
 #include "cpu/service.h"
@@ -90,10 +92,7 @@ int vv_rtl_cache = 1;
  * (registers only at addra[11:6]==0, LCD at 0x100-0x17C). */
 static int opt_mmio_ise;
 static uint32_t prev_regs[32];
-static uint64_t insn_count, cnt_base_insn;
-#ifdef VV_FIDELITY_RTL
-static uint64_t cnt_base_cycle;          /* CNT_CYCLE base; distinct from the instruction counter */
-#endif
+static uint64_t insn_count, cnt_base_insn, cnt_base_cycle;
 static uint64_t max_insns;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
@@ -223,15 +222,16 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     case VV_OW_UATX_READY: v = vv_uart_tx_ready(); break;   /* low while a byte shifts out (hw.c) */
     case VV_OW_UARX_VALID: v = vv_uart_rx_valid(); break;
     case VV_OW_UARX_DATA:  v = vv_uart_rx_read(); break;
-    case VV_OW_CNT_CYCLE: /* default and --cpu=fast2: cycles == instructions.  FIDELITY=rtl: real cycles. */
+    case VV_OW_CNT_CYCLE: /* rtl: modelled cycles.  --ddr-stalls: miss cycles.  else 1 CPI. */
 #ifdef VV_FIDELITY_RTL
-        v = (uint32_t)(vv_hw_now() - cnt_base_cycle); break;
+        if (vv_cpu_kind == VV_CPU_RTL) { v = (uint32_t)(vv_hw_now() - cnt_base_cycle); break; }
 #endif
+        v = (uint32_t)((vv_ddr_stalls ? vv_ms_cycles() : insn_count) - cnt_base_cycle); break;
     case VV_OW_CNT_INST:  v = (uint32_t)(insn_count - cnt_base_insn); break;
     case VV_OW_PF_FRAME:  v = 0x10000000u | vv_pf_frame() << VV_FSHIFT; break;   /* frame being scanned (MemMapIO.v:162) */
     case VV_OW_GP_STATE:  v = vv_gp_status_word(); break;   /* graphics.h gstate_s layout (hw.c) */
 #ifdef VV_FIDELITY_RTL
-    case VV_OW_RANDOM32:  v = vv_prng_read(vv_hw_now()); break;
+    case VV_OW_RANDOM32:  v = vv_prng_read(vv_cpu_kind == VV_CPU_RTL ? vv_hw_now() : insn_count); break;
 #else
     case VV_OW_RANDOM32:  v = vv_prng_read(insn_count); break;  /* cycle == insn count (see prng.c) */
 #endif
@@ -275,8 +275,9 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     case VV_OW_CNT_RESET:
         cnt_base_insn = insn_count;
 #ifdef VV_FIDELITY_RTL
-        cnt_base_cycle = vv_hw_now();
+        if (vv_cpu_kind == VV_CPU_RTL) { cnt_base_cycle = vv_hw_now(); break; }
 #endif
+        cnt_base_cycle = vv_ddr_stalls ? vv_ms_cycles() : insn_count;
         break;
     case VV_OW_PF_FRAME:  pf_frame = v; vv_pf_write(uc, v); pf_writes++;   /* takes effect at the frame end (hw.c) */
         if (dump_every && pf_writes % dump_every == 0) { char fn[PATH_MAX];
@@ -289,10 +290,9 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;   /* (already placed when lane_hw) */
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
 #ifdef VV_FIDELITY_RTL
-        vv_prng_write(vv_hw_now(), v); break;
-#else
-        vv_prng_write(insn_count, v); break;
+        if (vv_cpu_kind == VV_CPU_RTL) { vv_prng_write(vv_hw_now(), v); break; }
 #endif
+        vv_prng_write(insn_count, v); break;
     case VV_OW_HALTVAL:   /* sb/sh: the lane-placed dina word (as RANDOM32), e.g. sb at +3 = the byte */
         if (size < 4 && !lane_hw) { unsigned lane = off & 3;
             v = (v & ((1u << (8 * size)) - 1)) << (8 * (4 - size - lane)); }
@@ -336,19 +336,23 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     if (!opt_quiet_mmio) vv_eprintf("[mmio] W off=0x%04x size=%u <- 0x%08x\n", (unsigned)off, size, v);
 }
 
-/* --threads (docs/MULTITHREADING-PLAN.md): with a window, uc_emu_start runs on an emulator thread
- * and the main thread draws (display.c); --sync / --threads=1 keeps everything on one thread. */
+/* --threads (docs/MULTITHREADING-PLAN.md): with a window, the selected CPU backend
+ * (unicorn uc_emu_start or fast vv_fast_run) runs on an emulator thread and the main thread
+ * draws (display.c); --sync / --threads=1 keeps everything on one thread. */
 static int opt_threads = 1;
 static uc_err emu_err;
 static uint32_t emu_entry; static uint64_t emu_until;
-static uc_err run_cpu(uc_engine *uc);   /* defined with the service split, below */
+static int stop_reason_intr = -1;
+/* Filled before spawning emu_thread when --cpu=fast (worker owns UC + these). */
+static vv_fast_cpu emu_fcpu;
+static vv_fast_env emu_fenv;
+static uc_err run_cpu(uc_engine *uc);   /* unicorn, fast, fast2, or rtl */
 static void *emu_thread(void *a) {
     uc_engine *uc = a;
     emu_err = run_cpu(uc);
     vv_disp_emu_done(uc);                    /* publishes the last frame */
     return NULL;
 }
-static int stop_reason_intr = -1;
 static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *u) {
     VV_PROF_COUNT(VV_PS_TLB);
     (void)uc; (void)t; (void)u;
@@ -402,7 +406,14 @@ static int count_insn(uc_engine *uc, uint32_t pc) {
 int vv_svc_enter_at(uc_engine *uc, uint32_t pc, uint64_t tick_at) {
     VV_PROF_COUNT(VV_PS_HOOK);
     if (count_insn(uc, pc)) return 1;
-    vv_hw_tick(uc, tick_at);
+    /* --ddr-stalls on the Unicorn hook. --cpu=fast charges stalls inside vv_fast_run.
+     * fast2 and rtl keep the caller's tick_at (1 CPI, or the rtl model's own cycle). */
+    if (vv_ddr_stalls && vv_cpu_kind == VV_CPU_UNICORN) {
+        unsigned st = vv_ms_ifetch(pc) + (uc ? vv_ms_dside_uc(uc, pc) : 0);
+        vv_hw_tick(uc, vv_ms_advance(st));
+    } else {
+        vv_hw_tick(uc, tick_at);
+    }
     if (vv_quirk_halted) { stop_engine(uc); return 1; }
     if (nevents) run_due_events(uc, 0);
     return 0;
@@ -509,11 +520,27 @@ static void hook_code(uc_engine *uc, uint64_t addr, uint32_t size, void *u) {
     }
     vv_svc_leave(uc, (uint32_t)addr);
 }
+static const char *cpu_name(void) {
+    if (vv_cpu_kind == VV_CPU_FAST) return "fast";
+    if (vv_cpu_kind == VV_CPU_FAST2) return "fast2";
+    if (vv_cpu_kind == VV_CPU_RTL) return "rtl";
+    return "unicorn";
+}
 static uc_err run_cpu(uc_engine *uc) {
     vv_prof_emu_begin();
-    uc_err e = vv_cpu_kind == VV_CPU_UNICORN
-        ? uc_emu_start(uc, emu_entry, emu_until, 0, 0)
-        : vv_cpu_run(uc, emu_entry, (uint32_t)emu_until, have_stop);
+    uint64_t cpu_t0 = vv_mono_ns();
+    uc_err e;
+    if (vv_cpu_kind == VV_CPU_FAST) {
+        int frc = vv_fast_run(&emu_fenv, &emu_fcpu, emu_entry);
+        vv_fast_sync_to_uc(uc, &emu_fcpu);
+        if (emu_fcpu.stop_break) stop_reason_intr = 18;
+        e = frc ? UC_ERR_EXCEPTION : UC_ERR_OK;
+    } else if (vv_cpu_kind == VV_CPU_UNICORN) {
+        e = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    } else {
+        e = vv_cpu_run(uc, emu_entry, (uint32_t)emu_until, have_stop);
+    }
+    vv_duty_commit_cpu_span(vv_mono_ns() - cpu_t0);
     vv_prof_emu_end();
     return e;
 }
@@ -584,6 +611,14 @@ static uint32_t rd_guest(uc_engine *uc, uint32_t a, unsigned n) {
     unsigned char b[4] = { 0 }; uint32_t v = 0;
     if (uc_mem_read(uc, a, b, n)) return 0;
     for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
+    return v;
+}
+/* Like rd_guest but sets *ok from uc_mem_read (0 on failure). */
+static uint32_t rd_guest_ok(uc_engine *uc, uint32_t a, unsigned n, int *ok) {
+    unsigned char b[4] = { 0 }; uint32_t v = 0;
+    if (uc_mem_read(uc, a, b, n)) { *ok = 0; return 0; }
+    for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
+    *ok = 1;
     return v;
 }
 static uint32_t sm_reader(void *ctx, uint32_t a, unsigned n) { return rd_guest((uc_engine *)ctx, a, n); }
@@ -676,6 +711,19 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --little / --big   CPU endianness (default %s)\n"
 "\n"
 "Run control (defaults: unlimited, interrupts on, random DDR, window with keys):\n"
+"  --cpu=unicorn|fast|fast2|rtl\n"
+"                     CPU backend (default fast).  fast = predecoded basic-block interpreter\n"
+"                     (L0).  unicorn is the reference.  fast2 is the other predecoded interpreter.\n"
+"                     rtl models approximate I$/D$ stalls and needs `make FIDELITY=rtl`.\n"
+"                     Env VVIZARD_CPU is used when --cpu is absent.\n"
+"  --rtl-cache=on|off with --cpu=rtl, model cache-miss stalls (default on).  off keeps cycles\n"
+"                     equal to the instruction count.  Ignored by unicorn, fast and fast2.\n"
+"  --ddr-stalls[=R,W]  approximate DDR2 + I$/D$ miss stalls for --cpu=unicorn and --cpu=fast\n"
+"                     (caches ONLY with this flag).\n"
+"                     Omit the flag for off (1 cycle/insn, no cache tax). Bare --ddr-stalls\n"
+"                     or --ddr-stalls=R,W enables 256x32B WT caches; R = read/miss-fill\n"
+"                     cycles (default 16), W = write-through cycles (default 3); hits = 0.\n"
+"                     CNT_CYCLE / device time advance by stall cycles (can exceed insn count).\n"
 "  --max-insns N      stop after N instructions (default 0 = unlimited)\n"
 "  --until ADDR       stop when PC reaches ADDR\n"
 "  --max-seconds S    stop after S seconds of wall time (checked every 4096 instructions)\n"
@@ -743,20 +791,16 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
+"  --dump-be32=A:N    dump N big-endian words from guest address A at exit (harness)\n"
 "  --dump-sm          print the proj6/proj7 shared memory at 0x50000000 (shared7.h struct SM_DATA,\n"
 "                     or shared6.h) decoded, at exit; its consistency warnings (magic/majorvers\n"
 "                     stamp vs shared7.h, magic2, buffer) are printed at exit even without it\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
-"  --cpu=KIND         unicorn (default), fast2 (predecoded block interpreter, same 1 CPI results)\n"
-"                     or rtl (approximate I-cache and D-cache stalls; needs `make FIDELITY=rtl`).\n"
-"                     Env VVIZARD_CPU is used when --cpu is absent.  Unicorn stays the default.\n"
-"  --rtl-cache=on|off with --cpu=rtl, model cache-miss stalls (default on).  off keeps cycles\n"
-"                     equal to the instruction count.  Ignored by unicorn and fast2.\n"
 "  --profile          print per-slot counts (needs `make PROFILE=1`).  Timers stay off without this.\n"
 "  --profile-bare-hook  PROFILE build: the code hook only counts (emulation is wrong; for probes)\n"
 "  --profile-no-mem-unmapped  PROFILE build: do not install the unmapped-memory hook\n"
 "  --threads=on|off   on (default): GPU command lists are drawn by a worker thread and, with a\n"
-"                     window, the emulator runs on its own thread while the main thread draws (frame\n"
+"                     window, the selected CPU (unicorn or fast) runs on its own thread while main draws (frame\n"
 "                     copied at each frame end).  The GPU is then busy (GP_STATE ready bits 0) until\n"
 "                     launch + pixels/4 + 32 x commands cycles, Cause bit 12 rises at that edge, and a\n"
 "                     GP_CODE store while busy is dropped (gp-busy).  off = --sync = --threads=1: one\n"
@@ -777,6 +821,21 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
  * (so `--trace prog.elf` still treats prog.elf as a program). */
 static int is_uint(const char *s) { char *e; if (!*s || *s == '-') return 0; strtoull(s, &e, 0); return !*e; }
 static int is_color(const char *s) { return vv_color_parse(s) >= 0; }
+/* --ddr-stalls[=R,W]: "16,3" or empty (defaults). Rejects garbage. */
+static int parse_ddr_stalls(const char *s, unsigned *rd, unsigned *wr) {
+    *rd = VV_MS_READ_STALLS_DFLT; *wr = VV_MS_WRITE_STALLS_DFLT;
+    if (!s || !*s) return 0;
+    char *e; unsigned long r = strtoul(s, &e, 0);
+    if (e == s || *e != ',') return -1;
+    const char *p2 = e + 1;
+    unsigned long w = strtoul(p2, &e, 0);
+    if (e == p2 || *e) return -1;
+    *rd = (unsigned)r; *wr = (unsigned)w;
+    return 0;
+}
+static int is_ddr_stalls_arg(const char *s) {
+    unsigned r, w; return parse_ddr_stalls(s, &r, &w) == 0;
+}
 static const char *opt_next(int argc, char **argv, int (*ok)(const char *)) {
     if (optarg) return optarg;
     if (optind < argc && argv[optind][0] != '-' && ok(argv[optind])) return argv[optind++];
@@ -787,13 +846,15 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_EXPECT, O_SCRIPT, O_IRQ, O_NO_IRQ, O_DUMP_EVERY, O_DUMP_PREFIX, O_WINDOW, O_NO_WINDOW,
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
-       O_DUMP_LCD, O_DUMP_SM, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
+       O_DUMP_LCD, O_DUMP_SM, O_DUMP_BE32, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
        O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC,
-       O_CPU, O_RTL_CACHE, O_PROFILE, O_PROF_BARE, O_PROF_NOUNMAP };
+       O_CPU, O_RTL_CACHE, O_DDR_STALLS, O_PROFILE, O_PROF_BARE, O_PROF_NOUNMAP };
 
 int main(int argc, char **argv) {
+    vv_cpu_kind = VV_CPU_FAST;   /* product default from main; --cpu= and VVIZARD_CPU override */
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
     const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0, dump_sm = 0;
+    uint32_t dump_be32_addr = 0; int dump_be32_n = 0;
     uint32_t entry = VV_PC_BOOT, sp = 0; int have_entry = 0, have_elf_entry = 0, have_sp = 0;
     const char *loads[32]; int nloads = 0;
     const char *expects[32]; int nexp = 0;
@@ -812,13 +873,13 @@ int main(int argc, char **argv) {
         {"random-ddr",2,0,O_RANDOM_DDR},{"no-random-ddr",0,0,O_NO_RANDOM_DDR},{"uart-in",1,0,O_UART_IN},
         {"no-autorun",0,0,O_NO_AUTORUN},{"halt-on-quirk",2,0,O_HALT},{"warn-on-quirk",2,0,O_WARN},
         {"no-halt-on-quirk",0,0,O_NO_HALT},{"quirks",1,0,O_QUIRKS},{"no-quirks",0,0,O_NO_QUIRKS},
-        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"dump-sm",0,0,O_DUMP_SM},{"screenshot",1,0,O_SCREENSHOT},
+        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"dump-sm",0,0,O_DUMP_SM},{"dump-be32",1,0,O_DUMP_BE32},{"screenshot",1,0,O_SCREENSHOT},
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
         {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
-        {"cpu",1,0,O_CPU},{"rtl-cache",1,0,O_RTL_CACHE},
+        {"cpu",1,0,O_CPU},{"rtl-cache",1,0,O_RTL_CACHE},{"ddr-stalls",2,0,O_DDR_STALLS},
         {"profile",0,0,O_PROFILE},{"profile-bare-hook",0,0,O_PROF_BARE},
         {"profile-no-mem-unmapped",0,0,O_PROF_NOUNMAP},
         {0,0,0,0}};
@@ -890,15 +951,25 @@ int main(int argc, char **argv) {
         case O_CPU:
             cpu_set = 1;
             if (!strcmp(optarg, "unicorn")) vv_cpu_kind = VV_CPU_UNICORN;
+            else if (!strcmp(optarg, "fast")) vv_cpu_kind = VV_CPU_FAST;
             else if (!strcmp(optarg, "fast2")) vv_cpu_kind = VV_CPU_FAST2;
             else if (!strcmp(optarg, "rtl")) vv_cpu_kind = VV_CPU_RTL;
-            else { vv_eprintf("--cpu: expected unicorn, fast2 or rtl, not '%s'\n", optarg); return 2; }
+            else { vv_eprintf("--cpu: expected unicorn, fast, fast2 or rtl, not '%s'\n", optarg); return 2; }
             break;
         case O_RTL_CACHE:
             if (!strcmp(optarg, "on")) vv_rtl_cache = 1;
             else if (!strcmp(optarg, "off")) vv_rtl_cache = 0;
             else { vv_eprintf("--rtl-cache: expected on or off, not '%s'\n", optarg); return 2; }
             break;
+        case O_DDR_STALLS: {
+            unsigned rd = VV_MS_READ_STALLS_DFLT, wr = VV_MS_WRITE_STALLS_DFLT;
+            const char *v = optarg ? optarg : opt_next(argc, argv, is_ddr_stalls_arg);
+            if (v && parse_ddr_stalls(v, &rd, &wr)) {
+                vv_eprintf("--ddr-stalls: expected R,W (non-negative read,write stall cycles), not '%s'\n", v);
+                return 2;
+            }
+            vv_ms_enable(rd, wr);
+            break; }
         case O_PROFILE: opt_profile = 1; break;
         case O_PROF_BARE: opt_prof_bare = 1; break;
         case O_PROF_NOUNMAP: opt_prof_no_unmapped = 1; break;
@@ -910,6 +981,12 @@ int main(int argc, char **argv) {
         case O_LIST_QUIRKS: vv_quirk_list(stdout); return 0;
         case O_DUMP_LCD: dump_lcd = 1; break;
         case O_DUMP_SM: dump_sm = 1; break;
+        case O_DUMP_BE32: {
+            char *colon = strchr(optarg, ':');
+            if (!colon) { vv_eprintf("--dump-be32 needs ADDR:COUNT\n"); return 2; }
+            *colon = 0; dump_be32_addr = strtoul(optarg, 0, 0); dump_be32_n = (int)strtol(colon + 1, 0, 0);
+            if (dump_be32_n < 0 || dump_be32_n > 4096) { vv_eprintf("--dump-be32 COUNT out of range\n"); return 2; }
+            break; }
         case O_SCREENSHOT: shot_path = optarg; break;
         case O_COLOR: v = opt_next(argc, argv, is_color);
             if ((color = vv_color_parse(v)) < 0) {
@@ -925,9 +1002,10 @@ int main(int argc, char **argv) {
         const char *cenv = getenv("VVIZARD_CPU");
         if (cenv && *cenv) {
             if (!strcmp(cenv, "unicorn")) vv_cpu_kind = VV_CPU_UNICORN;
+            else if (!strcmp(cenv, "fast")) vv_cpu_kind = VV_CPU_FAST;
             else if (!strcmp(cenv, "fast2")) vv_cpu_kind = VV_CPU_FAST2;
             else if (!strcmp(cenv, "rtl")) vv_cpu_kind = VV_CPU_RTL;
-            else { vv_eprintf("bad VVIZARD_CPU '%s' (expected unicorn, fast2 or rtl)\n", cenv); return 2; }
+            else { vv_eprintf("bad VVIZARD_CPU '%s' (expected unicorn, fast, fast2 or rtl)\n", cenv); return 2; }
         }
     }
 #ifndef VV_FIDELITY_RTL
@@ -936,8 +1014,12 @@ int main(int argc, char **argv) {
         return 2;
     }
 #endif
-    if (!big && vv_cpu_kind != VV_CPU_UNICORN) {
-        vv_eprintf("--cpu=%s does not support --little\n", vv_cpu_kind == VV_CPU_FAST2 ? "fast2" : "rtl");
+    if (vv_ddr_stalls && vv_cpu_kind != VV_CPU_UNICORN && vv_cpu_kind != VV_CPU_FAST) {
+        vv_eprintf("--ddr-stalls applies to --cpu=unicorn and --cpu=fast only\n");
+        return 2;
+    }
+    if (!big && vv_cpu_kind != VV_CPU_UNICORN && vv_cpu_kind != VV_CPU_FAST) {
+        vv_eprintf("--cpu=%s does not support --little\n", cpu_name());
         return 2;
     }
     if (opt_profile || opt_prof_bare || opt_prof_no_unmapped) {
@@ -1013,11 +1095,13 @@ int main(int argc, char **argv) {
     }
     uc_hook h;
     uc_hook_add(uc, &h, UC_HOOK_TLB_FILL, tlb_fill, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_CODE, hook_code, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_INTR, hook_intr, NULL, 1, 0);
-    if (!opt_prof_no_unmapped)
-        uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, hook_bios_write, NULL, 0x40000000ull, 0x4FFFFFFFull);
+    if (vv_cpu_kind == VV_CPU_UNICORN) {
+        uc_hook_add(uc, &h, UC_HOOK_CODE, hook_code, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_INTR, hook_intr, NULL, 1, 0);
+        if (!opt_prof_no_unmapped)
+            uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, hook_bios_write, NULL, 0x40000000ull, 0x4FFFFFFFull);
+    }
 
     for (int i = optind; i < argc; i++) {
         uint32_t e; if (vv_load_elf(uc, argv[i], &e, big)) return 1;
@@ -1057,16 +1141,23 @@ int main(int argc, char **argv) {
     vv_disp_init(want_window);
     /* wall frame clock: the ~60/s frame ends redraw; the vv_disp_tick timer is only a fallback */
     if (vv_frame_clock == VV_FRAME_CLOCK_WALL && vv_pf_period && !vv_legacy_io) vv_disp_redraw_period = 0.1;
-    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s cpu=%s%s%s\n", big ? "big" : "little",
+    { char ddr_buf[32];
+      if (vv_ddr_stalls) snprintf(ddr_buf, sizeof ddr_buf, "%u,%u", vv_ms_read_stalls, vv_ms_write_stalls);
+      else snprintf(ddr_buf, sizeof ddr_buf, "off");
+    vv_eprintf("[run] cpu=%s %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s ddr-stalls=%s%s%s\n",
+            cpu_name(), big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
             vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
             !opt_threads ? "off (--sync)" : vv_legacy_io ? (vv_disp_has_window() ? "on (emulator + display; GPU synchronous: --legacy-io)" : "on (no window, --legacy-io: one thread)")
             : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)",
-            vv_cpu_kind == VV_CPU_FAST2 ? "fast2" : vv_cpu_kind == VV_CPU_RTL ? "rtl" : "unicorn",
+            ddr_buf,
             vv_cpu_kind == VV_CPU_RTL ? " rtl-cache=" : "",
-            vv_cpu_kind == VV_CPU_RTL ? (vv_rtl_cache ? "on" : "off") : "");
+            vv_cpu_kind == VV_CPU_RTL ? (vv_rtl_cache ? "on" : "off") : ""); }
     vv_quirk_decode = vv_quirk_needs_decode();
     run_t0 = vv_mono_ns();
+    vv_duty_run_begin();
+    cnt_base_cycle = 0;
+    if (vv_ddr_stalls) vv_ms_reset();
     emu_entry = entry; emu_until = have_stop ? stop_addr : 0xFFFFFFFFull;   /* max_insns: hook_code */
     /* threaded GPU: headless too (the ready bit and gp-busy exist without a window) */
     if (opt_threads && !vv_legacy_io) {
@@ -1075,11 +1166,38 @@ int main(int argc, char **argv) {
     }
     pthread_t emu_tid; pthread_attr_t ta;
     int threaded_disp = opt_threads && vv_disp_has_window();
+    /* Fill fast env before spawn so the worker owns UC + GPRs (same fields as sync path). */
+    if (vv_cpu_kind == VV_CPU_FAST) {
+        memset(&emu_fenv, 0, sizeof emu_fenv);
+        emu_fenv.uc = uc;
+        emu_fenv.insn_count = &insn_count;
+        emu_fenv.hook_calls = &hook_calls;
+        emu_fenv.max_insns = max_insns;
+        emu_fenv.stopped_max = &stopped_max;
+        emu_fenv.stop_req = &stop_req;
+        emu_fenv.stopped_wall = &stopped_wall;
+        emu_fenv.max_wall_ns = max_wall_ns;
+        emu_fenv.run_t0 = run_t0;
+        emu_fenv.have_until = have_stop;
+        emu_fenv.until_addr = stop_addr;
+        emu_fenv.opt_irq = opt_irq;
+        emu_fenv.opt_trace = opt_trace;
+        emu_fenv.trace_left = &trace_left;
+        emu_fenv.guest_big = guest_big;
+        emu_fenv.mmio_read = mmio_read;
+        emu_fenv.mmio_write = mmio_write;
+        emu_fenv.note_ddr_exec = note_ddr_exec;
+        emu_fenv.run_due_events = run_due_events;
+        emu_fenv.nevents = nevents;
+    }
     if (threaded_disp) {                       /* emulator thread; raylib stays on this one */
         pthread_attr_init(&ta);
         pthread_attr_setstacksize(&ta, 64u << 20);   /* (macOS secondary threads default to 512 KiB) */
         vv_disp_threaded = 1;
-        if (pthread_create(&emu_tid, &ta, emu_thread, uc)) { vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n"); vv_disp_threaded = threaded_disp = 0; }
+        if (pthread_create(&emu_tid, &ta, emu_thread, uc)) {
+            vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n");
+            vv_disp_threaded = threaded_disp = 0;
+        }
         pthread_attr_destroy(&ta);
     }
     if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
@@ -1098,9 +1216,20 @@ int main(int argc, char **argv) {
     if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)vv_irq_count, (unsigned long long)pf_writes);
     vv_hw_summary();
+    vv_duty_summary();
+    vv_ms_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (opt_profile) vv_prof_report();
     if (!vv_quirk_halted) dump_regs(uc);
+
+    if (dump_be32_n > 0) {
+        for (int i = 0; i < dump_be32_n; i++) {
+            uint32_t a = dump_be32_addr + (uint32_t)i * 4u;
+            int ok = 0;
+            uint32_t v = rd_guest_ok(uc, a, 4, &ok);
+            vv_eprintf("[dump-be32] a=0x%08x v=0x%08x ok=%d\n", a, ok ? v : 0, ok);
+        }
+    }
     if (halt_stores)                            /* after the register dump (also after a quirk halt's) */
         vv_eprintf("[halt] HaltVal = 0x%08x (%u), last stored at pc=0x%08x (%llu store%s)%s\n", halt_val, halt_val, halt_pc,
                    (unsigned long long)halt_stores, halt_stores == 1 ? "" : "s", guest_exited ? "; run ended by --exit-on-halt" : "");

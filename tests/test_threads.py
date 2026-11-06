@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Threaded-mode tests (make test-threads; docs/MULTITHREADING-PLAN.md section 10).
+"""Threads tests require --cpu=unicorn (fast forces --sync with a diagnostic).
+
+Threaded-mode tests (make test-threads; docs/MULTITHREADING-PLAN.md section 10).
 
 The rest of make test runs --sync (one thread, the GPU completes inside the GP_CODE store).  Here:
   A. the threaded GPU model: ready bits low until launch + pixels/4 + 32 x commands, Cause bit 12 at
@@ -11,6 +13,9 @@ The rest of make test runs --sync (one thread, the GPU completes inside the GP_C
      not use the GPU (so threading changes nothing but GPU timing);
   C. the proj7 player test (test_player.py) with --threads=on."""
 import os, subprocess, sys, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import optional_deps
+from pathlib import Path as _Path
 from vvprog import prog
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -18,7 +23,7 @@ ROOT = os.path.dirname(HERE)
 VV = os.path.join(ROOT, "vvizard")
 ENV = dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib"))
 ENV.pop("VVIZARD_QUIRKS", None)
-BASE = ["--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]
+BASE = ["--cpu=unicorn", "--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]  # unicorn: fast forces --sync
 TMP = tempfile.mkdtemp(prefix="vv_threads_")
 _n = [0]
 
@@ -77,8 +82,13 @@ def t_same_without_gpu():
         if a.stdout != b.stdout or eva != evb or a.returncode != b.returncode: bad.append(name)
     if bad: print("    differ:", bad)
     return not bad
-PLAYER = ["--no-window", "--frame-clock=emulated", "--random-ddr=7", "--no-halt-on-quirk", "--max-insns", "20000000"]
+PLAYER = ["--cpu=unicorn", "--no-window", "--frame-clock=emulated", "--random-ddr=7", "--no-halt-on-quirk", "--max-insns", "20000000"]
 def t_repeatable():     # threaded proj7: two runs, and headless vs window, give the same events
+    sw = _Path(ROOT) / ".." / ".." / "software"
+    gaps = optional_deps.software_tree_gaps(sw.resolve())
+    if gaps:
+        print(f"    (repeatable skipped — missing {gaps[0]})")
+        return "SKIP"
     a, _, eva = run(None, base=PLAYER)
     b, _, evb = run(None, base=PLAYER)
     same = a.returncode == 0 and a.stdout == b.stdout and eva == evb and b"gp-launch" in eva
@@ -92,6 +102,10 @@ def t_repeatable():     # threaded proj7: two runs, and headless vs window, give
 def t_player():
     r = subprocess.run([sys.executable, os.path.join(HERE, "test_player.py")], capture_output=True, text=True,
                        env=dict(ENV, VV_PLAYER_THREADS="--threads=on"))
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0 and "SKIP:" in out:
+        print("    (player skipped — optional software tree)")
+        return "SKIP"
     return r.returncode == 0
 
 
@@ -99,11 +113,18 @@ TESTS = [t_gp_async, t_gp_busy_halt, t_gp_sync_ready, t_dcache_async, t_gp_inlin
 
 
 def main():
-    fails = 0
-    for t in TESTS:
-        ok = t(); fails += not ok
-        print(f"  {t.__name__[2:]:18s} {'PASS' if ok else 'FAIL'}")
-    print(f"{'PASS' if not fails else 'FAIL'}: {len(TESTS) - fails}/{len(TESTS)}")
+    fails = skipped = ran = 0
+    for fn in TESTS:
+        ok = fn()
+        name = fn.__name__[2:]
+        if ok == "SKIP":
+            print(f"  {name:18s} SKIP")
+            skipped += 1
+            continue
+        fails += not ok
+        ran += 1
+        print(f"  {name:18s} {'PASS' if ok else 'FAIL'}")
+    print(f"{'PASS' if not fails else 'FAIL'}: {ran - fails}/{ran} ran, skipped={skipped}")
     if not fails:
         import shutil; shutil.rmtree(TMP)
     return 1 if fails else 0

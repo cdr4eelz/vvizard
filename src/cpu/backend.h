@@ -1,10 +1,18 @@
-/* backend.h - which CPU runs the guest.  Unicorn stays the default. */
+/* backend.h - which CPU runs the guest.
+ * --cpu=fast (this enum's FAST) is the product default from main.
+ * --cpu=fast2 and --cpu=rtl are the extra backends on this branch.
+ * Unicorn is the reference (--cpu=unicorn). */
 #ifndef VV_BACKEND_H
 #define VV_BACKEND_H
 #include <stdint.h>
 #include <unicorn/unicorn.h>
 
-typedef enum { VV_CPU_UNICORN = 0, VV_CPU_FAST2 = 1, VV_CPU_RTL = 2 } vv_cpu_kind_t;
+typedef enum {
+    VV_CPU_UNICORN = 0,
+    VV_CPU_FAST = 1,
+    VV_CPU_FAST2 = 2,
+    VV_CPU_RTL = 3
+} vv_cpu_kind_t;
 extern vv_cpu_kind_t vv_cpu_kind;
 
 /* Optional code-cache drop for the fast2 backend.  NULL on the Unicorn path.

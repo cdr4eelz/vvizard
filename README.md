@@ -1,15 +1,18 @@
 # VVIZARD (GitHub: cdr4eelz/vvizard) — a minimal Unicorn-based emulator for the CS150 MIPS150 system
 
 This is a fresh project. It does not use any code from `tool/vizard`. It runs the project's
-big-endian MIPS32 binaries (`elf32-tradbigmips`) on Unicorn 2.x, using the hardware memory map.
+big-endian MIPS32 binaries (`elf32-tradbigmips`) using the hardware memory map. Default CPU is
+`--cpu=fast` (predecoded basic-block interpreter); `--cpu=unicorn` is the explicit Unicorn 2.x reference.
 
 ## Dependencies
+
+### Required to build and run `./vvizard`
 - **gcc, make, pkg-config.**
 - **Unicorn 2.1.1 or newer** (pkg-config module `unicorn`). VVIZARD needs the virtual-TLB API
   (`uc_ctl_tlb_mode(uc, UC_TLB_VIRTUAL)`, `uc_tlb_entry`, `UC_HOOK_TLB_FILL`), which first appeared in 2.1.
   - Debian 13: `sudo apt-get install -y libunicorn-dev` (2.1.1).
   - Ubuntu 24.04: `libunicorn-dev` is **2.0.1, too old** (build fails on `uc_tlb_entry`). Build 2.1.1 into `~/.local` instead
-    (needs CMake 3.x or newer; the Xilinx-bundled cmake 3.3.2 is too old):
+    (needs **cmake** 3.x or newer; the Xilinx-bundled cmake 3.3.2 is too old):
 
         curl -LO https://github.com/unicorn-engine/unicorn/archive/refs/tags/2.1.1.tar.gz
         tar xzf 2.1.1.tar.gz && cd unicorn-2.1.1
@@ -19,10 +22,32 @@ big-endian MIPS32 binaries (`elf32-tradbigmips`) on Unicorn 2.x, using the hardw
     No exports are needed after that: the Makefile searches `$(HOME)/.local/lib/pkgconfig` first and links with an
     rpath to `$(HOME)/.local/lib`, so the binary loads 2.1.1 instead of the system 2.0.1.
 - **raylib** (pkg-config module `raylib`). The PixelFeeder display window uses it, and the program links with `-lraylib`.
-  It is needed even if you only run with `--no-window`.
-  - Debian/Ubuntu: `libraylib-dev` where packaged. Debian 13 may not package it. If it doesn't, build raylib from
-    source (https://github.com/raysan5/raylib) or use a third-party package. This machine has `libraylib6-dev` 6.2.0.
+  It is needed even if you only run with `--no-window` (still linked).
+  - Debian/Ubuntu: `libraylib-dev` where packaged (pulls OpenGL/X11 as needed). Debian 13 may not package it; build
+    from source (https://github.com/raysan5/raylib) or use a third-party package (e.g. `libraylib6-dev`).
   - Check with `pkg-config --modversion unicorn raylib`.
+- **pthread** (linked always; `--sync` / `--threads=1` simply start no extra threads).
+
+### Required for `make test` / scripts (host)
+- **python3** (`tests/*.py`, `scripts/check_vendor.py`, `scripts/vendor-cmp.sh` helpers).
+
+### Optional (SKIP when missing — not a hard FAIL of `make test` unless noted)
+- **MIPS GNU cross toolchain** (`mips-linux-gnu-as`/`ld`/`objcopy`, else `mips64-linux-gnu-*`, or `make M_PRE=…`):
+  rebuilds `build/tests/*.bin` from `tests/**/*.s`. Without it, tests use committed `tests/**/*.hex` fallbacks;
+  `make check-hex` is skipped. After changing a `.s`, run `make refresh-hex` (with the toolchain) so the committed
+  hex stays byte-identical — otherwise `make check-hex` fails.
+- **xvfb** (Debian/Ubuntu package `xvfb`; provides `xvfb-run` / `Xvfb`): windowed / `--threads=on --window` tests
+  (e.g. parts of `tests/test_cpu_fast.py`, `test_threads` with `$DISPLAY`). **Not** needed for headless
+  `--no-window` / `--sync` runs that make up most of `make test`. Install system-wide (`sudo apt install xvfb`);
+  do not rely on a user-local copy. Note: under `xvfb-run`, some Python tests that capture **stderr** may miss
+  diagnostic banners that land on **stdout** when stderr is not a TTY — product behavior is fine; check stdout or
+  run with a real `$DISPLAY` if a windowed test looks empty.
+- **cs150 software tree** at `../../software` (or `--sw-dir`): default proj7/`make run`, `test-player`, `test-sm`.
+  Missing blobs → those tests **SKIP** (exit 0) via `tests/optional_deps.py`, not a fake PASS.
+- **`make test-cpu-rtl` only** (not part of `make test`): `iverilog`/`vvp`, MIPS `as`/`objcopy`, and `CS150_ROOT`
+  with `hardware/sim-icarus/tb/CoreHarness.v` + `hardware/src/cpu/CPUMIPS.v` + `hardware/src/innerds/`. Missing →
+  **SKIP**. Whole-system Icarus DDR/cache benches in cs150 need ISE 14.7 `verilog/src` (`XILINX_SRC`; see
+  cs150 `hardware/sim-icarus/README.md`) — not required to build or run vvizard.
 
 ## Build
 The `Makefile` finds Unicorn and raylib through pkg-config:
@@ -91,6 +116,9 @@ If one of these files is missing, vvizard says which and exits 1.
 
 | default | off / change |
 |---|---|
+| `--cpu=fast` (BB interpreter) | `--cpu=unicorn` (Unicorn reference) |
+| `--threads=on` (GPU worker; with a window, emu thread + main draws) | `--sync` / `--threads=off` / `--threads=1` (one thread; GPU finishes in the store) |
+| no DDR/cache stall model | `--ddr-stalls[=R,W]` (I$/D$ timing; default R=16 W=3, hits=0; omit = off) |
 | unlimited instructions | `--max-insns N`, `--max-seconds S` |
 | frame ends every 828960 emulated cycles (`--frame-clock=emulated`) | `--frame-clock=wall`, `--pf-period N` |
 | COP0150 interrupts (`--irq`) | `--no-irq` |
@@ -132,8 +160,9 @@ options and its `--no-` handling is per-flag anyway).
 
 ## Output streams and color (`--color`)
 **stdout carries only the bytes the guest sends on the UART (TX).** Everything vvizard prints for itself goes to
-**stderr**: `[stop]`, `[quirk]`, `[irq]`, `[hw]`, `[mmio]`, `[trace]`, register dumps, summaries, load messages,
-errors, and raylib's log (prefixed `[raylib]`). So `./vvizard ... >uart.txt` captures only the serial output, and
+**stderr**: `[stop]`, `[quirk]`, `[irq]`, `[hw]`, `[duty]`, `[sync]`, `[ddr]`, `[mmio]`, `[trace]`, register dumps,
+summaries, load messages, errors, and raylib's log (prefixed `[raylib]`). So `./vvizard ... >uart.txt` captures only
+the serial output, and
 `2>/dev/null` hides vvizard's diagnostics. (`--help` and `--list-quirks` print to stdout, since you asked for them.)
 UART text is flushed at each newline, every byte when stdout is a terminal, before any stderr output (so a
 `2>&1` log keeps its order), and every 4096 instructions (so a prompt with no newline shows up).
@@ -171,6 +200,7 @@ uses as its shared memory (the stack is at the top of D-scratch).
       --max-insns N (default 0 = unlimited)  --max-seconds S  --until ADDR  --trace[=N]  --trace-regs  --quiet-mmio  --mmio-log
       --little | --big   --window | --no-window   --no-window-keys   --dump-frame F.ppm   --hold
       --dump-lcd   --dump-sm   --screenshot F.png
+      --cpu=unicorn|fast (default fast)   --ddr-stalls[=R,W] (omit=off; default R=16,W=3)
       --random-ddr[=SEED]   --no-random-ddr   --expect REG=VAL   --color[=WHEN]
       --quirks=LIST   --no-quirks   --list-quirks   --halt-on-quirk[=LIST]   --warn-on-quirk[=LIST]   --no-halt-on-quirk
       --quiet-quirk=LIST   --irq | --no-irq   --legacy-io   --uart-rx-gap N   --pf-period N   --frame-clock=emulated|wall
@@ -393,16 +423,16 @@ a read miss, never flushed or snooped. By default vvizard also returns the stale
 (`--quirks=-dcache-stale` returns DDR). Details per detector are in [QUIRKS.md](QUIRKS.md#guest-bug-detectors).
 
 ## Threads (`--threads`, `--sync`)
-By default (`--threads=on`) the GPU draws command lists on a worker thread, and with a window the emulator runs
-on its own thread while the main thread draws the window (the frame is copied into a triple buffer at each frame
-end; raylib stays on the main thread). The guest then sees a busy GPU: GP_STATE's ready bits read 0 from the
-`GP_CODE` store until `launch + pixels/4 + 32 x commands` cycles, Cause bit 12 latches at that edge, and a
-`GP_CODE` store while busy is dropped (the `gp-busy` guest bug; wait with `GP_WAIT()`). The busy time is fixed at
-the launch and the emulator waits for the worker at that cycle if needed, so threaded runs with
-`--frame-clock=emulated` are repeatable (also windowed vs headless). `--sync` (= `--threads=1` / `--threads=off`) is
-the old single thread: the GPU finishes inside the store and is always ready; `make test` uses it, `make
-test-threads` covers the threaded mode. Speed (proj7, NOTES.md "Threads"): windowed 1.07-1.28x, headless ~1.05x
-(1.12x in wall mode). `make TSAN=1` builds with ThreadSanitizer.
+By default (`--threads=on`) the GPU draws command lists on a worker thread, and with a window the selected CPU
+(`--cpu=fast` or `--cpu=unicorn`) runs on an emulator thread while the main thread draws the window (triple buffer;
+raylib stays on main). The guest then sees a busy GPU: GP_STATE's ready bits read 0 from the `GP_CODE` store until
+`launch + pixels/4 + 32 x commands` cycles, Cause bit 12 latches at that edge, and a `GP_CODE` store while busy is
+dropped (the `gp-busy` guest bug; wait with `GP_WAIT()`). The busy time is fixed at the launch and the emulator waits
+for the worker at that cycle if needed, so threaded runs with `--frame-clock=emulated` are repeatable (also windowed
+vs headless). `--sync` (= `--threads=1` / `--threads=off`) is one thread: **no** GPU worker and **no** display
+split — the GPU finishes inside the store and is always ready. `make test` uses `--sync`; `make test-threads`
+covers threaded mode. Speed (proj7, NOTES.md "Threads"): windowed 1.07-1.28x, headless ~1.05x (1.12x in wall mode).
+`make TSAN=1` builds with ThreadSanitizer.
 
 `--event-trace F` writes every guest-visible device event (Cause IP latches, IRQ entries, frame ends, GPU launch /
 busy / ready, UART bytes, MMIO writes, MMIO reads whose value changed) with its instruction count;
@@ -412,9 +442,13 @@ traces, guest-state stderr and frame dumps byte for byte.
 ## Tests
 `make test` runs `check-vendor` and `test-vendor` (`tests/test_vendor.py`, hermetic: the vendor checks against
 throwaway cs150 trees, the `vendor-cmp` banner and `VENDOR_CHECK` modes, and drifted headers breaking the compile-time
-checks; see Build), then `check-hex`, `test-hex`, `test-hw`, `test-quirks`, `test-player`, `test-sm` (all with `--sync`) and
-`test-threads` (`tests/test_threads.py`: the threaded GPU model, determinism of threaded runs, the player with
-`--threads=on`). `make test-hex` runs `tests/test_hex.py`
+checks; see Build), then `check-hex`, `test-hex`, `test-hw`, `test-quirks`, `test-player`, `test-sm` (those suites pin
+`--sync` / explicit `--cpu` as needed) and `test-threads` (`tests/test_threads.py`: the threaded GPU model,
+determinism of threaded runs, the player with `--threads=on`). Optional suites (not in `make test`):
+`python3 tests/test_cpu_fast.py` / `test_cpu_default.py` (fast vs unicorn), `python3 tests/test_ddr_stalls.py`
+(`--ddr-stalls`), `make test-cpu-rtl` (Icarus tri-way; **SKIP** if tools/`CS150_ROOT` missing). Missing cs150
+software blobs in player/sm/threads → **SKIP** exit 0 (`tests/optional_deps.py`); compile/sim/mismatch stay **FAIL**.
+`make test-hex` runs `tests/test_hex.py`
 (loop, uart, lcd, alias, frame, gpcmds/gplaunch with `check_gp.py`, prng, hwprobe). `make test-hw` runs `tests/test_hw.py`:
 `tests/hw/*.s` checks UART TX timing, the RX edge and holding register, the PixelFeeder frame latch, the timer and
 interrupt entry, the GP_STATE layout, registers at reset and `--legacy-io`, the HaltVal register (read-back by default, `--exit-on-halt` stop with exit 0), and makes every guest-bug detector warn,
@@ -441,7 +475,9 @@ CHECK/BEGIN_CHECKS/END_CHECKS/LA_CODE macros used by hwprobe (the same instructi
 The committed `tests/**/NAME.hex` files are a fallback for machines without the toolchain: `tests/vvprog.py` uses
 `build/tests/NAME.bin` when it exists and is newer than the `.s`, else converts the `.hex`. `make check-hex` verifies
 the built programs are byte-identical to the committed hex (part of `make test`; skipped without a toolchain) and
-`make refresh-hex` copies the built hex over the fallbacks after an intentional change.
+`make refresh-hex` copies the built hex over the fallbacks after an intentional `.s` change — **always refresh after
+editing assembly**, or `check-hex` fails (e.g. `ddr_stall.hex` must include the same nops as `ddr_stall.s`).
+Windowed cases that need a display: install **`xvfb`** and use `xvfb-run` (see Dependencies).
 
 ## PixelFeeder display (raylib, `src/display.c`)
 The window is titled `vvizard`. It shows the selected frame unscaled at the top (800×600) and a 76-pixel status strip

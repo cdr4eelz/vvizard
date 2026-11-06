@@ -9,6 +9,8 @@ later.  The player ellipse (outline 0xFF6644, fill 0x4466FF) is located by bbox 
 and each segment's displacement is compared with the expected (dx, dy).
 """
 import os, subprocess, sys, tempfile, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import optional_deps
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -55,6 +57,14 @@ def locate(path):
 
 
 def main():
+    if not os.path.isfile(VV):
+        print(f"FAIL: missing vvizard binary at {VV}; run make first", file=sys.stderr)
+        return 1
+    from pathlib import Path as _P
+    gaps = optional_deps.software_tree_gaps(_P(SW))
+    if gaps:
+        return optional_deps.print_skip(
+            f"cs150 software tree incomplete at {SW} (missing {', '.join(gaps)})")
     tmp = tempfile.mkdtemp(prefix="vv_player_")
     lines, dumps, f = [], [], START
     lines.append(f"f{f} dump {tmp}/s00.ppm"); dumps.append(f"{tmp}/s00.ppm")
@@ -68,8 +78,12 @@ def main():
     max_insns = (f + 4) * 900000      # PixelFeeder frame = 828960 cycles (--pf-period default)
     # vvizard's built-in default program (= GIOS + bench + isr7 + proj7, autorun 'jal 60000000\r'),
     # from <exe dir>/../../software; --no-halt-on-quirk: isr7 has load-use hits the default would stop on.
-    cmd = [VV, os.environ.get("VV_PLAYER_THREADS", "--sync"), "--no-window", "--frame-clock=emulated", "--no-random-ddr", "--no-halt-on-quirk",
+    thr = os.environ.get("VV_PLAYER_THREADS", "--sync")
+    cmd = [VV, thr, "--no-window", "--frame-clock=emulated", "--no-random-ddr", "--no-halt-on-quirk",
            "--input-script", script, "--max-insns", str(max_insns)]
+    # Threaded display unsupported on fast — force Unicorn reference explicitly.
+    if thr != "--sync":
+        cmd.insert(2, "--cpu=unicorn")
     t0 = time.time()
     r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.PIPE, text=True, env=dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib")))
