@@ -421,7 +421,12 @@ static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
         }
         break;
     case OP_LWL0: case OP_LWR0: {
-        /* lwlr on: write 0 to rt (load-delay still applies) */
+        /* lwlr on: write 0 to rt (load-delay still applies). Match quirk.c: still perform
+         * MMIO read side effects (e.g. UARX_DATA pop) for the computed address. */
+        uint32_t addr = rs + (uint32_t)(int32_t)o->imm;
+        uint32_t ca = vv_canon_inl(addr);
+        if (ca != 0xFFFFFFFFu && (ca >> 28) == 0x8)
+            vv_mmio_side_read(ca);
         uint32_t old = c->gpr[o->rt];
         if (o->rt) {
             if (vv_quirk_on(VV_Q_LOAD_USE)) { next_load_rt = o->rt; next_load_old = old; }

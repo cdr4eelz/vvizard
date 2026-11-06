@@ -165,6 +165,22 @@ def t_fast_emu_load_use_on():
     return expect_pass(r, "fast_emu_load_use_on")
 
 
+
+def t_fast_lwlr_mmio_side_read():
+    """lwl of UARX_DATA under +lwlr must pop RX (vv_mmio_side_read), matching quirk.c.
+    --uart-in A; after VALID wait, lwl DATA zeros rt but clears VALID. Differential vs unicorn.
+    """
+    extra = ["--quirks=+lwlr", "--uart-in", "A", "--uart-rx-gap", "0",
+             "--expect", "t2=0", "--expect", "t3=0"]
+    ru = run_cpu("unicorn", "quirk/emu_lwlr_mmio", 0x40000000, *extra, at_max=200000)
+    rf = run_cpu("fast", "quirk/emu_lwlr_mmio", 0x40000000, *extra, at_max=200000)
+    if not expect_pass(ru, "unicorn_lwlr_mmio_side"):
+        return False
+    if not expect_pass(rf, "fast_lwlr_mmio_side"):
+        return False
+    return differential("quirk/emu_lwlr_mmio", 0x40000000, *extra, label="diff_lwlr_mmio_side")
+
+
 def t_fast_rejects_threads_on():
     r = subprocess.run(
         [VV, *BASE, "--cpu=fast", "--threads=on", "--window",
@@ -354,6 +370,7 @@ def main():
         t_fast_emu_hilo_on,
         t_fast_emu_overflow_on,
         t_fast_emu_load_use_on,
+        t_fast_lwlr_mmio_side_read,
         t_fast_rejects_threads_on,
         t_emu_on_matrix,
         t_emu_off_matrix,
