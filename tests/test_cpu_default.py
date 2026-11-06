@@ -75,7 +75,8 @@ def test_fast_threads_honored_no_force_sync():
         print("  test_fast_threads_honored: SKIP (no xvfb-run)")
         return
     r = subprocess.run(cmd, capture_output=True, env=ENV, timeout=30)
-    err = r.stderr.decode(errors="replace")
+    # Ubuntu's xvfb-run runs the command with 2>&1, so banners land on stdout there.
+    err = (r.stdout + r.stderr).decode(errors="replace")
     assert "forcing --sync" not in err and "does not support threaded" not in err, err[-800:]
     assert "cpu=fast" in err, err[-400:]
     assert "emulator + display" in err, err[-400:]
