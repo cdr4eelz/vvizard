@@ -14,6 +14,7 @@
  * GPRs are read (uc_reg_read) only when the decoded instruction needs them. */
 #include "term.h"
 #include "quirk.h"
+#include "cpu/fast.h"
 #include "memmap.h"
 #include "hw.h"
 #include "dcache.h"
@@ -46,7 +47,12 @@ static const uint8_t qbug[VV_Q_COUNT] = {
 };
 static uint64_t qhits[VV_Q_COUNT], qnoemu[VV_Q_COUNT];
 #define ALL ((1u << VV_Q_COUNT) - 1)
-#define E(id) vv_quirk_on(VV_Q_##id)
+/* --cpu=fast: cpu/fast.c applies the emulation itself and calls pre/post only to detect and report
+ * (vv_quirk_pre_fast/post_fast).  While fq_gpr is set, gr() reads the fast register file (rt of the
+ * previous load as the hardware sees it), sr() does nothing and E() is 0 so no Unicorn fix-up runs. */
+static const uint32_t *fq_gpr;
+static int fq_lrt = -1; static uint32_t fq_lold;
+#define E(id) (!fq_gpr && vv_quirk_on(VV_Q_##id))
 #define D(id) ((vv_quirk_detect >> VV_Q_##id) & 1u)
 #define ANY(id) ((vv_quirk_active() >> VV_Q_##id) & 1u)
 
@@ -177,6 +183,7 @@ static void report(int cat, uint32_t pc, uint32_t insn, const char *detail) {
             halt ? "" : qbug[cat] ? " [guest bug]" : vv_quirk_on(cat) ? " [emulated]" : " [not emulated: standard MIPS]");
     if (!halt) return;
     vv_eprintf("[quirk] HW: %s\n", qdesc[cat]);
+    vv_fast_publish_prepare(g_uc);          /* --cpu=fast: registers into UC for the dump */
     vv_dump_regs(g_uc);
     vv_eprintf("[stop] --halt-on-quirk: %s (use --halt-on-quirk=-%s to skip this category%s)\n", qname[cat], qname[cat],
             qbug[cat] ? "; it still warns" : "");
@@ -218,8 +225,13 @@ void vv_quirk_summary(void) {
 }
 
 /* ---------------- helpers ---------------- */
-static uint32_t gr(uc_engine *uc, unsigned r) { uint32_t v = 0; if (r) uc_reg_read(uc, UC_MIPS_REG_0 + r, &v); return v; }
-static void sr(uc_engine *uc, unsigned r, uint32_t v) { if (r) uc_reg_write(uc, UC_MIPS_REG_0 + r, &v); }
+static uint32_t gr(uc_engine *uc, unsigned r) {
+    uint32_t v = 0;
+    if (!r) return 0;
+    if (fq_gpr) return (int)r == fq_lrt ? fq_lold : fq_gpr[r];
+    uc_reg_read(uc, UC_MIPS_REG_0 + r, &v); return v;
+}
+static void sr(uc_engine *uc, unsigned r, uint32_t v) { if (r && !fq_gpr) uc_reg_write(uc, UC_MIPS_REG_0 + r, &v); }
 static uint32_t fetch(uc_engine *uc, uint32_t a) {
     (void)uc; int ok;
     /* undecoded / MMIO: HW fetches 0 (and reading MMIO here would have side effects) */
@@ -328,6 +340,8 @@ static void post_fix(uc_engine *uc) {
     if (P.vzero) { static const uint8_t z[4096]; uc_mem_write(uc, VV_VOID_PA, z, sizeof z); }
     if (P.lbchk) {
         uint32_t v = gr(uc, P.lb_rt);
+        if (fq_gpr && vv_quirk_on(VV_Q_LB_SIGN) && (v & ((P.lb_mask >> 1) + 1)))
+            v |= ~P.lb_mask;                     /* fast already zero-extended: report the MIPS32 value */
         if (v & ~P.lb_mask) {                    /* sign bit was set: old hardware zero-extends */
             rep_back = 1;
             int h = ev(VV_Q_LB_SIGN, P.pc, P.insn, "loaded 0x%08x; old HW gives 0x%08x", v, v & P.lb_mask);
@@ -474,7 +488,7 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
         } else {                                         /* eret, di/ei, tlb*, wait, ...: nop */
             if (i == 0x42000018u && vv_hw_in_isr()) {      /* irq-storm: returning with the cause still pending */
                 uint32_t st = vv_hw_status();
-                if (!E(COP0)) uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
+                if (!vv_quirk_on(VV_Q_COP0)) uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
                 vv_hw_isr_exit_check(st, pc, "eret");
                 if (vv_quirk_halted) return;
             }
@@ -569,12 +583,25 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc) {
     if (!store && rt) { P.ld = 1; P.ld_rt = rt; P.ld_old = ld_old; P.active = 1; }
 }
 
+void vv_quirk_pre_fast(uc_engine *uc, const uint32_t *gpr, int load_rt, uint32_t load_old, uint32_t pc) {
+    fq_gpr = gpr; fq_lrt = load_rt; fq_lold = load_old;
+    vv_quirk_pre(uc, pc);
+    fq_gpr = NULL; fq_lrt = -1;
+}
+void vv_quirk_post_fast(uc_engine *uc, const uint32_t *gpr) {
+    g_uc = uc;
+    if (!P.active) return;
+    fq_gpr = gpr; fq_lrt = -1;
+    post_fix(uc);
+    fq_gpr = NULL;
+}
+
 void vv_quirk_pre_lite(uc_engine *uc, uint32_t pc) {
     g_uc = uc; q_last_pc = pc;
     if (vv_quirk_halted || !vv_hw_in_isr()) return;
     if (fetch(uc, pc) == 0x42000018u) {                  /* eret: same check as in vv_quirk_pre() */
         uint32_t st = vv_hw_status();
-        if (!E(COP0)) uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
+        if (!vv_quirk_on(VV_Q_COP0)) uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &st);
         vv_hw_isr_exit_check(st, pc, "eret");
     }
 }

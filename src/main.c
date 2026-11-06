@@ -1106,7 +1106,9 @@ int main(int argc, char **argv) {
     if (!err && at_max) vv_eprintf("[stop] max-insns %llu reached\n", (unsigned long long)max_insns);
     if (stopped_wall) { if (err == UC_ERR_EXCEPTION && stop_reason_intr < 0) err = UC_ERR_OK;
         if (!err) vv_eprintf("[stop] max-seconds %.3f reached\n", max_wall_ns * 1e-9); }
-    if (err) vv_eprintf("[stop] uc_emu_start: %s\n", uc_strerror(err));
+    if (err && opt_cpu == VV_CPU_FAST)
+        vv_eprintf("[stop] fast CPU stopped on a fault or unsupported instruction (see the [fast] line above)\n");
+    else if (err) vv_eprintf("[stop] uc_emu_start: %s\n", uc_strerror(err));
     if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
     vv_hw_summary();

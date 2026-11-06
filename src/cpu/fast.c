@@ -10,6 +10,9 @@
 #include "memstall.h"
 
 static unsigned pending_stall;
+/* Why the last mem_load/mem_store faulted (printed by exec_one; quirk off: no hardware result). */
+static const char *fault_why;
+static uint32_t fault_va;
 #include "term.h"
 #include "display.h"
 
@@ -255,6 +258,7 @@ static uint32_t mem_load(vv_fast_env *e, uint32_t va, unsigned size, int signed_
     uint32_t c = vv_canon_inl(va);
     if (c == 0xFFFFFFFFu) {
         if (vv_quirk_on(VV_Q_UNMAPPED)) return 0;
+        fault_why = "undecoded address (quirk unmapped off)"; fault_va = va;
         *fault = 1; return 0;
     }
     if ((c >> 28) == 0x8) {
@@ -267,10 +271,11 @@ static uint32_t mem_load(vv_fast_env *e, uint32_t va, unsigned size, int signed_
     }
     if ((size == 4 && (va & 3)) || (size == 2 && (va & 1))) {
         if (vv_quirk_on(VV_Q_UNALIGNED)) return 0;
+        fault_why = "unaligned address (quirk unaligned off)"; fault_va = va;
         *fault = 1; return 0;
     }
     uint8_t *p = vv_ram(c, size);
-    if (!p) { if (vv_quirk_on(VV_Q_UNMAPPED)) return 0; *fault = 1; return 0; }
+    if (!p) { if (vv_quirk_on(VV_Q_UNMAPPED)) return 0; fault_why = "no RAM at this address"; fault_va = va; *fault = 1; return 0; }
     uint32_t v = 0;
     if (e->guest_big) for (unsigned i = 0; i < size; i++) v = (v << 8) | p[i];
     else for (unsigned i = 0; i < size; i++) v |= (uint32_t)p[i] << (8 * i);
@@ -278,7 +283,19 @@ static uint32_t mem_load(vv_fast_env *e, uint32_t va, unsigned size, int signed_
         uint32_t sh = 32 - 8 * size;
         v = (uint32_t)((int32_t)(v << sh) >> sh);
     }
-    if ((c >> 28) == 0x1 || (c >> 28) == 0x3) {
+    if ((c >> 28) == 0x1 && ((va >> 28) == 0x1 || (va >> 28) == 0x3)) {
+        /* dcache-stale (as quirk.c): a line the GPU wrote behind the cache returns the cached word */
+        uint32_t old;
+        if (vv_dc_load(c & ~3u, &old) && vv_quirk_on(VV_Q_DCACHE_STALE)) {
+            int ok = 1; uint32_t cur = vv_ram_be32(c & ~3u, &ok);
+            if (ok && old != cur) {
+                unsigned sh = 8 * (4 - size - (va & 3));
+                v = size == 4 ? old : (old >> sh) & ((1u << (8 * size)) - 1);
+                if (signed_ext && size < 4) { uint32_t s2 = 32 - 8 * size; v = (uint32_t)((int32_t)(v << s2) >> s2); }
+            }
+        }
+        pending_stall += vv_ms_load(c);
+    } else if ((c >> 28) == 0x1 || (c >> 28) == 0x3) {
         if (size == 4) { uint32_t stale; (void)vv_dc_load(c, &stale); }
         pending_stall += vv_ms_load(c);
     }
@@ -290,6 +307,7 @@ static void mem_store(vv_fast_env *e, vv_fast_cpu *cpu, uint32_t va, unsigned si
     uint32_t c = vv_canon_inl(va);
     if (c == 0xFFFFFFFFu) {
         if (vv_quirk_on(VV_Q_UNMAPPED)) return;
+        fault_why = "undecoded address (quirk unmapped off)"; fault_va = va;
         *fault = 1; return;
     }
     if ((c >> 28) == 0x4 && vv_quirk_on(VV_Q_BIOS_STORE)) return;
@@ -303,10 +321,11 @@ static void mem_store(vv_fast_env *e, vv_fast_cpu *cpu, uint32_t va, unsigned si
     }
     if ((size == 4 && (va & 3)) || (size == 2 && (va & 1))) {
         if (vv_quirk_on(VV_Q_UNALIGNED)) return;
+        fault_why = "unaligned address (quirk unaligned off)"; fault_va = va;
         *fault = 1; return;
     }
     uint8_t *p = vv_ram(c, size);
-    if (!p) { if (vv_quirk_on(VV_Q_UNMAPPED)) return; *fault = 1; return; }
+    if (!p) { if (vv_quirk_on(VV_Q_UNMAPPED)) return; fault_why = "no RAM at this address"; fault_va = va; *fault = 1; return; }
     if (e->guest_big) for (unsigned i = 0; i < size; i++) p[i] = (uint8_t)(val >> (8 * (size - 1 - i)));
     else for (unsigned i = 0; i < size; i++) p[i] = (uint8_t)(val >> (8 * i));
     if ((c >> 28) == 0x1 || (c >> 28) == 0x3) {
@@ -314,6 +333,12 @@ static void mem_store(vv_fast_env *e, vv_fast_cpu *cpu, uint32_t va, unsigned si
         pending_stall += vv_ms_store(c);
     }
     vv_fast_invalidate(c, size);
+}
+
+static int mem_fault(const vv_ir *o, const char *kind, unsigned size) {
+    vv_eprintf("[fast] fault: %u-byte %s at va=0x%08x pc=0x%08x: %s (the hardware has no exception for this; "
+               "enable the quirk or use --cpu=unicorn)\n", size, kind, fault_va, o->pc, fault_why ? fault_why : "memory fault");
+    return -1;
 }
 
 static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
@@ -366,7 +391,7 @@ static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
         uint32_t addr = rs + (uint32_t)(int32_t)o->imm;
         uint32_t old = c->gpr[o->rt];
         uint32_t v = mem_load(e, addr, sz, sex, &fault);
-        if (fault) return -1;
+        if (fault) return mem_fault(o, "load", sz);
         if (o->rt) {
             if (vv_quirk_on(VV_Q_LOAD_USE)) { next_load_rt = o->rt; next_load_old = old; }
             c->gpr[o->rt] = v;
@@ -376,7 +401,7 @@ static int exec_one(vv_fast_env *e, vv_fast_cpu *c, const vv_ir *o) {
     case OP_SW: case OP_SB: case OP_SH: {
         unsigned sz = (o->op == OP_SW) ? 4 : (o->op == OP_SH) ? 2 : 1;
         mem_store(e, c, rs + (uint32_t)(int32_t)o->imm, sz, rt, &fault);
-        if (fault) return -1;
+        if (fault) return mem_fault(o, "store", sz);
         break;
     }
     case OP_BEQ:  taken = rs == rt; target = o->pc + 4 + ((int32_t)o->imm << 2); break;
@@ -510,6 +535,7 @@ static void irq_step_fast(vv_fast_env *e, vv_fast_cpu *c) {
             vv_hw_isr_enter(c->pc, st); st &= ~1u; prev_status = st;
             if (!cop0) uc_reg_write(e->uc, UC_MIPS_REG_CP0_STATUS, &st);
             c->pc = VV_PC_ISR;
+            vv_quirk_cancel();
             c->in_delay = 0;
             c->load_rt = -1;
             c->last_pc = c->last2_pc = c->last3_pc = 0xFFFFFFFFu;
@@ -556,6 +582,10 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
         if (sp) cpu->gpr[29] = sp;
     }
 
+    /* quirk.c detectors (warn/halt): fast applies the emulation, quirk.c only decodes and reports */
+    int qdet = (vv_quirk_detect & ~VV_Q_NODECODE_DET) != 0;
+    int qlite = !qdet && vv_quirk_detect;
+    int qfetch = (vv_quirk_detect >> VV_Q_UNMAPPED_FETCH) & 1;
     while (!cpu->stop_break && !cpu->stop_until) {
         if (env->stop_req && *env->stop_req) break;
         if (env->max_insns) {
@@ -596,6 +626,19 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
             if (*env->trace_left > 0) (*env->trace_left)--;
         }
 
+        if (qfetch) {                       /* unmapped-fetch (Unicorn: tlb_fill) */
+            uint32_t fc = vv_canon_inl(cpu->pc);
+            if (fc == 0xFFFFFFFFu || (fc >> 28) == 0x8) {
+                vv_quirk_fetch(env->uc, cpu->pc, fc == 0xFFFFFFFFu ? "undecoded" : "MMIO");
+                if (vv_quirk_halted) break;
+            }
+        }
+        if (qdet) {
+            int lu = vv_quirk_on(VV_Q_LOAD_USE) ? cpu->load_rt : -1;
+            vv_quirk_pre_fast(env->uc, cpu->gpr, lu, cpu->load_old, cpu->pc);
+            if (vv_quirk_halted) break;
+        } else if (qlite) vv_quirk_pre_lite(env->uc, cpu->pc);
+
         int was_delay = cpu->in_delay;
         uint32_t delay_npc = cpu->delay_npc;
         /* Clear in_delay before exec so a branch in the delay slot can set it again (rare). */
@@ -608,6 +651,7 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
             vv_hw_tick(env->uc, vv_ms_cycles());   /* catch devices up past D$ stalls */
         }
         if (rc < 0) { vv_fast_live_cpu = NULL; return 1; }
+        if (qdet) { vv_quirk_post_fast(env->uc, cpu->gpr); if (vv_quirk_halted) break; }
         if (cpu->stop_break) { cpu->pc = o->pc + 4; break; }
 
         if (was_delay) {
