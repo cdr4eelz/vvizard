@@ -92,6 +92,7 @@ static void collect_keys(void) {
 int vv_disp_threaded;
 typedef struct {
     uint8_t px[VV_SCREEN_H][VV_SCREEN_W * 4];
+    const uint8_t *host; /* turbo: atomic guest words; NULL for legacy copied slots */
     char l1[160], l2[160];
     uint8_t lcd[VV_LCD_CHARS];
     uint32_t frame;
@@ -254,6 +255,7 @@ int vv_disp_init(int want_window) {
 static double last_pub;
 static void publish(uc_engine *uc) {
     disp_slot *sl = &slots[tb_back];
+    sl->host = NULL;
     uint64_t t0 = vv_mono_ns();
     uint32_t base = VV_FRAME0 + (cur_frame << VV_FSHIFT);
     vv_gpu_settle(cur_frame);               /* (shows the finished draw; the guest is not affected) */
@@ -310,7 +312,17 @@ static int draw_fresh(void) {               /* main: draw the middle slot if it 
     uint64_t t0 = vv_mono_ns();
     tb_front = atomic_exchange_explicit(&tb_mid, tb_front, memory_order_acq_rel) & 3u;
     const disp_slot *sl = &slots[tb_front];
-    for (int y = 0; y < VV_SCREEN_H; y++) swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, sl->px[y]);
+    for (int y = 0; y < VV_SCREEN_H; y++) {
+        if (!sl->host) swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, sl->px[y]);
+        else {
+            uint8_t row[VV_SCREEN_W * 4];
+            for (int x = 0; x < VV_SCREEN_W; x++) {
+                uint32_t v = __atomic_load_n((const uint32_t *)(sl->host + y * VV_ROW_PITCH + x * 4), __ATOMIC_RELAXED);
+                memcpy(row + x * 4, &v, 4);
+            }
+            swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, row);
+        }
+    }
     klq_drain();
     UpdateTexture(tex, rgba);
     BeginDrawing(); ClearBackground(BLACK); DrawTexture(tex, 0, 0, WHITE); draw_strip(sl->l1, sl->l2, sl->lcd); EndDrawing();
@@ -372,3 +384,16 @@ int vv_disp_screenshot(uc_engine *uc, const char *path) {
     return ok ? 0 : -1;
 }
 void vv_disp_close(void) { if (have_window) { UnloadTexture(tex); CloseWindow(); have_window = 0; } }
+
+/* Emulator-side snapshot contains only a frame reference, LCD and text. Guest
+ * pixels are atomic words, so a later DMA cannot cause a C data race. Turbo
+ * intentionally permits scanout tearing rather than blocking the guest. */
+void vv_disp_turbo_publish(const uint8_t *frame, uint32_t fn, const uint8_t *lcd, const char *l1, const char *l2) {
+    disp_slot *sl = &slots[tb_back];
+    sl->host = frame; sl->frame = fn; memcpy(sl->lcd, lcd, VV_LCD_CHARS);
+    snprintf(sl->l1, sizeof sl->l1, "%s", l1); snprintf(sl->l2, sizeof sl->l2, "%s", l2);
+    tb_back = atomic_exchange_explicit(&tb_mid, tb_back | SLOT_FRESH, memory_order_acq_rel) & 3u;
+    wake_main();
+}
+void vv_disp_turbo_done(void) { atomic_store(&emu_done, 1); wake_main(); }
+int vv_disp_turbo_stop(void) { return atomic_load(&win_closed) || atomic_load(&esc_pressed); }

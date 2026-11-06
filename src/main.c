@@ -23,6 +23,7 @@
 #include "gpu.h"
 #include "quirk.h"
 #include "cpu/fast.h"
+#include "turbo/turbo.h"
 #include "prng.h"
 #include "lcd.h"
 #include "shmem.h"
@@ -88,6 +89,7 @@ static int opt_mmio_ise;
 static uint32_t prev_regs[32];
 static uint64_t insn_count, cnt_base_insn, cnt_base_cycle;
 static uint64_t max_insns;
+static double opt_mhz;
 static uint32_t stop_addr; static int have_stop;
 static uint32_t pf_frame = 0x10000000u, gp_frame, gp_code, gp_launches;
 static int trace_left = -1;
@@ -676,8 +678,12 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --little / --big   CPU endianness (default %s)\n"
 "\n"
 "Run control (defaults: unlimited, interrupts on, random DDR, window with keys):\n"
-"  --cpu=unicorn|fast  CPU backend (default fast).  fast = predecoded basic-block\n"
+"  --cpu=unicorn|fast|turbo  CPU backend (default fast).  fast = predecoded basic-block\n"
 "                     interpreter (L0); use --cpu=unicorn for the Unicorn reference\n"
+"                     turbo = fixed MIPS150, own MMIO + GPU thread, speed only.\n"
+"                     No quirk/fidelity/thread knobs; binary images, big-endian only.\n"
+"  --mhz=N            turbo only: throttle wall clock to N million instructions/sec (MHz).\n"
+"                     Default unconstrained (omit the flag; 0 is rejected).\n"
 "  --ddr-stalls[=R,W]  approximate DDR2 + I$/D$ miss stalls (caches ONLY with this flag).\n"
 "                     Omit the flag for off (1 cycle/insn, no cache tax). Bare --ddr-stalls\n"
 "                     or --ddr-stalls=R,W enables 256x32B WT caches; R = read/miss-fill\n"
@@ -805,9 +811,35 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_DUMP_SM, O_DUMP_BE32, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU, O_DDR_STALLS };
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU, O_DDR_STALLS, O_MHZ };
 
+/* Validate turbo before getopt can act on --list-quirks, open trace files, or
+ * consult the quirk environment. Closed-world options are order independent. */
+static int turbo_requested(int argc, char **argv) {
+    int yes = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strncmp(argv[i], "--cpu=", 6)) yes = !strcmp(argv[i] + 6, "turbo");
+        else if (!strcmp(argv[i], "--cpu") && i + 1 < argc) yes = !strcmp(argv[++i], "turbo");
+    }
+    return yes;
+}
+static int turbo_check_args(int argc, char **argv) {
+    static const char *allowed[] = {"cpu", "load", "entry", "sp", "max-insns", "max-seconds", "mhz",
+        "window", "no-window", "no-window-keys", "bios", "no-bios", "bare", "sw-dir",
+        "uart-in", "no-autorun", "exit-on-halt", "no-exit-on-halt", "dump-sm", "dump-lcd",
+        "dump-frame", "expect", "dump-be32", "quiet-mmio", "big", "color", "help"};
+    if (getenv("VVIZARD_QUIRKS")) { vv_eprintf("turbo does not take VVIZARD_QUIRKS\n"); return 2; }
+    for (int i = 1; i < argc; i++) if (!strncmp(argv[i], "--", 2)) {
+        size_t n = strcspn(argv[i] + 2, "="); int ok = 0;
+        for (size_t j = 0; j < sizeof allowed / sizeof *allowed; j++)
+            if (strlen(allowed[j]) == n && !strncmp(argv[i] + 2, allowed[j], n)) { ok = 1; break; }
+        if (!ok) { vv_eprintf("turbo does not take %.*s\n", (int)n + 2, argv[i]); return 2; }
+    }
+    return 0;
+}
 int main(int argc, char **argv) {
+    int is_turbo = turbo_requested(argc, argv);
+    if (is_turbo && turbo_check_args(argc, argv)) return 2;
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
     const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0, dump_sm = 0;
     uint32_t dump_be32_addr = 0; int dump_be32_n = 0;
@@ -816,6 +848,7 @@ int main(int argc, char **argv) {
     const char *expects[32]; int nexp = 0;
     int bare = 0, uart_in_set = 0; const char *sw_dir = NULL;
     max_insns = 0;                               /* unlimited */
+    opt_mhz = 0;                                 /* unconstrained (turbo only) */
     opt_quiet_mmio = 1;
     init_sw_default(argv[0]);
     static struct option lo[] = {
@@ -834,11 +867,11 @@ int main(int argc, char **argv) {
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
-        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},
+        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},{"mhz",1,0,O_MHZ},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
-    uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
-    const char *qenv = getenv("VVIZARD_QUIRKS"), *qdet = NULL, *qquiet = NULL;
+    uint32_t emul = is_turbo ? 0 : vv_quirk_default(), qdflt = is_turbo ? 0 : vv_quirk_default();
+    const char *qenv = is_turbo ? NULL : getenv("VVIZARD_QUIRKS"), *qdet = NULL, *qquiet = NULL;
     /* default: no quirk detection (no per-insn decode cost on --cpu=fast); only the device-side guest-bug
      * detectors (tx-busy, rx-overrun, irq-storm, gp-busy: no decode) warn.  --halt-on-quirk / --warn-on-quirk
      * turn detection on; --no-halt-on-quirk keeps all guest-bug detectors warning (no halt). */
@@ -906,7 +939,11 @@ int main(int argc, char **argv) {
         case O_CPU:
             if (!strcmp(optarg, "unicorn")) opt_cpu = VV_CPU_UNICORN;
             else if (!strcmp(optarg, "fast")) opt_cpu = VV_CPU_FAST;
-            else { vv_eprintf("--cpu: expected unicorn or fast, not '%s'\n", optarg); return 2; } break;
+            else if (!strcmp(optarg, "turbo")) {
+                if (!is_turbo) { vv_eprintf("turbo requires the full --cpu=turbo option\n"); return 2; }
+                opt_cpu = 2;
+            }
+            else { vv_eprintf("--cpu: expected unicorn, fast or turbo, not '%s'\n", optarg); return 2; } break;
         case O_DDR_STALLS: {
             unsigned rd = VV_MS_READ_STALLS_DFLT, wr = VV_MS_WRITE_STALLS_DFLT;
             const char *v = optarg ? optarg : opt_next(argc, argv, is_ddr_stalls_arg);
@@ -916,6 +953,14 @@ int main(int argc, char **argv) {
             }
             vv_ms_enable(rd, wr);
             break; }
+        case O_MHZ: {
+            if (!is_turbo) { vv_eprintf("--mhz requires --cpu=turbo\n"); return 2; }
+            char *e; double mhz = strtod(optarg, &e);
+            if (e == optarg || *e || !(mhz > 0)) {
+                vv_eprintf("--mhz: expected a positive number (omit for unconstrained), not '%s'\n", optarg);
+                return 2;
+            }
+            opt_mhz = mhz; break; }
         case O_EVENT_TRACE:
             if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
             setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
@@ -945,6 +990,12 @@ int main(int argc, char **argv) {
     int user_prog = nloads > 0 || optind < argc;
     int use_default_app = !bare && !user_prog;
     const char *sw = sw_dir ? sw_dir : sw_default;
+    char turbo_sw[PATH_MAX + 32];
+    if (is_turbo && !sw_dir && access(sw, R_OK)) {
+        char d[PATH_MAX]; exe_dir(argv[0], d, sizeof d);
+        snprintf(turbo_sw, sizeof turbo_sw, "%s/../software", d);
+        if (!access(turbo_sw, R_OK)) sw = turbo_sw;
+    }
     char app_paths[NDEFAULT_APP][2 * PATH_MAX];
     if (use_default_app) {
         for (size_t i = 0; i < NDEFAULT_APP; i++) {
@@ -958,6 +1009,49 @@ int main(int argc, char **argv) {
             loads[nloads++] = app_paths[i];
         }
         if (!uart_in_set) uart_in = decode_escapes(VV_AUTORUN);
+    }
+    if (is_turbo) {
+        if (optind < argc) { vv_eprintf("turbo loads binary images only; use --load FILE@ADDR\n"); return 2; }
+        vv_term_init(color);
+        turbo t;
+        if (turbo_init(&t)) { vv_eprintf("[turbo] cannot allocate RAM\n"); return 1; }
+        int rc = 0, has_bios = 0;
+        for (int i = 0; i < nloads; i++) {
+            const char *at = strrchr(loads[i], '@');
+            if (at && (strtoul(at + 1, 0, 0) >> 28) == 4) has_bios = 1;
+        }
+        if (!no_bios && (bios_path || !has_bios)) {
+            char bp[2 * PATH_MAX]; snprintf(bp, sizeof bp, "%s/" VV_BIOS_REL, sw);
+            if (turbo_load(&t, bios_path ? bios_path : bp, VV_PC_BOOT)) rc = 1;
+        }
+        for (int i = 0; i < nloads && !rc; i++) {
+            char *path = strdup(loads[i]), *at = strrchr(path, '@');
+            if (!at) { vv_eprintf("turbo --load needs FILE@ADDR\n"); rc = 2; }
+            else { *at = 0; if (turbo_load(&t, path, strtoul(at + 1, 0, 0))) rc = 1; }
+            free(path);
+        }
+        if (!rc) {
+            turbo_opts opts = {.entry=entry, .sp=have_sp ? sp : 0, .max_insns=max_insns,
+                .max_ns=max_wall_ns, .mhz=opt_mhz, .window=want_window, .exit_on_halt=opt_exit_on_halt,
+                .dump_sm=dump_sm, .dump_lcd=dump_lcd, .dump_frame=dump_path};
+            rc = turbo_run(&t, &opts);
+            for (int i = 0; i < dump_be32_n; i++) {
+                uint32_t a = dump_be32_addr + (uint32_t)i * 4;
+                vv_eprintf("[dump-be32] a=0x%08x v=0x%08x ok=%d\n", a, turbo_load_mem(&t, a, 4, 0), turbo_ptr(&t, a, 4) != NULL);
+            }
+            for (int i = 0; i < nexp; i++) {
+                char *name = strdup(expects[i]), *eq = strchr(name, '=');
+                int reg = eq ? (*eq = 0, reg_index(name)) : -1;
+                if (reg < 0) { vv_eprintf("bad --expect %s\n", expects[i]); rc = 2; }
+                else {
+                    uint32_t want = strtoul(eq + 1, 0, 0), got = t.gpr[reg];
+                    vv_eprintf("[expect] $%s = 0x%08x (want 0x%08x) %s\n", name, got, want, got == want ? "PASS" : "FAIL");
+                    if (got != want) rc = 3;
+                }
+                free(name);
+            }
+        }
+        turbo_destroy(&t); return rc;
     }
     vv_term_init(color);
     vv_quirk_emul = emul;
