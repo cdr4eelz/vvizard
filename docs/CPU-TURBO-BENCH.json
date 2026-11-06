@@ -1,0 +1,26 @@
+{
+  "insns": 200000000,
+  "runs": 5,
+  "rates_mcyc_s": {
+    "turbo": [
+      377.269,
+      370.939,
+      372.747,
+      310.858,
+      375.373
+    ],
+    "fast": [
+      61.75,
+      62.7,
+      63.58,
+      63.93,
+      62.58
+    ]
+  },
+  "medians_mcyc_s": {
+    "turbo": 372.747,
+    "fast": 62.7
+  },
+  "ratio": 5.944928229665072,
+  "mode": "headless; PF instruction-clock; zero-initialized DDR; no stalls"
+}

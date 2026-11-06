@@ -339,3 +339,21 @@ Turbo is doing its job when:
   and is clearly faster (the point of the backend). There is no numeric
   target until that first measurement exists; after it, further tricks are
   ranked by that same bench.
+
+## First implementation status
+
+The initial independent backend is implemented on this branch. See
+[`CPU-TURBO-RESULTS.md`](CPU-TURBO-RESULTS.md) for commands, verification,
+measurements, and remaining gaps; see `CPU-TURBO-BENCH.json` for headless samples.
+
+The speed gate rejected the experimental constant-propagated RAM-pointer IR
+and huge-page advice. Both were removed rather than keeping complexity that
+made proj7 slower. Static block chaining, decode-selected nop-slot fusion,
+load-delay pairs, bulk Count, MMIO event deadlines and the independent GPU
+worker remain. Other delay slots are in the same block but dispatch normally.
+
+Frame publication currently references live atomic guest pixels, without a
+copy-on-reuse lifetime protocol. This is race-safe but can tear when the same
+frame is rewritten before scanout completes; it is not the guarded-copy
+solution described above. Linux is tested; macOS semaphore parking is not.
+There is no windowed throughput claim in this first pass.

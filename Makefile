@@ -48,7 +48,7 @@ EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
 .PHONY: vendor-cmp check-vendor vendor-update test-vendor
-.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-cpu-rtl tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-cpu-rtl test-cpu-turbo tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -202,6 +202,9 @@ test-hex: $(TARGET) tests
 # Tri-way Unicorn/fast/Icarus CPU differential (optional: CS150_ROOT + iverilog + mips binutils).
 # Missing optional deps → SKIP exit 0 with reason; real sim/compile/mismatch → FAIL.
 # Missing vvizard → build via $(TARGET). Does not modify cs150 Verilog.
+test-cpu-turbo: $(TARGET) tests
+	python3 tests/test_cpu_turbo.py
+
 test-cpu-rtl: $(TARGET)
 	python3 tests/test_cpu_rtl.py $(if $(CS150_ROOT),--cs150-root $(CS150_ROOT),)
 
@@ -218,8 +221,8 @@ test-threads: $(TARGET) tests
 	python3 tests/test_threads.py
 
 # All tests (vendored cs150 headers vs the originals, hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
-# proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode tests
-test: check-vendor test-vendor check-hex test-hex test-hw test-quirks test-player test-sm test-threads
+# proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode and fixed turbo tests
+test: check-vendor test-vendor check-hex test-hex test-hw test-quirks test-player test-sm test-threads test-cpu-turbo
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
