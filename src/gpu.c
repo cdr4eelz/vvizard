@@ -1,6 +1,7 @@
 /* gpu.c - GraphicsProcessor command interpreter (instant completion).
  * Evidence: hardware/src/gpu/gpcommands.vh, GraphicsProcessor.v, RectangleEngine.v,
  * ScanLineRunner.v, FrameFiller.v; software/common/graphics.h. */
+#include "cpu/fast.h"
 #include "term.h"
 #include "gpu.h"
 #include "memmap.h"
@@ -44,6 +45,7 @@ static void store(gctx *g, uint32_t a, const uint8_t *buf, size_t n) {
     if (g->mode == G_HOST) { uint8_t *p = vv_ram(a, (uint32_t)n); if (p) memcpy(p, buf, n); return; }
     vv_dc_dma_write(g->uc, a, n);               /* DDR write behind the CPU D-cache (dcache-stale) */
     uc_mem_write(g->uc, a, buf, n);
+    vv_fast_invalidate(a, (uint32_t)n);         /* --cpu=fast BB cache: GPU wrote over cached code? */
 }
 /* Write a horizontal span [x0,x1] on row y, clipped to the 800x600 screen. */
 static void span(gctx *g, int y, int x0, int x1, uint32_t c) {

@@ -63,10 +63,38 @@ static uint32_t decode_quirks;
 
 static unsigned bb_slot(uint32_t pc) { return (pc >> 2) & (BB_CACHE - 1); }
 
-void vv_fast_flush(void) { bb_gen++; if (!bb_gen) bb_gen = 1; }
+/* Code-page filter: one bit per (hashed) 256-byte HOST page that holds cached BB code. Keyed by
+ * host pointer so canonical aliases of the same RAM collide. Hash collisions only cause extra
+ * flushes. Cleared on every flush (all BBs become stale then). */
+#define CP_SHIFT 8
+#define CP_BITS 16384
+static uint64_t code_pages[CP_BITS / 64];
+static int code_pages_any;
+static inline unsigned cp_hash(uintptr_t h) { return (unsigned)((h >> CP_SHIFT) & (CP_BITS - 1)); }
+static void cp_mark(uint32_t c, uint32_t n) {
+    uint8_t *h = vv_ram(c, n);
+    if (!h) return;
+    uintptr_t a = (uintptr_t)h, e = a + n - 1;
+    for (uintptr_t x = a >> CP_SHIFT; x <= (e >> CP_SHIFT); x++) {
+        unsigned k = (unsigned)(x & (CP_BITS - 1));
+        code_pages[k >> 6] |= 1ull << (k & 63);
+    }
+    code_pages_any = 1;
+}
+
+void vv_fast_flush(void) {
+    bb_gen++; if (!bb_gen) bb_gen = 1;
+    if (code_pages_any) { memset(code_pages, 0, sizeof code_pages); code_pages_any = 0; }
+}
 void vv_fast_invalidate(uint32_t addr, uint32_t nbytes) {
-    (void)addr; (void)nbytes;
-    vv_fast_flush();
+    if (!code_pages_any) return;
+    uint8_t *h = nbytes ? vv_ram(addr, nbytes) : 0;
+    if (!h) { vv_fast_flush(); return; }
+    uintptr_t a = (uintptr_t)h, e = a + nbytes - 1;
+    for (uintptr_t x = a >> CP_SHIFT; x <= (e >> CP_SHIFT); x++) {
+        unsigned k = (unsigned)(x & (CP_BITS - 1));
+        if (code_pages[k >> 6] & (1ull << (k & 63))) { vv_fast_flush(); return; }
+    }
 }
 
 static uint32_t fetch_be(uint32_t pc, int *ok) {
@@ -215,6 +243,7 @@ static vv_bb *get_bb(uint32_t pc) {
     b->gen = bb_gen;
     b->n = 0;
     uint32_t cur = pc;
+    int slot = 0;                       /* the IR just decoded is a branch: decode its delay slot too */
     for (int i = 0; i < BB_MAX; i++) {
         int ok = 1;
         uint32_t insn = fetch_be(cur, &ok);
@@ -224,17 +253,30 @@ static vv_bb *get_bb(uint32_t pc) {
         }
         decode_one(cur, insn, &b->ir[i]);
         b->n = i + 1;
-        if (b->ir[i].op == OP_BREAK || b->ir[i].op == OP_SLOW || is_branch_op(b->ir[i].op))
-            break;
+        { uint32_t ci = vv_canon_inl(cur); if (ci != 0xFFFFFFFFu) cp_mark(ci, 4); }
+        if (slot) break;                /* delay slot (may sit on the next page): block ends */
+        if (b->ir[i].op == OP_BREAK || b->ir[i].op == OP_SLOW) break;
+        if (is_branch_op(b->ir[i].op)) { if (i + 1 >= BB_MAX) break; slot = 1; cur += 4; continue; }
         if (((cur + 4) & ~0xFFFu) != (cur & ~0xFFFu)) break;
         cur += 4;
     }
     return b;
 }
 
+/* Sequential cursor: the IR after the last one returned, in the same still-valid block. Lets
+ * straight-line code walk one cached block instead of hashing (and caching a suffix block for)
+ * every PC. Any flush (gen bump), quirk-mask change, IRQ redirect or jump fails the checks. */
+static vv_bb *cur_bb;
+static int cur_i;
+
 static const vv_ir *lookup_ir(uint32_t pc) {
+    vv_bb *cb = cur_bb;
+    if (cb && cb->gen == bb_gen && cur_i + 1 < cb->n && cb->ir[cur_i + 1].pc == pc &&
+        cb->quirk_mask == decode_quirks)
+        return &cb->ir[++cur_i];
     vv_bb *b = get_bb(pc);
-    for (int i = 0; i < b->n; i++) if (b->ir[i].pc == pc) return &b->ir[i];
+    for (int i = 0; i < b->n; i++) if (b->ir[i].pc == pc) { cur_bb = b; cur_i = i; return &b->ir[i]; }
+    cur_bb = NULL;
     /* delay slot or mid-block miss: decode once into a thread-local scratch via static */
     static vv_ir scratch;
     int ok = 1;
@@ -523,11 +565,11 @@ static void irq_step_fast(vv_fast_env *e, vv_fast_cpu *c) {
     if (vv_hw_irq_request(st)) {
         int defer = 0;
         if (c->last_pc != 0xFFFFFFFFu) {
-            int ok; uint32_t x = fetch_be(c->last_pc, &ok);
+            int ok = 1; uint32_t x = fetch_be(c->last_pc, &ok);
             if (ok) defer = is_branch_word(x) || is_mtc0_word(x);
         }
         if (!defer && c->last3_pc != 0xFFFFFFFFu) {
-            int ok; uint32_t x = fetch_be(c->last3_pc, &ok);
+            int ok = 1; uint32_t x = fetch_be(c->last3_pc, &ok);
             if (ok && is_branch_word(x) && c->last_pc != c->last3_pc + 8) defer = 1;
         }
         if (!defer) {
@@ -567,6 +609,7 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
     decode_quirks = vv_quirk_emul;
     vv_fast_live_cpu = cpu;
     vv_fast_flush();
+    cur_bb = NULL;
     memset(cpu->gpr, 0, sizeof cpu->gpr);
     cpu->pc = entry;
     cpu->hi = cpu->lo = 0;
@@ -620,7 +663,7 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
 
         const vv_ir *o = lookup_ir(cpu->pc);
         if (env->opt_trace && env->trace_left && *env->trace_left != 0) {
-            int ok; uint32_t insn = fetch_be(o->pc, &ok);
+            int ok = 1; uint32_t insn = fetch_be(o->pc, &ok);
             vv_eprintf("[trace] %8llu pc=0x%08x insn=%08x\n",
                        (unsigned long long)*env->insn_count, o->pc, ok ? insn : 0);
             if (*env->trace_left > 0) (*env->trace_left)--;
