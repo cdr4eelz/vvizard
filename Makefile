@@ -18,11 +18,13 @@ PROFILE    ?= 0
 ifeq ($(DEBUG),1)
 OPTFLAGS   ?= -O0 -g3 -fno-omit-frame-pointer
 else
-OPTFLAGS   ?= -O3 -g
+OPTFLAGS   ?= -O3 -g -flto=auto
 endif
 ifeq ($(PROFILE),1)
 OPTFLAGS   += -fno-omit-frame-pointer -DVV_PROFILE
 endif
+# LTO on by default for release builds (runtime speed); DEBUG=1 builds stay non-LTO.
+LDFLAGS    ?= $(if $(filter 1,$(DEBUG)),,-flto=auto -O3)
 CFLAGS     ?= -std=gnu99 -Wall -Wextra $(OPTFLAGS)
 # pthreads (docs/MULTITHREADING-PLAN.md): always linked; --sync / --threads=1 just starts none.
 # make TSAN=1: ThreadSanitizer build (Linux; compile and link).
