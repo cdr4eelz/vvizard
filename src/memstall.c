@@ -5,6 +5,8 @@
 #include <string.h>
 
 int vv_ddr_stalls;
+unsigned vv_ms_read_stalls = VV_MS_READ_STALLS_DFLT;
+unsigned vv_ms_write_stalls = VV_MS_WRITE_STALLS_DFLT;
 
 typedef struct { uint32_t tag; uint8_t valid; } ms_line;
 static ms_line ic[VV_MS_LINES], dc[VV_MS_LINES];
@@ -27,13 +29,19 @@ void vv_ms_reset(void) {
     memset(dc, 0, sizeof dc);
     stall_sum = imiss = dmiss = dwrite = host_cycles = 0;
 }
+void vv_ms_enable(unsigned read_stalls, unsigned write_stalls) {
+    vv_ddr_stalls = 1;
+    vv_ms_read_stalls = read_stalls;
+    vv_ms_write_stalls = write_stalls;
+    vv_ms_reset();
+}
 
 static unsigned fill(ms_line *c, uint32_t a) {
     unsigned i = idx(a);
     if (c[i].valid && c[i].tag == tag_of(a)) return 0;          /* hit: no extra stall */
     c[i].valid = 1;
     c[i].tag = tag_of(a);
-    return VV_MS_MISS_CYCLES;
+    return vv_ms_read_stalls;
 }
 
 unsigned vv_ms_ifetch(uint32_t pc) {
@@ -63,8 +71,8 @@ unsigned vv_ms_store(uint32_t canon) {
     }
     /* miss: no allocate (Cache.v) */
     dwrite++;
-    stall_sum += VV_MS_WRITE_CYCLES;
-    return VV_MS_WRITE_CYCLES;
+    stall_sum += vv_ms_write_stalls;
+    return vv_ms_write_stalls;
 }
 
 unsigned vv_ms_dside_uc(uc_engine *uc, uint32_t pc) {
@@ -111,9 +119,9 @@ uint64_t vv_ms_dwrite(void) { return dwrite; }
 
 void vv_ms_summary(void) {
     if (!vv_ddr_stalls) return;
-    vv_eprintf("[ddr] stalls on (miss=%u write=%u): I$ misses %llu D$ misses %llu D$ writes %llu; "
+    vv_eprintf("[ddr] stalls on (read=%u write=%u; hit=0): I$ misses %llu D$ misses %llu D$ writes %llu; "
                "stall cycles %llu, host cycles %llu (approx; caches gated on --ddr-stalls)\n",
-               VV_MS_MISS_CYCLES, VV_MS_WRITE_CYCLES,
+               vv_ms_read_stalls, vv_ms_write_stalls,
                (unsigned long long)imiss, (unsigned long long)dmiss, (unsigned long long)dwrite,
                (unsigned long long)stall_sum, (unsigned long long)host_cycles);
 }

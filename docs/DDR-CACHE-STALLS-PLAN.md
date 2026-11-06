@@ -72,7 +72,7 @@ All tests PASSED. These are the best current **approx miss/hit stall** numbers f
 ## Proposed emulator shape (next commits; not this one)
 
 1. Flag off by default; `--cpu=fast` unchanged when flag off.
-2. When on: model I$ and D$ like `Cache.v`/`cache.vh` (256×32B, WT no-WA); on miss add ~**16–26** cycles (start with a single tunable, e.g. `DDR_MISS_CYCLES=20`, refine from more Icarus runs); write-through ~**3** cycles.
+2. When on: model I$ and D$ like `Cache.v`/`cache.vh` (256×32B, WT no-WA); on miss add ~**16–26** cycles (tunable via `--ddr-stalls=R,W` (defaults R=16 W=3), refine from more Icarus runs); write-through ~**3** cycles.
 3. Advance `vv_hw_tick` / COP0 Count / CNT_* by **stall cycles** when mode on (closes the QUIRKS gap).
 4. Keep GPU busy model separate; do not require full RequestController in v1.
 5. Tests: differential vs Unicorn only with mode off; new cases vs Icarus `cpu_isa_ddr` / documented cycle bands with mode on; SKIP if no CS150_ROOT/Icarus.
@@ -85,9 +85,10 @@ All tests PASSED. These are the best current **approx miss/hit stall** numbers f
 
 ## Implementation status
 
-Landed on this branch as `--ddr-stalls` (default off):
+Landed on this branch as `--ddr-stalls[=R,W]` (default **off**):
 
-- `src/memstall.c`: I$/D$ tag arrays (256×32B), miss=`VV_MS_MISS_CYCLES` (20), write=`VV_MS_WRITE_CYCLES` (3)
+- `src/memstall.c`: I$/D$ tag arrays (256×32B); `R`=read/miss-fill (default **16**), `W`=write-through (default **3**); hits always 0
+- Bare `--ddr-stalls` or `--ddr-stalls=16,3` enables with those defaults; garbage → usage error
 - Gated on `vv_ddr_stalls`; fast/Unicorn paths call `vv_ms_*` only when set (early out)
 - `vv_hw_tick` / CNT_CYCLE use `vv_ms_cycles()` when on so cycles can exceed insn count
-- `[ddr]` summary line; `tests/test_ddr_stalls.py` + `tests/ddr_stall.s`
+- `[run]`/`[ddr]` print the actual R,W; `tests/test_ddr_stalls.py` + `tests/ddr_stall.s`
