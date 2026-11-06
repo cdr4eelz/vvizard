@@ -708,12 +708,14 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     %s\n"
 "  --no-quirks        standard MIPS32 (same as --quirks=none)\n"
 "  --list-quirks      print the quirks, their defaults and hardware behaviour, then exit\n"
+"  (default: quirks are EMULATED but not detected; only the device-side guest-bug detectors tx-busy,\n"
+"                     rx-overrun, irq-storm, gp-busy warn.  Detection costs speed on --cpu=fast.)\n"
 "  --halt-on-quirk[=LIST] stop (exit 4) with PC, insn, quirk name and registers when the guest hits\n"
-"                     a quirk.  DEFAULT ON for the emulated set.  LIST starts from the emulated set\n"
+"                     a quirk; also turns on every guest-bug detector.  LIST starts from the emulated set\n"
 "                     ('all' also reports quirks that are not emulated)\n"
 "  --warn-on-quirk[=LIST] same detection, but log each (quirk, pc) once and keep running\n"
-"  --no-halt-on-quirk don't detect emulated quirks (the guest-bug detectors dcache-stale, tx-busy,\n"
-"                     rx-overrun, irq-storm, undef-reg still warn unless silenced)\n"
+"  --no-halt-on-quirk don't detect emulated quirks, but warn on all guest-bug detectors (dcache-stale,\n"
+"                     tx-busy, rx-overrun, irq-storm, gp-busy, undef-reg) unless silenced\n"
 "  --quiet-quirk=LIST don't report these categories at all\n"
 "\n"
 "Output:\n"
@@ -815,7 +817,10 @@ int main(int argc, char **argv) {
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
     const char *qenv = getenv("VVIZARD_QUIRKS"), *qdet = NULL, *qquiet = NULL;
-    int qdet_on = 1, qwarn = 0;                  /* default: --halt-on-quirk (emulated set) */
+    /* default: no quirk detection (no per-insn decode cost on --cpu=fast); only the device-side guest-bug
+     * detectors (tx-busy, rx-overrun, irq-storm, gp-busy: no decode) warn.  --halt-on-quirk / --warn-on-quirk
+     * turn detection on; --no-halt-on-quirk keeps all guest-bug detectors warning (no halt). */
+    int qdet_on = 0, qwarn = 0, qbugs = 0;
     if (qenv && vv_quirk_parse(qenv, emul, qdflt, &emul)) { vv_eprintf("bad VVIZARD_QUIRKS\n"); return 2; }
     const char *henv = getenv("VVIZARD_EXIT_ON_HALT");   /* 1/on/yes/true or 0/off/no/false/empty */
     if (henv) {
@@ -853,8 +858,8 @@ int main(int argc, char **argv) {
         case O_DUMP_EVERY: dump_every = strtoul(optarg, 0, 0); break;
         case O_DUMP_PREFIX: dump_prefix = optarg; break;
         case O_EXPECT: if (nexp < 32) expects[nexp++] = optarg; break;
-        case O_HALT: case O_WARN: qdet_on = 1; qdet = opt_next(argc, argv, vv_quirk_list_ok); qwarn = c == O_WARN; break;
-        case O_NO_HALT: qdet_on = 0; qdet = NULL; break;
+        case O_HALT: case O_WARN: qdet_on = 1; qbugs = 1; qdet = opt_next(argc, argv, vv_quirk_list_ok); qwarn = c == O_WARN; break;
+        case O_NO_HALT: qdet_on = 0; qbugs = 1; qdet = NULL; break;
         case O_QUIET_QUIRK: qquiet = optarg; break;
         case O_LEGACY_IO: vv_legacy_io = 1; break;
         case O_RX_GAP: vv_uart_rx_gap = strtoull(optarg, 0, 0); break;
@@ -940,7 +945,7 @@ int main(int argc, char **argv) {
     }
     if (qquiet && vv_quirk_parse(qquiet, 0, qdflt, &quiet)) return 2;
     vv_quirk_halt = qdet_on && !qwarn ? det & ~quiet : 0;
-    vv_quirk_detect = (det | vv_quirk_bugs()) & ~quiet;   /* guest-bug detectors warn by default */
+    vv_quirk_detect = (det | (qbugs ? vv_quirk_bugs() : vv_quirk_bugs() & VV_Q_NODECODE_DET)) & ~quiet;
     uc_engine *uc; uc_err err;
     guest_big = big; vv_lcd_reset();
     if ((err = uc_open(UC_ARCH_MIPS, UC_MODE_MIPS32 | (big ? UC_MODE_BIG_ENDIAN : UC_MODE_LITTLE_ENDIAN), &uc))) {
@@ -1150,6 +1155,8 @@ int main(int argc, char **argv) {
         if (got != want) rc = 3;
         free(s);
     }
+    if (!vv_quirk_halt && !(vv_quirk_detect & ~VV_Q_NODECODE_DET))   /* no per-insn quirk detection ran */
+        vv_eprintf("[hint] quirk detection was off; run with --halt-on-quirk (or --warn-on-quirk) at some point to catch MIPS150 quirks and guest bugs\n");
     if (vv_evt) { VV_EVT("end insns %llu", (unsigned long long)insn_count); fclose(vv_evt); vv_evt = NULL; }
     uc_close(uc);
     for (size_t i = 0; i < NREG; i++) if (ram_buf[i]) munmap(ram_buf[i], regions[i].size);

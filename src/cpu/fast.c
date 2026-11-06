@@ -637,7 +637,8 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
             int lu = vv_quirk_on(VV_Q_LOAD_USE) ? cpu->load_rt : -1;
             vv_quirk_pre_fast(env->uc, cpu->gpr, lu, cpu->load_old, cpu->pc);
             if (vv_quirk_halted) break;
-        } else if (qlite) vv_quirk_pre_lite(env->uc, cpu->pc);
+        } else if (qlite && o->op == OP_NOP && o->rs == 0x10)   /* COP0 CO op (eret): irq-storm check */
+            vv_quirk_pre_lite(env->uc, cpu->pc);
 
         int was_delay = cpu->in_delay;
         uint32_t delay_npc = cpu->delay_npc;
