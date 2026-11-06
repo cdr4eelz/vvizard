@@ -6,11 +6,11 @@ Compares the same MIPS machine-code cases on:
 2. `--cpu=fast` (BB interpreter)
 3. User CPUMIPS Verilog via Icarus `CoreHarness` (read-only cs150 tree)
 
-## Requirements
+## Requirements (optional for `make test-cpu-rtl`)
 
 - `iverilog` / `vvp`
 - `mips-linux-gnu-as` / `objcopy`
-- `CS150_ROOT` pointing at a cs150 checkout that contains:
+- `CS150_ROOT` (or `--cs150-root`) pointing at a cs150 checkout that contains:
   - `hardware/sim-icarus/tb/CoreHarness.v`
   - `hardware/src/cpu/CPUMIPS.v`
   - `hardware/src/innerds/` (RegFile, ALU, InstructionControl, ByteAccess4, …)
@@ -25,7 +25,16 @@ make test-cpu-rtl CS150_ROOT=/path/to/cs150
 CS150_ROOT=/path/to/cs150 python3 tests/test_cpu_rtl.py
 ```
 
-Missing tools or `CS150_ROOT` → **hard FAIL** (not a silent skip).
+### Skip vs fail
+
+| Situation | Result |
+|-----------|--------|
+| Missing `iverilog` / `vvp` / `mips-linux-gnu-as` / `objcopy` | **SKIP** exit 0 — prints `SKIP: missing tool(s): … (0 cases run)` |
+| Missing / incomplete `CS150_ROOT` (no silent discovery fallback when explicit) | **SKIP** exit 0 — prints `SKIP: CS150_ROOT=… incomplete/missing RTL (…) (0 cases run)` or not-found |
+| Missing `vvizard` binary | **FAIL** — run `make` first (not an optional dep) |
+| Tool present but iverilog compile error, vvp crash, timeout, signature mismatch, dump parse/`ok=0` | **FAIL** (not SKIP) |
+
+`make test` does not include `test-cpu-rtl`; this target stays optional. Skip is never reported as PASS.
 
 ## Signature
 
@@ -54,3 +63,4 @@ auth extracts before older snapshots like `cs150-1245`; always check the printed
 - Infinite-loop program must TIMEOUT
 - Discovery order prefers live/auth trees before older snapshots
 - `--dump-be32` on an unmapped address reports `ok=0` (no fake pass)
+- Optional-dep skip vs real-fail: `python3 tests/test_cpu_rtl_skip.py`

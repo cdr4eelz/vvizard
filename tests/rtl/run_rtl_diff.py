@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Tri-way differential: Unicorn vs fast vs Icarus (user CPUMIPS via CoreHarness).
 
-Does not edit cs150/Verilog. Requires CS150_ROOT (tree with hardware/sim-icarus/tb/CoreHarness.v
-and hardware/src/cpu/CPUMIPS.v), iverilog/vvp, and preferably mips-linux-gnu-as/objcopy.
+Does not edit cs150/Verilog. Optional deps: CS150_ROOT (CoreHarness + CPUMIPS + innerds),
+iverilog/vvp, mips-linux-gnu-as/objcopy. Missing optional deps → SKIP (exit 0) with reason;
+present deps that then fail (compile/sim/timeout/mismatch) → hard FAIL. Missing vvizard → FAIL (run make).
 
 Usage:
   python3 tests/rtl/run_rtl_diff.py --cs150-root /path/to/cs150
@@ -22,6 +23,17 @@ ISR_HEX = HERE / "isr_nop.hex"
 ENV = dict(os.environ, LD_LIBRARY_PATH=os.environ.get("LD_LIBRARY_PATH", "") + ":" + os.path.expanduser("~/.local/lib"))
 ENV.pop("VVIZARD_QUIRKS", None)
 
+# Injectable for tests (do not point at untrusted user PATH tricks in production).
+_which = shutil.which
+
+OPTIONAL_TOOLS = (
+    "iverilog",
+    "vvp",
+    "mips-linux-gnu-as",
+    "mips-linux-gnu-objcopy",
+)
+
+
 SIG_I = re.compile(r"^SIG i=(\d+) act=([0-9a-fA-F]+) exp=([0-9a-fA-F]+)\s*$")
 SIG_N = re.compile(r"^SIG n=(\d+)\s*$")
 DUMP = re.compile(r"^\[dump-be32\] a=0x([0-9a-fA-F]+) v=0x([0-9a-fA-F]+) ok=(\d+)\s*$")
@@ -32,10 +44,63 @@ def die(msg: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 
+def cs150_gaps(p: Path) -> list[str]:
+    """Relative paths that must exist for a usable read-only cs150 RTL tree."""
+    gaps: list[str] = []
+    for rel in (
+        "hardware/sim-icarus/tb/CoreHarness.v",
+        "hardware/src/cpu/CPUMIPS.v",
+    ):
+        if not (p / rel).is_file():
+            gaps.append(rel)
+    inner = p / "hardware/src/innerds"
+    if not inner.is_dir():
+        gaps.append("hardware/src/innerds/")
+    return gaps
+
+
 def _looks_like_cs150(p: Path) -> bool:
-    return (p / "hardware/sim-icarus/tb/CoreHarness.v").is_file() and (
-        p / "hardware/src/cpu/CPUMIPS.v"
-    ).is_file()
+    return not cs150_gaps(p)
+
+
+def missing_optional_tools(which=None) -> list[str]:
+    which = which or _which
+    return [name for name in OPTIONAL_TOOLS if which(name) is None]
+
+
+def optional_dep_skip_reason(
+    explicit: str | None = None,
+    which=None,
+    candidates: list[Path] | None = None,
+) -> str | None:
+    """Return a human reason to SKIP, or None if optional deps are present.
+
+    Absent/incomplete tools or RTL → skip. Does not treat compile/sim failures.
+    """
+    which = which or _which
+    miss = missing_optional_tools(which=which)
+    if miss:
+        return f"missing tool(s): {', '.join(miss)}"
+    forced = explicit if explicit is not None else os.environ.get("CS150_ROOT")
+    # Note: explicit="" should still be treated; argparse None means unset.
+    if forced:
+        pth = Path(forced).expanduser().resolve()
+        gaps = cs150_gaps(pth)
+        if gaps:
+            return f"CS150_ROOT={pth} incomplete/missing RTL ({', '.join(gaps)})"
+        return None
+    cands = candidates if candidates is not None else discovery_candidates()
+    for pth in cands:
+        try:
+            if _looks_like_cs150(pth):
+                return None
+        except Exception:
+            continue
+    return (
+        "CS150_ROOT not found (set --cs150-root or env CS150_ROOT to a tree with "
+        "hardware/sim-icarus/tb/CoreHarness.v, hardware/src/cpu/CPUMIPS.v, hardware/src/innerds/)"
+    )
+
 
 
 def discovery_candidates(root: Path | None = None) -> list[Path]:
@@ -134,7 +199,8 @@ def rtl_revision(cs150: Path) -> str:
 
 
 def need_cmd(cmd: str) -> None:
-    if shutil.which(cmd.split()[0] if " " not in cmd else cmd) is None and shutil.which(cmd) is None:
+    name = cmd.split()[0] if " " not in cmd else cmd
+    if _which(name) is None and _which(cmd) is None:
         die(f"required tool not on PATH: {cmd}", 2)
 
 
@@ -389,10 +455,11 @@ def main(argv=None) -> int:
 
     vers = tool_versions()
     print("tools:", vers)
-    if vers.get("iverilog") == "MISSING" or vers.get("vvp") == "MISSING":
-        die("iverilog/vvp required for test-cpu-rtl (not a silent skip)", 2)
-    if vers.get("mips-as") == "MISSING":
-        die("mips-linux-gnu-as required to build case programs", 2)
+
+    skip = optional_dep_skip_reason(explicit=args.cs150_root, which=_which)
+    if skip:
+        print(f"SKIP: {skip} (0 cases run)")
+        return 0
 
     forced = bool(args.cs150_root or os.environ.get("CS150_ROOT"))
     cs150 = resolve_cs150(args.cs150_root)

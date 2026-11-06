@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""make test-cpu-rtl entrypoint. Fails hard if CS150_ROOT/tools missing (no fake PASS)."""
+"""make test-cpu-rtl entrypoint.
+
+Optional deps (Icarus, MIPS as/objcopy, CS150 CoreHarness RTL) missing → SKIP exit 0.
+Present deps that then fail → hard FAIL. Missing vvizard → FAIL (run make).
+"""
 import os, sys
 from pathlib import Path
 HERE = Path(__file__).resolve().parent

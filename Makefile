@@ -197,8 +197,9 @@ test-quirks: $(TARGET) tests
 test-hex: $(TARGET) tests
 	python3 tests/test_hex.py
 
-# Tri-way Unicorn/fast/Icarus CPU differential (requires CS150_ROOT + iverilog + mips binutils).
-# Hard-fails if deps missing (not a silent skip). Does not modify cs150 Verilog.
+# Tri-way Unicorn/fast/Icarus CPU differential (optional: CS150_ROOT + iverilog + mips binutils).
+# Missing optional deps → SKIP exit 0 with reason; real sim/compile/mismatch → FAIL.
+# Missing vvizard → build via $(TARGET). Does not modify cs150 Verilog.
 test-cpu-rtl: $(TARGET)
 	python3 tests/test_cpu_rtl.py $(if $(CS150_ROOT),--cs150-root $(CS150_ROOT),)
 
