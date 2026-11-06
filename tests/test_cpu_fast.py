@@ -215,7 +215,8 @@ def t_fast_threads_windowed():
         print("  fast_threads_windowed: SKIP (no xvfb-run)")
         return True  # optional dep — count as non-fail; suite notes SKIP in message
     r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, env=ENV, timeout=30)
-    err = r.stderr.decode(errors="replace")
+    # Ubuntu's xvfb-run runs the command with 2>&1, so banners land on stdout there.
+    err = (r.stdout + r.stderr).decode(errors="replace")
     ok = (r.returncode == 0 and "cpu=fast" in err and "emulator + display" in err
           and "forcing --sync" not in err and "does not support threaded" not in err)
     print(f"  fast_threads_windowed: {'PASS' if ok else 'FAIL'}\n{err[-500:] if not ok else ''}")
@@ -295,7 +296,8 @@ def t_sync_overlap_delay():
                 "--load", f"{binfile('gplaunch')}@0x40000000",
                 "--entry", "0x40000000"]
         r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, env=ENV, timeout=60)
-        e = r.stderr.decode(errors="replace")
+        # Ubuntu's xvfb-run runs the command with 2>&1, so banners land on stdout there.
+        e = (r.stdout + r.stderr).decode(errors="replace")
         m = re.search(
             r"\[sync\] approx overlap ([0-9.]+) ms \(([0-9.]+)% of wall\), "
             r"blocked/delayed ([0-9.]+) ms \(([0-9.]+)% of wall\)", e)
