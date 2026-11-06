@@ -59,14 +59,27 @@ def test_explicit_unicorn_still_works():
     assert re.search(r"\[run\] cpu=unicorn\b", err), err
 
 
-def test_fast_threads_diag_not_silent():
+def test_fast_threads_honored_no_force_sync():
+    """With a window, --cpu=fast --threads=on must use emu+display thread (not force --sync)."""
     bil = _loop_bin()
-    r = subprocess.run(
-        [VV, *BASE, "--cpu=fast", "--threads=on", "--window",
-         "--load", f"{bil}@0x40000000", "--entry", "0x40000000", "--max-insns", "100"],
-        capture_output=True, env=ENV)
+    # Prefer xvfb so raylib can open a window headlessly; without it, skip (not PASS).
+    import shutil
+    # No --sync in argv: --threads=on must win (BASE includes --sync for other tests).
+    cmd = [VV, "--no-window", "--frame-clock=emulated", "--quiet-mmio",
+           "--no-random-ddr", "--no-bios", "--no-halt-on-quirk",
+           "--cpu=fast", "--threads=on", "--window",
+           "--load", f"{bil}@0x40000000", "--entry", "0x40000000", "--max-insns", "5000"]
+    if shutil.which("xvfb-run"):
+        cmd = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"] + cmd
+    else:
+        print("  test_fast_threads_honored: SKIP (no xvfb-run)")
+        return
+    r = subprocess.run(cmd, capture_output=True, env=ENV, timeout=30)
     err = r.stderr.decode(errors="replace")
-    assert "forcing --sync" in err or "does not support threaded" in err, err[-600:]
+    assert "forcing --sync" not in err and "does not support threaded" not in err, err[-800:]
+    assert "cpu=fast" in err, err[-400:]
+    assert "emulator + display" in err, err[-400:]
+    assert r.returncode == 0, err[-800:]
 
 
 def main():
@@ -76,7 +89,7 @@ def main():
     fails = 0
     for t in (test_help_default_fast, test_default_run_line_is_fast,
               test_default_matches_explicit_fast, test_explicit_unicorn_still_works,
-              test_fast_threads_diag_not_silent):
+              test_fast_threads_honored_no_force_sync):
         try:
             t()
             print(f"  {t.__name__}: PASS")

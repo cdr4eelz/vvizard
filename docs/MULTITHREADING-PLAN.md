@@ -2,6 +2,17 @@
 
 ## Status (Oct 31 2026, branch `multithreading`)
 
+## Fast CPU + threaded display (Nov 2026, `e/personal-fast-mips`)
+
+`--cpu=fast` with a window and `--threads=on` uses the **same** emu-thread / triple-buffer
+handshake as Unicorn: worker runs `vv_fast_run`, main runs `vv_disp_main_loop` (raylib only).
+`vv_disp_emu_done` publishes on all normal/error exits. GPRs live in `vv_fast_cpu` on the
+worker; `vv_fast_publish_prepare` snapshots them into UC at publish rate (frame/timer), not
+every instruction — UI never reads UC regs from the main thread while the worker runs.
+`--sync` / headless keep the previous single-thread CPU path (GPU worker may still run).
+There is no longer a "forcing --sync" downgrade for fast+window.
+
+
 Implemented (steps 1-5 on Linux; macOS not built or measured). `--threads=on` is the default; `--sync`,
 `--threads=1` and `--threads=off` keep the old single thread. Where the code differs from the text below:
 

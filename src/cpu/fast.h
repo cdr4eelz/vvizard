@@ -1,5 +1,5 @@
 /* Fast L0 predecoded basic-block MIPS interpreter (plan option C).
- * Optional via --cpu=fast; Unicorn remains the default until a measured win. */
+ * Default via --cpu=fast; Unicorn is the explicit reference (--cpu=unicorn). */
 #ifndef VV_CPU_FAST_H
 #define VV_CPU_FAST_H
 #include <stdint.h>
@@ -46,6 +46,10 @@ typedef struct vv_fast_env {
 /* Run until stop. Returns 0 on clean stop, 1 on fault/unsupported. */
 int  vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry);
 void vv_fast_sync_to_uc(uc_engine *uc, const vv_fast_cpu *cpu);
+/* While vv_fast_run is active: non-NULL so display publish can snapshot GPRs into UC
+ * at frame rate (not every insn). UI must not read UC regs live from another thread. */
+extern const vv_fast_cpu *vv_fast_live_cpu;
+void vv_fast_publish_prepare(uc_engine *uc); /* no-op if no live fast CPU */
 void vv_fast_invalidate(uint32_t addr, uint32_t nbytes);
 void vv_fast_flush(void);
 

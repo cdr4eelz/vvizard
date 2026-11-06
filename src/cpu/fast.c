@@ -512,6 +512,13 @@ static void irq_step_fast(vv_fast_env *e, vv_fast_cpu *c) {
     c->last3_pc = c->last2_pc; c->last2_pc = c->last_pc; c->last_pc = c->pc;
 }
 
+const vv_fast_cpu *vv_fast_live_cpu;
+
+void vv_fast_publish_prepare(uc_engine *uc) {
+    if (vv_fast_live_cpu)
+        vv_fast_sync_to_uc(uc, vv_fast_live_cpu);
+}
+
 void vv_fast_sync_to_uc(uc_engine *uc, const vv_fast_cpu *cpu) {
     for (int i = 1; i < 32; i++) {
         uint32_t v = cpu->gpr[i];
@@ -525,6 +532,7 @@ void vv_fast_sync_to_uc(uc_engine *uc, const vv_fast_cpu *cpu) {
 
 int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
     decode_quirks = vv_quirk_emul;
+    vv_fast_live_cpu = cpu;
     vv_fast_flush();
     memset(cpu->gpr, 0, sizeof cpu->gpr);
     cpu->pc = entry;
@@ -581,7 +589,7 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
         if (was_delay) cpu->in_delay = 0;
 
         int rc = exec_one(env, cpu, o);
-        if (rc < 0) return 1;
+        if (rc < 0) { vv_fast_live_cpu = NULL; return 1; }
         if (cpu->stop_break) { cpu->pc = o->pc + 4; break; }
 
         if (was_delay) {
@@ -608,5 +616,6 @@ int vv_fast_run(vv_fast_env *env, vv_fast_cpu *cpu, uint32_t entry) {
             }
         }
     }
+    vv_fast_live_cpu = NULL;
     return 0;
 }

@@ -202,16 +202,23 @@ def t_fast_lwlr_mmio_side_read():
     return differential("quirk/emu_lwlr_mmio", 0x40000000, *extra, label="diff_lwlr_mmio_side")
 
 
-def t_fast_rejects_threads_on():
-    r = subprocess.run(
-        [VV, *BASE, "--cpu=fast", "--threads=on", "--window",
-         "--load", f"{binfile('loop')}@0x40000000", "--entry", "0x40000000",
-         "--max-insns", "100"],
-        stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+def t_fast_threads_windowed():
+    """--cpu=fast --threads=on --window uses emu thread + display (Xvfb if available)."""
+    import shutil
+    args = [VV, "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios",
+            "--no-halt-on-quirk", "--cpu=fast", "--threads=on", "--window",
+            "--load", f"{binfile('loop')}@0x40000000", "--entry", "0x40000000",
+            "--max-insns", "5000"]
+    if shutil.which("xvfb-run"):
+        args = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24"] + args
+    else:
+        print("  fast_threads_windowed: SKIP (no xvfb-run)")
+        return True  # optional dep — count as non-fail; suite notes SKIP in message
+    r = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, env=ENV, timeout=30)
     err = r.stderr.decode(errors="replace")
-    ok = ("not supported" in err.lower() or "using --sync" in err.lower() or "forced" in err.lower()
-          or "threads" in err.lower() or "single-threaded" in err.lower())
-    print(f"  fast_threads_diag: {'PASS' if ok else 'FAIL'}\n{err[-400:] if not ok else ''}")
+    ok = (r.returncode == 0 and "cpu=fast" in err and "emulator + display" in err
+          and "forcing --sync" not in err and "does not support threaded" not in err)
+    print(f"  fast_threads_windowed: {'PASS' if ok else 'FAIL'}\n{err[-500:] if not ok else ''}")
     return ok
 
 
@@ -393,7 +400,7 @@ def main():
         t_fast_emu_overflow_on,
         t_fast_emu_load_use_on,
         t_fast_lwlr_mmio_side_read,
-        t_fast_rejects_threads_on,
+        t_fast_threads_windowed,
         t_emu_on_matrix,
         t_emu_off_matrix,
         t_diff_loop_alias,

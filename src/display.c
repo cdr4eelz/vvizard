@@ -2,6 +2,7 @@
  * 800x600 frame: the 2x16 LCD (src/lcd.c), a status line and a recent-keys ticker. */
 #include "term.h"
 #include "display.h"
+#include "cpu/fast.h"
 #include "memmap.h"
 #include "lcd.h"
 #include "lcdfont.h"
@@ -258,6 +259,7 @@ static void publish(uc_engine *uc) {
         else if (uc_mem_read(uc, a, sl->px[y], VV_SCREEN_W * 4)) memset(sl->px[y], 0, VV_SCREEN_W * 4);
     }
     double t = now();
+    vv_fast_publish_prepare(uc);   /* snapshot fast GPRs into UC at publish rate */
     status_refresh(uc, t);
     memcpy(sl->l1, st_l1, sizeof sl->l1); memcpy(sl->l2, st_l2, sizeof sl->l2);
     for (int i = 0; i < VV_LCD_CHARS; i++) sl->lcd[i] = vv_lcd_get((unsigned)i);

@@ -371,19 +371,30 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     if (!opt_quiet_mmio) vv_eprintf("[mmio] W off=0x%04x size=%u <- 0x%08x\n", (unsigned)off, size, v);
 }
 
-/* --threads (docs/MULTITHREADING-PLAN.md): with a window, uc_emu_start runs on an emulator thread
- * and the main thread draws (display.c); --sync / --threads=1 keeps everything on one thread. */
+/* --threads (docs/MULTITHREADING-PLAN.md): with a window, the selected CPU backend
+ * (unicorn uc_emu_start or fast vv_fast_run) runs on an emulator thread and the main thread
+ * draws (display.c); --sync / --threads=1 keeps everything on one thread. */
 static int opt_threads = 1;
 static int opt_cpu = VV_CPU_FAST;  /* --cpu=unicorn|fast; default fast */
 static uc_err emu_err;
 static uint32_t emu_entry; static uint64_t emu_until;
+static int stop_reason_intr = -1;
+/* Filled before spawning emu_thread when --cpu=fast (worker owns UC + these). */
+static vv_fast_cpu emu_fcpu;
+static vv_fast_env emu_fenv;
 static void *emu_thread(void *a) {
     uc_engine *uc = a;
-    emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    if (opt_cpu == VV_CPU_FAST) {
+        int frc = vv_fast_run(&emu_fenv, &emu_fcpu, emu_entry);
+        vv_fast_sync_to_uc(uc, &emu_fcpu);
+        if (emu_fcpu.stop_break) stop_reason_intr = 18;
+        emu_err = frc ? UC_ERR_EXCEPTION : UC_ERR_OK;
+    } else {
+        emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    }
     vv_disp_emu_done(uc);                    /* publishes the last frame */
     return NULL;
 }
-static int stop_reason_intr = -1;
 static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *u) {
     (void)uc; (void)t; (void)u;
     uint32_t pa = vv_canon((uint32_t)va);
@@ -710,7 +721,7 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     stamp vs shared7.h, magic2, buffer) are printed at exit even without it\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
 "  --threads=on|off   on (default): GPU command lists are drawn by a worker thread and, with a\n"
-"                     window, the emulator runs on its own thread while the main thread draws (frame\n"
+"                     window, the selected CPU (unicorn or fast) runs on its own thread while main draws (frame\n"
 "                     copied at each frame end).  The GPU is then busy (GP_STATE ready bits 0) until\n"
 "                     launch + pixels/4 + 32 x commands cycles, Cause bit 12 rises at that edge, and a\n"
 "                     GP_CODE store while busy is dropped (gp-busy).  off = --sync = --threads=1: one\n"
@@ -990,48 +1001,53 @@ int main(int argc, char **argv) {
     }
     pthread_t emu_tid; pthread_attr_t ta;
     int threaded_disp = opt_threads && vv_disp_has_window();
-    if (threaded_disp && opt_cpu == VV_CPU_UNICORN) {                       /* emulator thread; raylib stays on this one */
+    /* Fill fast env before spawn so the worker owns UC + GPRs (same fields as sync path). */
+    if (opt_cpu == VV_CPU_FAST) {
+        memset(&emu_fenv, 0, sizeof emu_fenv);
+        emu_fenv.uc = uc;
+        emu_fenv.insn_count = &insn_count;
+        emu_fenv.hook_calls = &hook_calls;
+        emu_fenv.max_insns = max_insns;
+        emu_fenv.stopped_max = &stopped_max;
+        emu_fenv.stop_req = &stop_req;
+        emu_fenv.stopped_wall = &stopped_wall;
+        emu_fenv.max_wall_ns = max_wall_ns;
+        emu_fenv.run_t0 = run_t0;
+        emu_fenv.have_until = have_stop;
+        emu_fenv.until_addr = stop_addr;
+        emu_fenv.opt_irq = opt_irq;
+        emu_fenv.opt_trace = opt_trace;
+        emu_fenv.trace_left = &trace_left;
+        emu_fenv.guest_big = guest_big;
+        emu_fenv.mmio_read = mmio_read;
+        emu_fenv.mmio_write = mmio_write;
+        emu_fenv.note_ddr_exec = note_ddr_exec;
+        emu_fenv.run_due_events = run_due_events;
+        emu_fenv.nevents = nevents;
+    }
+    if (threaded_disp) {                       /* emulator thread; raylib stays on this one */
         pthread_attr_init(&ta);
         pthread_attr_setstacksize(&ta, 64u << 20);   /* (macOS secondary threads default to 512 KiB) */
         vv_disp_threaded = 1;
-        if (pthread_create(&emu_tid, &ta, emu_thread, uc)) { vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n"); vv_disp_threaded = threaded_disp = 0; }
-        pthread_attr_destroy(&ta);
-    } else if (threaded_disp && opt_cpu == VV_CPU_FAST) {
-        vv_eprintf("[run] --cpu=fast does not support threaded display yet; forcing --sync (single-threaded)\n");
-        threaded_disp = 0; /* fast path runs on this thread for now */
-    }
-    if (opt_cpu == VV_CPU_FAST) {
-        if (threaded_disp) {
+        if (pthread_create(&emu_tid, &ta, emu_thread, uc)) {
+            vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n");
             vv_disp_threaded = threaded_disp = 0;
         }
-        vv_fast_cpu fcpu;
-        vv_fast_env fenv = {0};
-        fenv.uc = uc;
-        fenv.insn_count = &insn_count;
-        fenv.hook_calls = &hook_calls;
-        fenv.max_insns = max_insns;
-        fenv.stopped_max = &stopped_max;
-        fenv.stop_req = &stop_req;
-        fenv.stopped_wall = &stopped_wall;
-        fenv.max_wall_ns = max_wall_ns;
-        fenv.run_t0 = run_t0;
-        fenv.have_until = have_stop;
-        fenv.until_addr = stop_addr;
-        fenv.opt_irq = opt_irq;
-        fenv.opt_trace = opt_trace;
-        fenv.trace_left = &trace_left;
-        fenv.guest_big = guest_big;
-        fenv.mmio_read = mmio_read;
-        fenv.mmio_write = mmio_write;
-        fenv.note_ddr_exec = note_ddr_exec;
-        fenv.run_due_events = run_due_events;
-        fenv.nevents = nevents;
-        int frc = vv_fast_run(&fenv, &fcpu, entry);
-        vv_fast_sync_to_uc(uc, &fcpu);
-        if (fcpu.stop_break) stop_reason_intr = 18;
+        pthread_attr_destroy(&ta);
+    }
+    if (threaded_disp) {
+        vv_disp_main_loop();
+        pthread_join(emu_tid, NULL);
+        vv_disp_threaded = 0;
+        err = emu_err;
+    } else if (opt_cpu == VV_CPU_FAST) {
+        int frc = vv_fast_run(&emu_fenv, &emu_fcpu, entry);
+        vv_fast_sync_to_uc(uc, &emu_fcpu);
+        if (emu_fcpu.stop_break) stop_reason_intr = 18;
         err = frc ? UC_ERR_EXCEPTION : UC_ERR_OK;
-    } else if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
-    else err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    } else {
+        err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    }
     vv_gpu_worker_stop();                      /* finish a draw in flight; one thread from here on */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
