@@ -566,22 +566,44 @@ static uint32_t rd_guest_ok(uc_engine *uc, uint32_t a, unsigned n, int *ok) {
 }
 static uint32_t sm_reader(void *ctx, uint32_t a, unsigned n) { return rd_guest((uc_engine *)ctx, a, n); }
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2) {
-    snprintf(l1, n1, "%s  insns %llu  PF_FRAME %u (writes %llu)  GP %u  IRQ %llu%s",
-             vv_quirk_halted ? "HALTED (quirk)" : run_state, (unsigned long long)insn_count, vv_disp_frame(),
-             (unsigned long long)pf_writes, gp_launches, (unsigned long long)irq_count,
+    uint64_t now_ns = vv_mono_ns();
+    uint64_t cyc = vv_ddr_stalls ? vv_ms_cycles() : insn_count;
+    uint64_t fr = vv_pf_frames();
+    /* Rolling wall-time averages over the last 5 seconds (status refreshes at 4 Hz). */
+    enum { WIN_NS = 5000000000ull, MAXS = 24 };
+    static struct { uint64_t t, cyc, insn, fr; } hist[MAXS];
+    static unsigned hi, nh;
+    hist[hi % MAXS].t = now_ns;
+    hist[hi % MAXS].cyc = cyc;
+    hist[hi % MAXS].insn = insn_count;
+    hist[hi % MAXS].fr = fr;
+    hi++;
+    if (nh < MAXS) nh++;
+    unsigned start = (hi - nh) % MAXS;
+    uint64_t cut = now_ns > WIN_NS ? now_ns - WIN_NS : 0;
+    unsigned best = start;
+    for (unsigned i = 0; i < nh; i++) {
+        unsigned idx = (start + i) % MAXS;
+        if (hist[idx].t <= cut) best = idx;
+        else break;
+    }
+    double mcyc = 0, mips = 0, fps = 0;
+    uint64_t dt = now_ns - hist[best].t;
+    if (dt > 0) {
+        double sec = (double)dt * 1e-9;
+        mcyc = (double)(cyc - hist[best].cyc) / sec * 1e-6;
+        mips = (double)(insn_count - hist[best].insn) / sec * 1e-6;
+        fps  = (double)(fr - hist[best].fr) / sec;
+    }
+    char i_buf[32];
+    if (mips == mcyc) snprintf(i_buf, sizeof i_buf, "-");
+    else snprintf(i_buf, sizeof i_buf, "%.2f", mips);
+    snprintf(l1, n1, "%s  C %.2f  I %s  F %.1f%s",
+             vv_quirk_halted ? "HALTED (quirk)" : run_state, mcyc, i_buf, fps,
              vv_disp_keys_enabled ? "" : "  keys->UART off");
     /* proj6/proj7 shared memory (shared6.h / shared7.h layouts, src/shmem.c) */
     vv_sm sm; vv_sm_read(sm_reader, uc, VV_SM_BASE_ADDR, &sm);
     vv_sm_status(&sm, VV_SM_BASE_ADDR, l2, n2);
-    /* frame ends (PixelFeeder scans) and their rate per wall second since the last refresh (4 Hz) */
-    static uint64_t f_prev, t_prev; static double fps;
-    uint64_t f = vv_pf_frames(), t = vv_mono_ns();
-    if (t_prev && t - t_prev >= 200000000ull) { fps = (double)(f - f_prev) * 1e9 / (double)(t - t_prev); f_prev = f; t_prev = t; }
-    else if (!t_prev) { f_prev = f; t_prev = t; }
-    size_t k = strlen(l2);
-    if (!vv_legacy_io && vv_pf_period && k < n2)
-        snprintf(l2 + k, n2 - k, "  frames %llu %.1f/s %s", (unsigned long long)f, fps,
-                 vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emul");
 }
 uint64_t vv_insns(void) { return insn_count; }
 static int reg_index(const char *n) {
