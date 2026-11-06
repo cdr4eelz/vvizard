@@ -87,6 +87,10 @@ void vv_quirk_pre(uc_engine *uc, uint32_t pc);
 /* Instead of post/pre when no quirk needs the decode but some detector is on: only the eret
  * irq-storm check (inside an ISR) and the last-PC note for unmapped-fetch reports. */
 void vv_quirk_pre_lite(uc_engine *uc, uint32_t pc);
+/* --cpu=fast: the same detection without Unicorn fix-ups (cpu/fast.c applies the emulation).
+ * gpr is the fast register file; load_rt/load_old the pending load-delay rt (-1: none). */
+void vv_quirk_pre_fast(uc_engine *uc, const uint32_t *gpr, int load_rt, uint32_t load_old, uint32_t pc);
+void vv_quirk_post_fast(uc_engine *uc, const uint32_t *gpr);
 void vv_quirk_cancel(void);         /* PC was redirected (IRQ entry): drop pending state */
 /* TLB fill hook on an instruction fetch that hardware would decode as 0. */
 void vv_quirk_fetch(uc_engine *uc, uint32_t va, const char *why);

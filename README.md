@@ -302,9 +302,11 @@ its disassembly, the quirk name, the hardware behaviour and a register dump, the
 stops *before* the instruction runs. With no LIST, it covers the quirks being emulated. A LIST starting with
 `-NAME`/`no-NAME` removes from that set (`none,NAME` = only NAME), and `all` also reports quirks that aren't emulated (for example, `jalr` with rd
 != `$31`). `--warn-on-quirk[=LIST]` logs each (quirk, PC) once, tagged `[emulated]` or `[not emulated: standard
-MIPS]`, and keeps running. Both print a `[quirk] summary` of hit counts at exit. The guest-bug detectors (below) always warn unless
-`--quiet-quirk` silences them, and `--halt-on-quirk` also stops on them. **`--halt-on-quirk` is on by default**;
-`--warn-on-quirk` keeps running, `--no-halt-on-quirk` turns detection of emulated quirks off.
+MIPS]`, and keeps running. Both print a `[quirk] summary` of hit counts at exit. **Detection is off by default** (no per-instruction decode cost on `--cpu=fast`): quirks are still emulated,
+only the device-side guest-bug detectors (tx-busy, rx-overrun, irq-storm, gp-busy) warn, and the run ends with a
+`[hint]` line suggesting `--halt-on-quirk`. `--halt-on-quirk` / `--warn-on-quirk` turn on detection and every
+guest-bug detector; `--no-halt-on-quirk` warns on all guest-bug detectors (dcache-stale, undef-reg too) without
+detecting emulated quirks. `--quiet-quirk` silences categories.
 
 **Cost.** Emulated quirks and the decode-based detectors (undef-reg, dcache-stale) cost a 4-byte read from guest
 RAM and a decode per instruction; tx-busy, rx-overrun, irq-storm and unmapped-fetch are detected in the device

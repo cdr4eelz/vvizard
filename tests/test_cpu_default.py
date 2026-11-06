@@ -83,6 +83,25 @@ def test_fast_threads_honored_no_force_sync():
     assert r.returncode == 0, err[-800:]
 
 
+def test_default_no_quirk_detection_hint():
+    """Default: no quirk detection (no halt/warn sets), and the end-of-run [hint]; none with --halt-on-quirk."""
+    for cpu in ("fast", "unicorn"):
+        r = subprocess.run([VV, "--sync", "--no-window", "--no-bios", "--quiet-mmio", "--max-insns", "1000",
+                            f"--cpu={cpu}", "--load", f"{_loop_bin()}@0x40000000", "--entry", "0x40000000"],
+                           capture_output=True, env=ENV)
+        err = r.stderr.decode(errors="replace")
+        assert r.returncode == 0, err[-500:]
+        assert "[quirk] halt on:" not in err, err
+        m = re.search(r"^\[quirk\] warn on: (.*)$", err, re.M)
+        assert not m or not ({"dcache-stale", "undef-reg"} & set(m.group(1).split(","))), m.group(0)
+        assert "[hint] quirk detection was off; run with --halt-on-quirk" in err, err[-500:]
+        h = subprocess.run([VV, "--sync", "--no-window", "--no-bios", "--quiet-mmio", "--max-insns", "1000",
+                            f"--cpu={cpu}", "--halt-on-quirk", "--quiet-quirk=undef-reg",
+                            "--load", f"{_loop_bin()}@0x40000000", "--entry", "0x40000000"],
+                           capture_output=True, env=ENV)
+        assert "[quirk] halt on:" in h.stderr.decode() and b"[hint]" not in h.stderr
+
+
 def main():
     if not Path(VV).is_file():
         print(f"FAIL: missing {VV}", file=sys.stderr)
@@ -90,7 +109,7 @@ def main():
     fails = 0
     for t in (test_help_default_fast, test_default_run_line_is_fast,
               test_default_matches_explicit_fast, test_explicit_unicorn_still_works,
-              test_fast_threads_honored_no_force_sync):
+              test_fast_threads_honored_no_force_sync, test_default_no_quirk_detection_hint):
         try:
             t()
             print(f"  {t.__name__}: PASS")
@@ -100,7 +119,7 @@ def main():
         except Exception as e:
             print(f"  {t.__name__}: FAIL {type(e).__name__}: {e}")
             fails += 1
-    n = 5
+    n = 6
     print(f"{'PASS' if not fails else 'FAIL'}: cpu-default {n - fails}/{n}")
     return 1 if fails else 0
 

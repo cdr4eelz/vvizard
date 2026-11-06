@@ -30,7 +30,9 @@ The old name `uart-lane` is accepted for `mmio-lane`.
   only NAME), and `all` also reports
   quirks that aren't emulated, such as the fixed `jalr-rd` and `lb-sign`.
 - Both print a `[quirk] summary` of hit counts at exit.
-- `--halt-on-quirk` is vvizard's default (`--warn-on-quirk` or `--no-halt-on-quirk` to change; `make run-warn`).
+- Detection is off by default (quirks are still emulated; device-side guest-bug detectors still warn); a run without
+  it ends with `[hint] quirk detection was off; ...`. Turn it on with `--halt-on-quirk` or `--warn-on-quirk`
+  (`make run-warn`); `--no-halt-on-quirk` warns on all guest-bug detectors only.
 - If an enabled quirk can't be reproduced at a given site, vvizard prints `[quirk] NAME ... NOT emulated (why)`
   once per PC and uses the standard result.
 - The five [guest-bug detectors](#guest-bug-detectors) (`dcache-stale`, `tx-busy`, `rx-overrun`, `irq-storm`,

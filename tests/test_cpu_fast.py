@@ -470,6 +470,51 @@ def t_asm_alu_edges():
     return ok
 
 
+def t_fast_quirk_detection():
+    """quirk.c detectors warn/halt on fast too (same det_* programs as test_quirks.py)."""
+    from test_quirks import PROGS
+    bad = []
+    for name, want in PROGS:
+        path, at = prog("quirk/det_" + name)
+        r = subprocess.run([VV, *BASE, "--cpu=fast", "--max-insns", "1000", "--halt-on-quirk=all",
+                            f"--quiet-quirk={BUGS}", "--load", f"{path}@{at:#x}", "--entry", f"{at:#x}"],
+                           stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+        hits = re.findall(r"^\[quirk\] ([a-z0-9-]+) at", r.stderr.decode(errors="replace"), re.M)
+        if not ((r.returncode == 4 and hits == [want]) if want else (r.returncode == 0 and not hits)):
+            bad.append(f"{name}: rc={r.returncode} hits={hits} want={want}")
+    print(f"  fast_quirk_detection: {'PASS' if not bad else 'FAIL'} ({len(PROGS)} programs)")
+    for b in bad: print("     ", b)
+    return not bad
+
+
+def t_fast_dcache_stale():
+    """dcache-stale on fast: emulated (stale 0) by default, DDR value when off, halts with --halt-on-quirk."""
+    path = prog("hw/dcache")[0]
+    def go(*o):
+        r = subprocess.run([VV, *BASE, "--cpu=fast", "--load", f"{path}@0x40000000", "--entry", "0x40000000", *o],
+                           stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+        return r, r.stderr.decode(errors="replace")
+    a, ea = go("--expect", "s5=0", "--expect", "s3=2", "--expect", "s0=0")
+    b, eb = go("--quirks=-dcache-stale", "--expect", "s5=0", "--expect", "s3=2", "--expect", "s0=0x345678")
+    h, eh = go("--halt-on-quirk")
+    ok = (a.returncode == 0 and "[quirk] dcache-stale at" in ea and b.returncode == 0 and "[quirk] dcache-stale at" in eb
+          and h.returncode == 4 and "[stop] --halt-on-quirk: dcache-stale " in eh)
+    print(f"  fast_dcache_stale: {'PASS' if ok else 'FAIL'}")
+    if not ok: print(ea[-600:], eb[-600:], eh[-600:])
+    return ok
+
+
+def t_fast_fault_message():
+    """A fast memory fault names the access, address and PC, and does not blame uc_emu_start."""
+    r = run_cpu("fast", "quirk/det_unaligned", 0x40000000, "--quirks=-unaligned")
+    err = r.stderr.decode(errors="replace")
+    ok = (r.returncode == 1 and re.search(r"^\[fast\] fault: \d-byte (load|store) at va=0x[0-9a-f]{8} pc=0x[0-9a-f]{8}: unaligned", err, re.M)
+          and "uc_emu_start" not in err and "[stop] fast CPU stopped" in err)
+    print(f"  fast_fault_message: {'PASS' if ok else 'FAIL'}")
+    if not ok: print(err[-800:])
+    return bool(ok)
+
+
 def main():
     if not os.path.isfile(VV):
         print(f"FAIL: missing binary {VV}", file=sys.stderr)
@@ -498,6 +543,9 @@ def main():
         t_diff_loop_alias,
         t_diff_memory_sign,
         t_asm_alu_edges,
+        t_fast_quirk_detection,
+        t_fast_dcache_stale,
+        t_fast_fault_message,
     ]
     fails = 0
     for t in tests:
