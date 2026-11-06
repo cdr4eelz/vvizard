@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Quirk tests (make test-quirks).
 
+Reference backend: always --cpu=unicorn (fast cannot cover every off-quirk/
+exception mask; differential coverage lives in test_cpu_fast.py).
+
 1. Detection: one tiny program per category (loaded at 0x40000000, ends in `break`).  With
    --halt-on-quirk=all each 'bad' program must stop with exit 4 and '[quirk] NAME at'; each clean
    program must run with exit 0 and no quirk.  Without a detection flag there is never a
@@ -77,6 +80,7 @@ BUGS = "dcache-stale,tx-busy,rx-overrun,irq-storm,undef-reg"
 
 def run(path, *opts, at=0x40000000, env=ENV):
     r = subprocess.run([VV, "--sync", "--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--max-insns", "1000",
+                        "--cpu=unicorn",  # reference: off-quirk / exception paths
                         "--no-halt-on-quirk", f"--quiet-quirk={BUGS}", *opts,
                         "--load", f"{path}@{at:#x}", "--entry", f"{at:#x}"],
                        stdin=subprocess.DEVNULL, capture_output=True, env=env)

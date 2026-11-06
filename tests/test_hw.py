@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Hardware-model tests (make test-hw): tests/hw/*.s against the cycle-timed device model (src/hw.c,
-src/dcache.c) and the guest-bug detectors (warn by default, stop with --halt-on-quirk).
-Each program counts EXPECTs in $s3 and mismatches in $s5 (tests/hw/hw.inc)."""
+"""Hardware-model and guest-bug tests (make test-hw).
+
+Uses --cpu=unicorn (reference). Fast coverage is in test_cpu_fast / hex dual runs.
+tests/hw/*.s against the cycle-timed device model (src/hw.c, src/dcache.c) and guest-bug
+detectors (warn by default, stop with --halt-on-quirk). Each program counts EXPECTs in
+$s3 and mismatches in $s5 (tests/hw/hw.inc)."""
 import os, re, subprocess, sys
 from vvprog import prog
 
@@ -12,7 +15,7 @@ ENV.pop("VVIZARD_QUIRKS", None)
 ENV.pop("NO_COLOR", None)
 # Explicit settings (vvizard's own defaults are for the proj7 player: no limit, --halt-on-quirk);
 # a --load replaces the default program set.
-BASE = ["--sync", "--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]
+BASE = ["--cpu=unicorn", "--sync", "--no-window", "--frame-clock=emulated", "--quiet-mmio", "--no-random-ddr", "--no-bios", "--max-insns", "1000000", "--no-halt-on-quirk"]  # guest-bug/HW model reference
 
 
 def run(name, nexp, *extra, isr=False, stdin=None):

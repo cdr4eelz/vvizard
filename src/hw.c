@@ -7,6 +7,7 @@
 #include "gpu.h"
 #include <stdio.h>
 #include <time.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 
 int      vv_legacy_io;
@@ -294,4 +295,87 @@ void vv_hw_summary(void) {
                pf_frames ? (double)now_c / pf_frames : 0.0, VV_PF_PERIOD);
     if (wall) vv_eprintf("; %llu deadlines skipped", (unsigned long long)pf_skipped);
     vv_eprintf("\n");
+}
+
+/* ---- host duty cycle (MIPS CPU vs GPU model vs display present) ---- */
+static _Atomic uint64_t duty_cpu_ns, duty_gpu_ns, duty_disp_ns, duty_nested_ns;
+static _Atomic uint64_t duty_delay_ns;          /* GPU settle / frame publish waits */
+static _Atomic uint64_t duty_inline_gpu_ns;     /* nested GPU on emu thread (--sync stall) */
+static _Atomic uint64_t duty_pubs;             /* publish / present samples (for avg) */
+static uint64_t duty_wall_t0;                  /* set by vv_duty_run_begin */
+static int duty_wall_on;
+
+void vv_duty_run_begin(void) {
+    duty_wall_t0 = vv_mono_ns();
+    duty_wall_on = 1;
+}
+void vv_duty_add_gpu_ns(uint64_t ns, int nested) {
+    if (!ns) return;
+    atomic_fetch_add_explicit(&duty_gpu_ns, ns, memory_order_relaxed);
+    if (nested) {
+        atomic_fetch_add_explicit(&duty_nested_ns, ns, memory_order_relaxed);
+        atomic_fetch_add_explicit(&duty_inline_gpu_ns, ns, memory_order_relaxed);
+    }
+}
+void vv_duty_add_disp_ns(uint64_t ns, int nested) {
+    if (!ns) return;
+    atomic_fetch_add_explicit(&duty_disp_ns, ns, memory_order_relaxed);
+    if (nested) atomic_fetch_add_explicit(&duty_nested_ns, ns, memory_order_relaxed);
+}
+void vv_duty_add_delay_ns(uint64_t ns) {
+    if (!ns) return;
+    atomic_fetch_add_explicit(&duty_delay_ns, ns, memory_order_relaxed);
+}
+void vv_duty_note_pub(void) {
+    atomic_fetch_add_explicit(&duty_pubs, 1, memory_order_relaxed);
+}
+void vv_duty_commit_cpu_span(uint64_t span_ns) {
+    uint64_t n = atomic_load_explicit(&duty_nested_ns, memory_order_relaxed);
+    uint64_t c = span_ns > n ? span_ns - n : 0;
+    atomic_fetch_add_explicit(&duty_cpu_ns, c, memory_order_relaxed);
+}
+void vv_duty_summary(void) {
+    uint64_t c = atomic_load_explicit(&duty_cpu_ns, memory_order_relaxed);
+    uint64_t g = atomic_load_explicit(&duty_gpu_ns, memory_order_relaxed);
+    uint64_t d = atomic_load_explicit(&duty_disp_ns, memory_order_relaxed);
+    uint64_t sum = c + g + d;
+    if (!sum) return;
+    double cms = c * 1e-6, gms = g * 1e-6, dms = d * 1e-6, sms = sum * 1e-6;
+    double pc = 100.0 * (double)c / (double)sum;
+    double pg = 100.0 * (double)g / (double)sum;
+    double pd = 100.0 * (double)d / (double)sum;
+    double pr = 100.0 * (double)(g + d) / (double)sum;
+    int parallel = vv_gp_async || vv_disp_threaded;
+    vv_eprintf("[duty] host MIPS CPU %.3f ms (%.1f%%), GPU model %.3f ms (%.1f%%), display present %.3f ms (%.1f%%); "
+               "CPU vs render %.1f%% / %.1f%% (of CPU+GPU+disp = %.3f ms)%s\n",
+               cms, pc, gms, pg, dms, pd, pc, pr, sms,
+               parallel ? "; buckets may overlap wall (parallel threads)" : "");
+
+    /* Approx thread/frame sync (no extra barriers):
+     * overlap = max(0, cpu+gpu+disp - wall) — cheap proxy for concurrent useful work;
+     * blocked = GPU settle waits + display wait-for-publish + inline GPU on emu thread.
+     * Percents are of wall over the run; optional avg per publish when threaded. */
+    uint64_t waits = atomic_load_explicit(&duty_delay_ns, memory_order_relaxed);
+    uint64_t inl = atomic_load_explicit(&duty_inline_gpu_ns, memory_order_relaxed);
+    uint64_t delay = waits + inl;
+    uint64_t pubs = atomic_load_explicit(&duty_pubs, memory_order_relaxed);
+    uint64_t wall = 0;
+    if (duty_wall_on) {
+        uint64_t now = vv_mono_ns();
+        wall = now > duty_wall_t0 ? now - duty_wall_t0 : 0;
+    }
+    uint64_t overlap = (wall && sum > wall) ? sum - wall : 0;
+    double ovr_pct = wall ? 100.0 * (double)overlap / (double)wall : 0.0;
+    double blk_pct = wall ? 100.0 * (double)delay / (double)wall : 0.0;
+    vv_eprintf("[sync] approx overlap %.3f ms (%.1f%% of wall), blocked/delayed %.3f ms (%.1f%% of wall); "
+               "waits %.3f + inline-GPU %.3f; wall %.3f ms",
+               overlap * 1e-6, ovr_pct, delay * 1e-6, blk_pct,
+               waits * 1e-6, inl * 1e-6, wall * 1e-6);
+    if (pubs)
+        vv_eprintf("; %llu pubs (avg overlap %.3f ms, blocked %.3f ms /pub)",
+                   (unsigned long long)pubs,
+                   overlap * 1e-6 / (double)pubs, delay * 1e-6 / (double)pubs);
+    vv_eprintf("; frame deadlines skipped %llu%s\n",
+               (unsigned long long)pf_skipped,
+               parallel ? "" : "; --sync (expect ~0 overlap)");
 }

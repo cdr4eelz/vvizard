@@ -22,6 +22,7 @@
 #include "display.h"
 #include "gpu.h"
 #include "quirk.h"
+#include "cpu/fast.h"
 #include "prng.h"
 #include "lcd.h"
 #include "shmem.h"
@@ -370,18 +371,32 @@ static void mmio_write(uc_engine *uc, uint64_t off, unsigned size, uint64_t val,
     if (!opt_quiet_mmio) vv_eprintf("[mmio] W off=0x%04x size=%u <- 0x%08x\n", (unsigned)off, size, v);
 }
 
-/* --threads (docs/MULTITHREADING-PLAN.md): with a window, uc_emu_start runs on an emulator thread
- * and the main thread draws (display.c); --sync / --threads=1 keeps everything on one thread. */
+/* --threads (docs/MULTITHREADING-PLAN.md): with a window, the selected CPU backend
+ * (unicorn uc_emu_start or fast vv_fast_run) runs on an emulator thread and the main thread
+ * draws (display.c); --sync / --threads=1 keeps everything on one thread. */
 static int opt_threads = 1;
+static int opt_cpu = VV_CPU_FAST;  /* --cpu=unicorn|fast; default fast */
 static uc_err emu_err;
 static uint32_t emu_entry; static uint64_t emu_until;
+static int stop_reason_intr = -1;
+/* Filled before spawning emu_thread when --cpu=fast (worker owns UC + these). */
+static vv_fast_cpu emu_fcpu;
+static vv_fast_env emu_fenv;
 static void *emu_thread(void *a) {
     uc_engine *uc = a;
-    emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    uint64_t cpu_t0 = vv_mono_ns();
+    if (opt_cpu == VV_CPU_FAST) {
+        int frc = vv_fast_run(&emu_fenv, &emu_fcpu, emu_entry);
+        vv_fast_sync_to_uc(uc, &emu_fcpu);
+        if (emu_fcpu.stop_break) stop_reason_intr = 18;
+        emu_err = frc ? UC_ERR_EXCEPTION : UC_ERR_OK;
+    } else {
+        emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    }
+    vv_duty_commit_cpu_span(vv_mono_ns() - cpu_t0);
     vv_disp_emu_done(uc);                    /* publishes the last frame */
     return NULL;
 }
-static int stop_reason_intr = -1;
 static bool tlb_fill(uc_engine *uc, uint64_t va, uc_mem_type t, uc_tlb_entry *e, void *u) {
     (void)uc; (void)t; (void)u;
     uint32_t pa = vv_canon((uint32_t)va);
@@ -535,6 +550,14 @@ static uint32_t rd_guest(uc_engine *uc, uint32_t a, unsigned n) {
     for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
     return v;
 }
+/* Like rd_guest but sets *ok from uc_mem_read (0 on failure). */
+static uint32_t rd_guest_ok(uc_engine *uc, uint32_t a, unsigned n, int *ok) {
+    unsigned char b[4] = { 0 }; uint32_t v = 0;
+    if (uc_mem_read(uc, a, b, n)) { *ok = 0; return 0; }
+    for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
+    *ok = 1;
+    return v;
+}
 static uint32_t sm_reader(void *ctx, uint32_t a, unsigned n) { return rd_guest((uc_engine *)ctx, a, n); }
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2) {
     snprintf(l1, n1, "%s  insns %llu  PF_FRAME %u (writes %llu)  GP %u  IRQ %llu%s",
@@ -625,6 +648,8 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --little / --big   CPU endianness (default %s)\n"
 "\n"
 "Run control (defaults: unlimited, interrupts on, random DDR, window with keys):\n"
+"  --cpu=unicorn|fast  CPU backend (default fast).  fast = predecoded basic-block\n"
+"                     interpreter (L0); use --cpu=unicorn for the Unicorn reference\n"
 "  --max-insns N      stop after N instructions (default 0 = unlimited)\n"
 "  --until ADDR       stop when PC reaches ADDR\n"
 "  --max-seconds S    stop after S seconds of wall time (checked every 4096 instructions)\n"
@@ -692,12 +717,13 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "  --dump-every N     dump displayed frame every Nth PF_FRAME write to PREFIX%%06d.ppm\n"
 "  --dump-prefix P    prefix for --dump-every (default 'frame')\n"
 "  --dump-lcd         print the 2x16 LCD buffer (text + hex) at exit\n"
+"  --dump-be32=A:N    dump N big-endian words from guest address A at exit (harness)\n"
 "  --dump-sm          print the proj6/proj7 shared memory at 0x50000000 (shared7.h struct SM_DATA,\n"
 "                     or shared6.h) decoded, at exit; its consistency warnings (magic/majorvers\n"
 "                     stamp vs shared7.h, magic2, buffer) are printed at exit even without it\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
 "  --threads=on|off   on (default): GPU command lists are drawn by a worker thread and, with a\n"
-"                     window, the emulator runs on its own thread while the main thread draws (frame\n"
+"                     window, the selected CPU (unicorn or fast) runs on its own thread while main draws (frame\n"
 "                     copied at each frame end).  The GPU is then busy (GP_STATE ready bits 0) until\n"
 "                     launch + pixels/4 + 32 x commands cycles, Cause bit 12 rises at that edge, and a\n"
 "                     GP_CODE store while busy is dropped (gp-busy).  off = --sync = --threads=1: one\n"
@@ -728,12 +754,13 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_EXPECT, O_SCRIPT, O_IRQ, O_NO_IRQ, O_DUMP_EVERY, O_DUMP_PREFIX, O_WINDOW, O_NO_WINDOW,
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
-       O_DUMP_LCD, O_DUMP_SM, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC };
+       O_DUMP_LCD, O_DUMP_SM, O_DUMP_BE32, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU };
 
 int main(int argc, char **argv) {
     int big = VV_DEFAULT_BIG_ENDIAN, want_window = 1, hold = 0;
     const char *dump_path = NULL, *bios_path = NULL, *shot_path = NULL; int no_bios = 0, dump_lcd = 0, dump_sm = 0;
+    uint32_t dump_be32_addr = 0; int dump_be32_n = 0;
     uint32_t entry = VV_PC_BOOT, sp = 0; int have_entry = 0, have_elf_entry = 0, have_sp = 0;
     const char *loads[32]; int nloads = 0;
     const char *expects[32]; int nexp = 0;
@@ -752,12 +779,12 @@ int main(int argc, char **argv) {
         {"random-ddr",2,0,O_RANDOM_DDR},{"no-random-ddr",0,0,O_NO_RANDOM_DDR},{"uart-in",1,0,O_UART_IN},
         {"no-autorun",0,0,O_NO_AUTORUN},{"halt-on-quirk",2,0,O_HALT},{"warn-on-quirk",2,0,O_WARN},
         {"no-halt-on-quirk",0,0,O_NO_HALT},{"quirks",1,0,O_QUIRKS},{"no-quirks",0,0,O_NO_QUIRKS},
-        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"dump-sm",0,0,O_DUMP_SM},{"screenshot",1,0,O_SCREENSHOT},
+        {"list-quirks",0,0,O_LIST_QUIRKS},{"dump-lcd",0,0,O_DUMP_LCD},{"dump-sm",0,0,O_DUMP_SM},{"dump-be32",1,0,O_DUMP_BE32},{"screenshot",1,0,O_SCREENSHOT},
         {"help",0,0,'h'},{"legacy-io",0,0,O_LEGACY_IO},{"uart-rx-gap",1,0,O_RX_GAP},{"pf-period",1,0,O_PF_PERIOD},
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
-        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},
+        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
@@ -823,6 +850,10 @@ int main(int argc, char **argv) {
             else if (is_uint(optarg) && strtoul(optarg, 0, 0) >= 1) opt_threads = strtoul(optarg, 0, 0) > 1;
             else { vv_eprintf("--threads: expected on, off or a count (1 = off), not '%s'\n", optarg); return 2; } break;
         case O_SYNC: opt_threads = 0; break;
+        case O_CPU:
+            if (!strcmp(optarg, "unicorn")) opt_cpu = VV_CPU_UNICORN;
+            else if (!strcmp(optarg, "fast")) opt_cpu = VV_CPU_FAST;
+            else { vv_eprintf("--cpu: expected unicorn or fast, not '%s'\n", optarg); return 2; } break;
         case O_EVENT_TRACE:
             if (!(vv_evt = fopen(optarg, "w"))) { perror(optarg); return 2; }
             setvbuf(vv_evt, NULL, _IOFBF, 1 << 20); break;
@@ -831,6 +862,12 @@ int main(int argc, char **argv) {
         case O_LIST_QUIRKS: vv_quirk_list(stdout); return 0;
         case O_DUMP_LCD: dump_lcd = 1; break;
         case O_DUMP_SM: dump_sm = 1; break;
+        case O_DUMP_BE32: {
+            char *colon = strchr(optarg, ':');
+            if (!colon) { vv_eprintf("--dump-be32 needs ADDR:COUNT\n"); return 2; }
+            *colon = 0; dump_be32_addr = strtoul(optarg, 0, 0); dump_be32_n = (int)strtol(colon + 1, 0, 0);
+            if (dump_be32_n < 0 || dump_be32_n > 4096) { vv_eprintf("--dump-be32 COUNT out of range\n"); return 2; }
+            break; }
         case O_SCREENSHOT: shot_path = optarg; break;
         case O_COLOR: v = opt_next(argc, argv, is_color);
             if ((color = vv_color_parse(v)) < 0) {
@@ -905,10 +942,12 @@ int main(int argc, char **argv) {
     }
     uc_hook h;
     uc_hook_add(uc, &h, UC_HOOK_TLB_FILL, tlb_fill, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_CODE, hook_code, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_INTR, hook_intr, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
-    uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, hook_bios_write, NULL, 0x40000000ull, 0x4FFFFFFFull);
+    if (opt_cpu == VV_CPU_UNICORN) {
+        uc_hook_add(uc, &h, UC_HOOK_CODE, hook_code, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_INTR, hook_intr, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_MEM_UNMAPPED, hook_unmapped, NULL, 1, 0);
+        uc_hook_add(uc, &h, UC_HOOK_MEM_WRITE, hook_bios_write, NULL, 0x40000000ull, 0x4FFFFFFFull);
+    }
 
     for (int i = optind; i < argc; i++) {
         uint32_t e; if (vv_load_elf(uc, argv[i], &e, big)) return 1;
@@ -948,13 +987,15 @@ int main(int argc, char **argv) {
     vv_disp_init(want_window);
     /* wall frame clock: the ~60/s frame ends redraw; the vv_disp_tick timer is only a fallback */
     if (vv_frame_clock == VV_FRAME_CLOCK_WALL && vv_pf_period && !vv_legacy_io) vv_disp_redraw_period = 0.1;
-    vv_eprintf("[run] %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n", big ? "big" : "little",
+    vv_eprintf("[run] cpu=%s %s-endian entry=0x%08x sp=%s max-insns=%llu io=%s frame-clock=%s threads=%s\n",
+            opt_cpu == VV_CPU_FAST ? "fast" : "unicorn", big ? "big" : "little",
             entry, have_sp ? "preset" : "0 (not preset)", (unsigned long long)max_insns, vv_legacy_io ? "legacy" : "timed",
             vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
             !opt_threads ? "off (--sync)" : vv_legacy_io ? (vv_disp_has_window() ? "on (emulator + display; GPU synchronous: --legacy-io)" : "on (no window, --legacy-io: one thread)")
             : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)");
     vv_quirk_decode = vv_quirk_needs_decode();
     run_t0 = vv_mono_ns();
+    vv_duty_run_begin();
     emu_entry = entry; emu_until = have_stop ? stop_addr : 0xFFFFFFFFull;   /* max_insns: hook_code */
     /* threaded GPU: headless too (the ready bit and gp-busy exist without a window) */
     if (opt_threads && !vv_legacy_io) {
@@ -963,15 +1004,57 @@ int main(int argc, char **argv) {
     }
     pthread_t emu_tid; pthread_attr_t ta;
     int threaded_disp = opt_threads && vv_disp_has_window();
+    /* Fill fast env before spawn so the worker owns UC + GPRs (same fields as sync path). */
+    if (opt_cpu == VV_CPU_FAST) {
+        memset(&emu_fenv, 0, sizeof emu_fenv);
+        emu_fenv.uc = uc;
+        emu_fenv.insn_count = &insn_count;
+        emu_fenv.hook_calls = &hook_calls;
+        emu_fenv.max_insns = max_insns;
+        emu_fenv.stopped_max = &stopped_max;
+        emu_fenv.stop_req = &stop_req;
+        emu_fenv.stopped_wall = &stopped_wall;
+        emu_fenv.max_wall_ns = max_wall_ns;
+        emu_fenv.run_t0 = run_t0;
+        emu_fenv.have_until = have_stop;
+        emu_fenv.until_addr = stop_addr;
+        emu_fenv.opt_irq = opt_irq;
+        emu_fenv.opt_trace = opt_trace;
+        emu_fenv.trace_left = &trace_left;
+        emu_fenv.guest_big = guest_big;
+        emu_fenv.mmio_read = mmio_read;
+        emu_fenv.mmio_write = mmio_write;
+        emu_fenv.note_ddr_exec = note_ddr_exec;
+        emu_fenv.run_due_events = run_due_events;
+        emu_fenv.nevents = nevents;
+    }
     if (threaded_disp) {                       /* emulator thread; raylib stays on this one */
         pthread_attr_init(&ta);
         pthread_attr_setstacksize(&ta, 64u << 20);   /* (macOS secondary threads default to 512 KiB) */
         vv_disp_threaded = 1;
-        if (pthread_create(&emu_tid, &ta, emu_thread, uc)) { vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n"); vv_disp_threaded = threaded_disp = 0; }
+        if (pthread_create(&emu_tid, &ta, emu_thread, uc)) {
+            vv_eprintf("[run] cannot start the emulator thread; running single-threaded\n");
+            vv_disp_threaded = threaded_disp = 0;
+        }
         pthread_attr_destroy(&ta);
     }
-    if (threaded_disp) { vv_disp_main_loop(); pthread_join(emu_tid, NULL); vv_disp_threaded = 0; err = emu_err; }
-    else err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+    if (threaded_disp) {
+        vv_disp_main_loop();
+        pthread_join(emu_tid, NULL);
+        vv_disp_threaded = 0;
+        err = emu_err;
+    } else if (opt_cpu == VV_CPU_FAST) {
+        uint64_t cpu_t0 = vv_mono_ns();
+        int frc = vv_fast_run(&emu_fenv, &emu_fcpu, entry);
+        vv_fast_sync_to_uc(uc, &emu_fcpu);
+        if (emu_fcpu.stop_break) stop_reason_intr = 18;
+        err = frc ? UC_ERR_EXCEPTION : UC_ERR_OK;
+        vv_duty_commit_cpu_span(vv_mono_ns() - cpu_t0);
+    } else {
+        uint64_t cpu_t0 = vv_mono_ns();
+        err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+        vv_duty_commit_cpu_span(vv_mono_ns() - cpu_t0);
+    }
     vv_gpu_worker_stop();                      /* finish a draw in flight; one thread from here on */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
     if (vv_quirk_halted) err = UC_ERR_OK;    /* reported (and registers dumped) at the quirk */
@@ -986,8 +1069,18 @@ int main(int argc, char **argv) {
     if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
     vv_hw_summary();
+    vv_duty_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
+
+    if (dump_be32_n > 0) {
+        for (int i = 0; i < dump_be32_n; i++) {
+            uint32_t a = dump_be32_addr + (uint32_t)i * 4u;
+            int ok = 0;
+            uint32_t v = rd_guest_ok(uc, a, 4, &ok);
+            vv_eprintf("[dump-be32] a=0x%08x v=0x%08x ok=%d\n", a, ok ? v : 0, ok);
+        }
+    }
     if (halt_stores)                            /* after the register dump (also after a quirk halt's) */
         vv_eprintf("[halt] HaltVal = 0x%08x (%u), last stored at pc=0x%08x (%llu store%s)%s\n", halt_val, halt_val, halt_pc,
                    (unsigned long long)halt_stores, halt_stores == 1 ? "" : "s", guest_exited ? "; run ended by --exit-on-halt" : "");
