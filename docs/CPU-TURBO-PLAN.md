@@ -1,10 +1,11 @@
 # `--cpu=turbo` plan
 
 Branch: `e/cpu-turbo` (from `main` at `932a0e3`).
-Goal: make the guest as fast as we can without a JIT (no runtime code generation).
-Speed is the only design goal. Correctness means “runs the current MIPS150 ISA and
-cs150 devices well enough that GIOS + proj7 and the usual player/SM programs work,”
-not bit-identical traces with `--cpu=fast` or `--sync`.
+Goal: make the guest as fast as we can. Speed is the only design goal.
+No JIT (no runtime code generation) and no hit-based tricks (see “Leaving out”).
+Correctness means “runs the current MIPS150 ISA and cs150 devices well enough
+that GIOS + proj7 and the usual player/SM programs work,” not bit-identical
+traces with `--cpu=fast` or `--sync`.
 
 ## Why not extend `--cpu=fast`
 
@@ -149,63 +150,128 @@ Three threads, no Unicorn:
    entirely. Enter `0xC0000180` with the COP0150 rules (no `eret`; the ISR
    returns by writing Status).
 
-## Speed tricks (all short of a JIT)
+## Speed tricks
 
-No `mprotect`, no emitting host instructions, no DynASM/libjit/LLVM.
+Chosen techniques below. Each should move proj7 Mcyc/s; keep only those that
+do, once there is a baseline measurement. None of them generate host code.
 
-Interpreter:
+### Interpreter
 
-- Computed-goto (or a thread-next “direct threaded” IR: each IR node stores
-  the address of its handler).
-- Decode-once BB cache (start from today’s 4096-slot idea; size after
-  measuring miss rate on proj7). Invalidate only when a store hits a page
-  that holds cached code (same code-page filter idea, but keyed on turbo’s
-  own host pointers).
-- Block chaining / predicted successor; no hash on the hot fall-through.
-- Superblocks later if the profiler says hash + event checks still dominate:
-  fuse a short run of blocks until a backward branch or MMIO.
-- Delay slot folded into the branch op (one IR, not a separate insn + flag).
-- Load-delay as a single `rt` + `old` pair, like today’s `vv_fast_cpu`, not a
-  pipeline walk.
-- `gpr[0]` never written; handlers that write `rd`/`rt` skip when the target
-  is 0.
-- Specialize RAM loads/stores in the IR when the addressing nibble is known
-  at decode (PC-relative, or a recent `lui`+`addiu` to a constant region).
-  Everything else stays a fast nibble table.
-- Big-endian word load: one `bswap32` of a 32-bit load on LE hosts, not four
-  shifts, on aligned `lw`/`sw`.
-- No `OP_SLOW` trampoline and no “maybe emulate MIPS32” fallback. An opcode
-  the FPGA treats as nop/zero/`addr 0` is a dedicated cheap handler.
+- Direct-threaded dispatch: each decoded IR carries the address of its
+  handler (GCC/Clang labels-as-values). Why: the host predictor sees a
+  computed goto per opcode instead of one giant `switch`, and there is no
+  central dispatch loop.
+- Decode-once basic-block cache (start from a 4096-slot table; retune after
+  measuring proj7 miss rate). Invalidate only when a store touches a page
+  that holds cached code, keyed on turbo’s own host pointers. Why: GIOS and
+  proj7 spend almost all time in the same loops, so decode should happen
+  once per site, not once per execution.
+- Block chaining: each block stores a predicted successor pointer. Why: the
+  common fall-through or taken target skips the cache hash.
+- Superblocks later, if chaining plus event checks still show up: fuse a
+  straight-line run until a backward branch or MMIO. Why: fewer chain and
+  event-check points in the code that is already straight-line.
+- Delay slot folded into the branch/jump handler. Why: one dispatch instead
+  of a separate slot instruction plus an `in_delay` flag test.
+- Load-delay as a single pending `rt` + old-value pair (as in `vv_fast_cpu`),
+  not a pipeline walk. Why: MIPS150 load-use is one extra move, and a
+  pipeline model would cost more than the ISA requires.
+- Never write `gpr[0]`; a write to `$zero` is ignored. Why: readers need no
+  extra masking if `$zero` stays 0.
+- Specialize RAM loads/stores in the IR when the region is known at decode
+  (PC-relative, or a `lui`+`addiu` to a constant nibble). Other accesses
+  keep a 16-entry nibble table. Why: proj7’s hot loads use a stable base, so
+  skipping the full map on those ops saves work on every iteration.
+- Region-stable fetch while decoding a block (the sequential PC stays in
+  BIOS, ISCR, ISR, or DDR). Why: the top nibble does not change between
+  words of one block.
+- Aligned `lw`/`sw` use one `bswap32` of a 32-bit host load/store on
+  little-endian machines. Why: that is one instruction instead of four
+  shifts and ORs.
+- Dedicated cheap handlers for what the FPGA treats as nop, write-zero, or
+  access-address-0. Why: those opcodes must not fall into a generic
+  `OP_SLOW` decoder that exists only to support other option combinations.
 
-Events and devices:
+### Events, MMIO, and GPU
 
-- Next-event countdown instead of per-insn `run_due_events`.
-- Increment Count in bulk at the end of a block (`Count += n`).
-- PF is “insn_count + period”, not a divide.
-- UART TX busy is a single `tx_ready_at` compare at event checks.
-- GPU completion is an atomic flag, not a mutex on the CPU path. Mutex/cond
-  only if the worker has to sleep when idle (or a park/unpark).
-- Do not pre-walk the command list to compute busy cycles. Turbo does not
-  need `--event-trace` identity with `--sync`.
+- Next-event countdown: check PF, UART TX-ready, Compare, and IRQ at block
+  boundaries and after MMIO, not after every ALU insn. Why: most blocks
+  never touch a device, so per-instruction event polling is wasted work.
+- Skip the IRQ test entirely while Status.IE is 0. Why: the guest spends
+  long stretches with interrupts off; `mfc0`/`mtc0` already have to look at
+  Status.
+- Add COP0 Count in bulk at the end of a block (`Count += n`). Why: Count
+  is not read every instruction, and adding once per block is cheaper than
+  incrementing in every handler.
+- PF deadline is `insn_count + VV_PF_PERIOD` (828960), not a divide. Why:
+  the next-event check is then one compare.
+- UART TX busy is a single `tx_ready_at` compare at event checks (and on
+  the TX store itself). Why: the 4773-cycle busy window does not need a
+  test on unrelated instructions.
+- GPU kick enqueues `{gp_frame, code}` and sets an atomic busy flag; the
+  CPU does not pre-walk the command list and does not wait for the worker.
+  Why: today’s path steals a full list walk (and sometimes a join) from the
+  guest thread, which is the opposite of overlap.
+- GPU completion is an atomic done/ready flag. A mutex or park is only for
+  putting an idle worker to sleep. Why: a lock on every kick or poll would
+  serialize the two threads we added to run in parallel.
+- Inline the hot MMIO registers (`CNT_*`, `GP_STATE`, `PF_FRAME`); keep
+  LCD, UART, and PRNG as cold helpers. Why: counters and GPU-ready are in
+  the guest spin loops; LCD and UART are not.
 
-Host:
+### Host and display
 
-- Keep default LTO (`-flto=auto`).
-- `-fomit-frame-pointer`, `-fno-exceptions` (already C), consider
-  `-fno-plt` / hidden visibility on turbo internals so calls stay direct.
-- `always_inline` on the RAM load/store helpers; `noinline` on cold MMIO
-  (LCD, UART, PRNG).
-- `likely`/`unlikely` on nibble == RAM vs MMIO.
-- One compilation unit for the turbo CPU hot files so the compiler can see
-  every handler (or LTO makes that equivalent).
-- Optionally `madvise(MADV_HUGEPAGE)` on the 256 MiB DDR mapping; measure,
-  do not assume.
-- No tracing, quirk decode, or debug dumps compiled into the hot path
-  (`#ifdef` or a separate `turbo_trace` file that turbo does not call).
+- Default LTO (`-flto=auto`), `-fomit-frame-pointer`, hidden visibility /
+  `-fno-plt` on turbo internals. Why: hot helpers should inline or be
+  direct calls, not go through the PLT.
+- `always_inline` on RAM load/store helpers; `noinline` on cold MMIO.
+  Why: the RAM path stays in the interpreter’s I-cache, and the rare LCD
+  or UART path stays out of it.
+- `likely`/`unlikely` on “this access is RAM, not MMIO.” Why: almost every
+  load/store is RAM, so a hinted nibble test mispredicts less.
+- One compilation unit for the turbo CPU hot files (LTO is the fallback).
+  Why: the compiler can see every handler and the dispatch graph at once.
+- `madvise(MADV_HUGEPAGE)` on the 256 MiB DDR buffer, kept only if it
+  measures faster. Why: framebuffer and guest data on 4 KiB pages can burn
+  DTLB; 2 MiB pages may cut those misses.
+- Publish a host pointer to the completed frame plus an LCD/status
+  snapshot; do not copy through Unicorn or sync GPRs into a `uc_engine`.
+  Why: a 4 MiB memcpy and a register dump are host work that does not
+  retire guest instructions.
+- No tracing, quirk decode, or debug dumps in the hot path. Why: those
+  exist to support options turbo will not have, and they show up on every
+  instruction in `--cpu=fast` when enabled.
 
-Explicitly out of scope: any JIT, tracing JIT, copy-and-patch that writes
-executable pages, or calling Unicorn as a fallback for “unsupported”
-opcodes.
+## Leaving out
+
+- JIT, tracing JIT, copy-and-patch, DynASM, libjit, LLVM, `mprotect` of
+  executable pages, or any other runtime host-code generation. Why: the
+  caller ruled out a JIT.
+- Hit-based tricks, matching the earlier “short of hit” constraint. That
+  means no hotness counters that promote a block once it has been hit
+  enough times, no inline caches or region predictors that specialize
+  after a runtime address hits a remembered nibble, and no BTB or
+  return-stack that steers dispatch based on predictor hits. Why: those
+  are the usual on-ramp from an interpreter to generated code, and they
+  add mis-speculation paths without being a decode cache. The decode-once
+  basic-block cache stays: it memoizes IR so the same PC is not decoded
+  again, and it does not emit host instructions when a lookup succeeds.
+- Unicorn as a fallback for “unsupported” opcodes. Why: turbo’s ISA is
+  closed; a fallback would reintroduce the shared world and its cost.
+- Extending `src/cpu/fast.c`, the quirk option machinery, `--ddr-stalls`,
+  I$/D$ models, or `--sync`. Why: the single goal is speed in a closed
+  machine; those knobs exist to trade speed for fidelity or generality.
+- Modelling the D-cache (including `dcache-stale`). Why: a cache model is
+  a tax on every miss, and without stalls it is complexity with no speed
+  win; GPU writes are immediately visible.
+- Waiting for the GPU worker so traces match `--sync`. Why: that join
+  puts GPU time back on the guest thread.
+- Interpreting guest instructions in SIMD or on more than one CPU thread.
+  Why: the guest is a scalar single-issue MIPS150; gathering N instruction
+  streams or splitting one PC across threads would cost more than it
+  retired.
+- Bit-identical event traces versus `--cpu=fast`. Why: that requirement
+  forces the pre-walk and ready-edge wait this backend exists to drop.
 
 ## Integration
 
