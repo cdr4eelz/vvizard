@@ -1,14 +1,13 @@
-# DDR2 delay + icache/dcache stalls (research notes)
+# DDR2 delay + icache/dcache stalls
 
-Branch: `e/ddr-cache-stalls` (from `e/personal-fast-mips` @ `26ecbdd`).
-PR for the fast-cpu work: https://github.com/cdr4eelz/vvizard/pull/2
-Author notes: Erik Rogers. **No emulator DDR/cache implementation in the first commit — research only.**
+Notes and measurements that led to `--ddr-stalls[=R,W]` (merged to main). Opt-in only:
+default `--cpu=fast` stays **no-DDR / 1 cycle per insn**.
 
 ## Design gate
 
-- **Caches and DDR miss stalls are active only when DDR delays are emulated.**
+- **Caches and DDR miss stalls are active only when DDR delays are emulated** (`--ddr-stalls`).
 - Default `--cpu=fast` stays the current **no-DDR / 1 cycle per insn** performance path.
-- Proposed opt-in (name TBD): e.g. `--mem=ddr` / `--ddr-stalls` that enables approximate I$/D$ + miss latency; without it, behavior matches today's fast path.
+- Flag: `--ddr-stalls[=R,W]` — omit = off; bare or `=16,3` enables with defaults **R=16** (read/miss-fill), **W=3** (write-through); hits always 0 extra.
 
 ## What the docs / RTL say
 
@@ -85,7 +84,7 @@ All tests PASSED. These are the best current **approx miss/hit stall** numbers f
 
 ## Implementation status
 
-Landed on this branch as `--ddr-stalls[=R,W]` (default **off**):
+Implemented as `--ddr-stalls[=R,W]` (default **off**):
 
 - `src/memstall.c`: I$/D$ tag arrays (256×32B); `R`=read/miss-fill (default **16**), `W`=write-through (default **3**); hits always 0
 - Bare `--ddr-stalls` or `--ddr-stalls=16,3` enables with those defaults; garbage → usage error

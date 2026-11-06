@@ -49,8 +49,8 @@ Not compared: wall time, cycle count, IRQ/device timing (out of scope).
 vvizard default CPU is **fast**. The harness always compares explicit
 `--cpu=unicorn` and `--cpu=fast` (and Icarus). Use `--cpu=unicorn` outside
 the harness when exercising reference-only quirk/exception masks.
-`--cpu=fast` with `--threads=on` prints a diagnostic and forces `--sync`
-(not a silent option drop).
+`--cpu=fast` supports `--threads=on` with a window (same emu-thread +
+triple-buffer path as unicorn); no force-`--sync` downgrade.
 
 ## Quirks
 

@@ -1,8 +1,10 @@
 # Multithreading plan
 
-## Status (Oct 31 2026, branch `multithreading`)
+## Status
 
-## Fast CPU + threaded display (Nov 2026, `e/personal-fast-mips`)
+Merged to main (threads Oct 2026; fast+window Nov 2026). Historical measurement SHAs below may predate later CPU/DDR work.
+
+## Fast CPU + threaded display
 
 `--cpu=fast` with a window and `--threads=on` uses the **same** emu-thread / triple-buffer
 handshake as Unicorn: worker runs `vv_fast_run`, main runs `vv_disp_main_loop` (raylib only).
@@ -44,7 +46,8 @@ Implemented (steps 1-5 on Linux; macOS not built or measured). `--threads=on` is
 - **New:** `--event-trace FILE` and `tests/compare_runs.py` (section 10's trace comparison), and `make test-threads`
   (`tests/test_threads.py`, new `tests/hw/gpstat_async.s`, `dcache_async.s`, `gp_inline.s`).
 
-Checks: `make test` (all `--sync`): 67 hex, 8/8, 20/20, 55/55, 12/12, plus `test-threads` 9/9, on DEB13 and UBU24.
+Checks (at merge): `make test` with `--sync` for the non-threads suites, plus `test-threads` 9/9, on DEB13 and UBU24.
+`make check-hex` requires committed `tests/**/*.hex` to match rebuilt programs when a MIPS toolchain is present.
 `--sync` against the pre-threads build (00ac75e plus the event trace only) gives byte-identical UART, event trace,
 guest-state stderr and frame dumps on all 29 `compare_runs.py` cases, windowed proj7 included. `--sync` against
 threaded differs only in the 10 cases that launch the GPU. `make TSAN=1`: no reports on windowed and headless proj7

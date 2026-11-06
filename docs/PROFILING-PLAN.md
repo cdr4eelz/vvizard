@@ -1,6 +1,6 @@
 # Profiling plan
 
-This is a plan. Nothing in it is implemented yet. The default `make` stays as it is: `-O3 -g` (`OPTFLAGS` in the `Makefile`), with no profiler linked and no counters compiled in.
+This is a plan. Nothing in it is implemented yet. The default `make` stays as it is: `-O3 -g` (`OPTFLAGS` in the `Makefile`), with no profiler linked and no counters compiled in. (Written before `--cpu=fast` became the default; add `--cpu=unicorn` when comparing to Unicorn-only baselines.)
 
 It covers the current single-threaded build and the threaded design in `docs/MULTITHREADING-PLAN.md` (`--sync` keeps today's one thread). Take a baseline (runs A–G below, and on macOS especially F for `end_draw` and `poll`) before that split. The macOS profile decides whether the split is worth doing there.
 
