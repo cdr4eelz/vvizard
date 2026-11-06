@@ -384,6 +384,7 @@ static vv_fast_cpu emu_fcpu;
 static vv_fast_env emu_fenv;
 static void *emu_thread(void *a) {
     uc_engine *uc = a;
+    uint64_t cpu_t0 = vv_mono_ns();
     if (opt_cpu == VV_CPU_FAST) {
         int frc = vv_fast_run(&emu_fenv, &emu_fcpu, emu_entry);
         vv_fast_sync_to_uc(uc, &emu_fcpu);
@@ -392,6 +393,7 @@ static void *emu_thread(void *a) {
     } else {
         emu_err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
     }
+    vv_duty_commit_cpu_span(vv_mono_ns() - cpu_t0);
     vv_disp_emu_done(uc);                    /* publishes the last frame */
     return NULL;
 }
@@ -1041,12 +1043,16 @@ int main(int argc, char **argv) {
         vv_disp_threaded = 0;
         err = emu_err;
     } else if (opt_cpu == VV_CPU_FAST) {
+        uint64_t cpu_t0 = vv_mono_ns();
         int frc = vv_fast_run(&emu_fenv, &emu_fcpu, entry);
         vv_fast_sync_to_uc(uc, &emu_fcpu);
         if (emu_fcpu.stop_break) stop_reason_intr = 18;
         err = frc ? UC_ERR_EXCEPTION : UC_ERR_OK;
+        vv_duty_commit_cpu_span(vv_mono_ns() - cpu_t0);
     } else {
+        uint64_t cpu_t0 = vv_mono_ns();
         err = uc_emu_start(uc, emu_entry, emu_until, 0, 0);
+        vv_duty_commit_cpu_span(vv_mono_ns() - cpu_t0);
     }
     vv_gpu_worker_stop();                      /* finish a draw in flight; one thread from here on */
     if (err == UC_ERR_EXCEPTION && stop_reason_intr == 18) err = UC_ERR_OK; /* `break` = clean stop */
@@ -1062,6 +1068,7 @@ int main(int argc, char **argv) {
     if (opt_irq) vv_eprintf("[irq] interrupts taken: %llu, PF_FRAME writes: %llu\n",
                          (unsigned long long)irq_count, (unsigned long long)pf_writes);
     vv_hw_summary();
+    vv_duty_summary();
     if (vv_quirk_active()) vv_quirk_summary();
     if (!vv_quirk_halted) dump_regs(uc);
 

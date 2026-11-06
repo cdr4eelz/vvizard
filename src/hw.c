@@ -7,6 +7,7 @@
 #include "gpu.h"
 #include <stdio.h>
 #include <time.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 
 int      vv_legacy_io;
@@ -294,4 +295,40 @@ void vv_hw_summary(void) {
                pf_frames ? (double)now_c / pf_frames : 0.0, VV_PF_PERIOD);
     if (wall) vv_eprintf("; %llu deadlines skipped", (unsigned long long)pf_skipped);
     vv_eprintf("\n");
+}
+
+/* ---- host duty cycle (MIPS CPU vs GPU model vs display present) ---- */
+static _Atomic uint64_t duty_cpu_ns, duty_gpu_ns, duty_disp_ns, duty_nested_ns;
+
+void vv_duty_add_gpu_ns(uint64_t ns, int nested) {
+    if (!ns) return;
+    atomic_fetch_add_explicit(&duty_gpu_ns, ns, memory_order_relaxed);
+    if (nested) atomic_fetch_add_explicit(&duty_nested_ns, ns, memory_order_relaxed);
+}
+void vv_duty_add_disp_ns(uint64_t ns, int nested) {
+    if (!ns) return;
+    atomic_fetch_add_explicit(&duty_disp_ns, ns, memory_order_relaxed);
+    if (nested) atomic_fetch_add_explicit(&duty_nested_ns, ns, memory_order_relaxed);
+}
+void vv_duty_commit_cpu_span(uint64_t span_ns) {
+    uint64_t n = atomic_load_explicit(&duty_nested_ns, memory_order_relaxed);
+    uint64_t c = span_ns > n ? span_ns - n : 0;
+    atomic_fetch_add_explicit(&duty_cpu_ns, c, memory_order_relaxed);
+}
+void vv_duty_summary(void) {
+    uint64_t c = atomic_load_explicit(&duty_cpu_ns, memory_order_relaxed);
+    uint64_t g = atomic_load_explicit(&duty_gpu_ns, memory_order_relaxed);
+    uint64_t d = atomic_load_explicit(&duty_disp_ns, memory_order_relaxed);
+    uint64_t sum = c + g + d;
+    if (!sum) return;
+    double cms = c * 1e-6, gms = g * 1e-6, dms = d * 1e-6, sms = sum * 1e-6;
+    double pc = 100.0 * (double)c / (double)sum;
+    double pg = 100.0 * (double)g / (double)sum;
+    double pd = 100.0 * (double)d / (double)sum;
+    double pr = 100.0 * (double)(g + d) / (double)sum;
+    int parallel = vv_gp_async || vv_disp_threaded;
+    vv_eprintf("[duty] host MIPS CPU %.3f ms (%.1f%%), GPU model %.3f ms (%.1f%%), display present %.3f ms (%.1f%%); "
+               "CPU vs render %.1f%% / %.1f%% (of CPU+GPU+disp = %.3f ms)%s\n",
+               cms, pc, gms, pg, dms, pd, pc, pr, sms,
+               parallel ? "; buckets may overlap wall (parallel threads)" : "");
 }

@@ -7,6 +7,7 @@
 #include "loader.h"
 #include "display.h"
 #include "dcache.h"
+#include "hw.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -193,8 +194,11 @@ static int walk(gctx *g, uint32_t gp_frame, uint32_t code, int verbose, uint32_t
 }
 
 int vv_gpu_run(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose) {
-    gctx g = { uc, 0, G_UC, 0, 0, 0 }; int nc;
-    return walk(&g, gp_frame, code, verbose, UINT32_MAX, &nc);
+    gctx g = { uc, 0, G_UC, 0, 0, 0 }; int nc, r;
+    uint64_t t0 = vv_mono_ns();
+    r = walk(&g, gp_frame, code, verbose, UINT32_MAX, &nc);
+    vv_duty_add_gpu_ns(vv_mono_ns() - t0, 1);   /* nested in emu/CPU thread (--sync) */
+    return r;
 }
 int vv_gpu_count(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose, uint64_t *pixels, int *ncmds, int *host_only) {
     gctx g = { uc, 0, G_COUNT, 0, 0, 0 };
@@ -203,7 +207,9 @@ int vv_gpu_count(uc_engine *uc, uint32_t gp_frame, uint32_t code, int verbose, u
 }
 void vv_gpu_draw_uc(uc_engine *uc, uint32_t gp_frame, uint32_t code, int ncmds) {
     gctx g = { uc, 0, G_UC, 1, 0, 0 }; int nc;   /* the stores of vv_gpu_run, no stats / messages */
+    uint64_t t0 = vv_mono_ns();
     walk(&g, gp_frame, code, 0, (uint32_t)ncmds, &nc);
+    vv_duty_add_gpu_ns(vv_mono_ns() - t0, 1);   /* inline on emu thread */
 }
 
 /* ---- GPU worker thread (docs/MULTITHREADING-PLAN.md section 4.3): one job slot ---- */
@@ -222,7 +228,9 @@ static void *worker(void *a) {
         uint32_t f = job_frame, c = job_code; int n = job_cmds;
         pthread_mutex_unlock(&wk_mx);
         gctx g = { NULL, 0, G_HOST, 1, 0, 0 }; int nc;
+        uint64_t t0 = vv_mono_ns();
         walk(&g, f, c, 0, (uint32_t)n, &nc);
+        vv_duty_add_gpu_ns(vv_mono_ns() - t0, 0);   /* GPU worker: parallel with CPU */
         pthread_mutex_lock(&wk_mx);
         atomic_store_explicit(&wk_done, 1, memory_order_release);
         pthread_cond_broadcast(&wk_fin);

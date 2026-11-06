@@ -222,6 +222,38 @@ def t_fast_threads_windowed():
     return ok
 
 
+
+def t_duty_cycle_reported():
+    """[duty] end-of-run line: CPU vs (GPU model + display); GPU time on gpcmds sync."""
+    # CPU-only: loop should report 100% CPU, 0% GPU/display (headless --sync)
+    r = run_cpu("fast", "loop", 0x40000000, "--expect", "t0=30", at_max=50000)
+    err = r.stderr.decode(errors="replace")
+    if r.returncode != 0 or "[duty] host MIPS CPU" not in err or "CPU vs render" not in err:
+        print(f"  duty_loop: FAIL\n{err[-800:]}"); return False
+    if "GPU model 0.000 ms" not in err or "display present 0.000 ms" not in err:
+        # allow tiny noise but expect zeros headless no-gpu
+        if "GPU model 0." not in err:
+            print(f"  duty_loop: FAIL expected zero GPU\n{err[-400:]}"); return False
+    print("  duty_loop: PASS")
+    # GPU draw: gpcmds+gplaunch — GPU model bucket > 0 for fast and unicorn
+    ok = True
+    for cpu in ("fast", "unicorn"):
+        args = [VV, *BASE, f"--cpu={cpu}",
+                "--load", f"{binfile('gpcmds')}@0x12003000",
+                "--load", f"{binfile('gplaunch')}@0x40000000",
+                "--entry", "0x40000000"]
+        rr = subprocess.run(args, stdin=subprocess.DEVNULL, capture_output=True, env=ENV)
+        e = rr.stderr.decode(errors="replace")
+        m = re.search(r"\[duty\] host MIPS CPU ([0-9.]+) ms \(([0-9.]+)%\), GPU model ([0-9.]+) ms \(([0-9.]+)%\), display present ([0-9.]+) ms", e)
+        if rr.returncode != 0 or not m:
+            print(f"  duty_gpcmds_{cpu}: FAIL\n{e[-800:]}"); ok = False; continue
+        gpu_ms = float(m.group(3)); cpu_pct = float(m.group(2)); rend_need = "CPU vs render" in e
+        if gpu_ms <= 0.0 or not rend_need:
+            print(f"  duty_gpcmds_{cpu}: FAIL gpu_ms={gpu_ms} line={m.group(0)}"); ok = False; continue
+        print(f"  duty_gpcmds_{cpu}: PASS (CPU {m.group(1)}ms {cpu_pct}%, GPU {gpu_ms}ms)")
+    return ok
+
+
 # ---- Quirk on matrices (MIPS150 intentional deviations; Unicorn reference under +quirk) ----
 EMU_ON = [
     ("quirk/emu_hilo", 0x40000000, ["--quirks=+hilo"], ["t2=0"]),
@@ -401,6 +433,7 @@ def main():
         t_fast_emu_load_use_on,
         t_fast_lwlr_mmio_side_read,
         t_fast_threads_windowed,
+        t_duty_cycle_reported,
         t_emu_on_matrix,
         t_emu_off_matrix,
         t_diff_loop_alias,

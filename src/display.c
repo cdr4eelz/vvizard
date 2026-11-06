@@ -7,6 +7,7 @@
 #include "lcd.h"
 #include "lcdfont.h"
 #include "gpu.h"
+#include "hw.h"
 #include <raylib.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -219,9 +220,11 @@ int vv_disp_key_take(void) {
 }
 static void draw(uc_engine *uc) {
     if (!have_window) return;
+    uint64_t t0 = vv_mono_ns();
     grab(uc, rgba);
     UpdateTexture(tex, rgba);
     BeginDrawing(); render(uc); EndDrawing();
+    vv_duty_add_disp_ns(vv_mono_ns() - t0, 1);  /* --sync: same thread as CPU */
     collect_keys();                         /* EndDrawing polled; queues reset next poll */
     last_draw = last_poll = now();
 }
@@ -250,6 +253,7 @@ int vv_disp_init(int want_window) {
 static double last_pub;
 static void publish(uc_engine *uc) {
     disp_slot *sl = &slots[tb_back];
+    uint64_t t0 = vv_mono_ns();
     uint32_t base = VV_FRAME0 + (cur_frame << VV_FSHIFT);
     vv_gpu_settle(cur_frame);               /* (shows the finished draw; the guest is not affected) */
     for (int y = 0; y < VV_SCREEN_H; y++) {
@@ -265,6 +269,7 @@ static void publish(uc_engine *uc) {
     for (int i = 0; i < VV_LCD_CHARS; i++) sl->lcd[i] = vv_lcd_get((unsigned)i);
     sl->frame = cur_frame;
     tb_back = atomic_exchange_explicit(&tb_mid, tb_back | SLOT_FRESH, memory_order_acq_rel) & 3u;
+    vv_duty_add_disp_ns(vv_mono_ns() - t0, 1);  /* emu-thread publish (nested in CPU span) */
     last_pub = t;
     wake_main();
 }
@@ -300,12 +305,14 @@ void vv_disp_emu_done(uc_engine *uc) {
 }
 static int draw_fresh(void) {               /* main: draw the middle slot if it is new */
     if (!(atomic_load_explicit(&tb_mid, memory_order_acquire) & SLOT_FRESH)) return 0;
+    uint64_t t0 = vv_mono_ns();
     tb_front = atomic_exchange_explicit(&tb_mid, tb_front, memory_order_acq_rel) & 3u;
     const disp_slot *sl = &slots[tb_front];
     for (int y = 0; y < VV_SCREEN_H; y++) swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, sl->px[y]);
     klq_drain();
     UpdateTexture(tex, rgba);
     BeginDrawing(); ClearBackground(BLACK); DrawTexture(tex, 0, 0, WHITE); draw_strip(sl->l1, sl->l2, sl->lcd); EndDrawing();
+    vv_duty_add_disp_ns(vv_mono_ns() - t0, 0);  /* main thread: parallel with emu CPU */
     collect_keys();                          /* EndDrawing polled */
     return 1;
 }

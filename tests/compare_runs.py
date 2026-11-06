@@ -9,7 +9,7 @@ the event trace, the exit status, --dump-frame / script PPMs and the stderr line
 state ([hw] counters, [irq], registers, [exit], [expect], [quirk] reports, [gpu]) must be byte-identical.
 Use it for like-for-like comparisons (old build vs --sync, threaded vs threaded, window vs headless):
 --sync vs --threads=on differs, by design, in every case that launches the GPU (busy time, [gpu] lines).
-Timing lines ([frame], [run], [quirk] emulating / warn on, [hw] GPU) are left out.  Cases: every
+Timing lines ([frame], [run], [duty], [quirk] emulating / warn on, [hw] GPU) are left out.  Cases: every
 tests/hw and tests/*.s program, and the proj7 player (default program) headless (and with
 --window: in a window), plain and with the test_player.py key script."""
 import os, re, shlex, subprocess, sys, tempfile, glob, filecmp
@@ -20,7 +20,7 @@ from vvprog import prog
 
 ENV = dict(os.environ, LD_LIBRARY_PATH=os.path.expanduser("~/.local/lib"))
 ENV.pop("VVIZARD_QUIRKS", None)
-SKIP = re.compile(r"^\[(frame|run|load|bios|app|ddr|script|disp|raylib)\]|^\[quirk\] (emulating|warn on|halt on)|^\[hw\] GPU \(threaded\)")
+SKIP = re.compile(r"^\[(frame|run|load|bios|app|ddr|script|disp|raylib|duty)\]|^\[quirk\] (emulating|warn on|halt on)|^\[hw\] GPU \(threaded\)")
 
 
 def cases(window, insns):
