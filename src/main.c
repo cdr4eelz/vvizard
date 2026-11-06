@@ -537,6 +537,14 @@ static uint32_t rd_guest(uc_engine *uc, uint32_t a, unsigned n) {
     for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
     return v;
 }
+/* Like rd_guest but sets *ok from uc_mem_read (0 on failure). */
+static uint32_t rd_guest_ok(uc_engine *uc, uint32_t a, unsigned n, int *ok) {
+    unsigned char b[4] = { 0 }; uint32_t v = 0;
+    if (uc_mem_read(uc, a, b, n)) { *ok = 0; return 0; }
+    for (unsigned i = 0; i < n; i++) v |= (uint32_t)b[guest_big ? i : n - 1 - i] << (8 * (n - 1 - i));
+    *ok = 1;
+    return v;
+}
 static uint32_t sm_reader(void *ctx, uint32_t a, unsigned n) { return rd_guest((uc_engine *)ctx, a, n); }
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2) {
     snprintf(l1, n1, "%s  insns %llu  PF_FRAME %u (writes %llu)  GP %u  IRQ %llu%s",
@@ -1044,9 +1052,9 @@ int main(int argc, char **argv) {
     if (dump_be32_n > 0) {
         for (int i = 0; i < dump_be32_n; i++) {
             uint32_t a = dump_be32_addr + (uint32_t)i * 4u;
-            /* Use the same guest read path as --dump-sm (uc_mem_read), not only host vv_ram. */
-            uint32_t v = rd_guest(uc, a, 4);
-            vv_eprintf("[dump-be32] a=0x%08x v=0x%08x ok=1\n", a, v);
+            int ok = 0;
+            uint32_t v = rd_guest_ok(uc, a, 4, &ok);
+            vv_eprintf("[dump-be32] a=0x%08x v=0x%08x ok=%d\n", a, ok ? v : 0, ok);
         }
     }
     if (halt_stores)                            /* after the register dump (also after a quirk halt's) */

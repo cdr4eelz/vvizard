@@ -37,10 +37,20 @@ Not compared: wall time, cycle count, IRQ/device timing (out of scope).
 
 ## Quirks
 
-Default vvizard quirks match MIPS150 RTL (lb/lh zero-extend, lwl→0, overflow wrap, …).
-Undefined / uninit / branch-in-delay are not used as oracles.
+Default vvizard quirks match current MIPS150 RTL behavior used by the corpus:
+`lwl`→0 (`+lwlr`), addiu wrap (`+overflow`), etc. **`lb`/`lh` sign-extend**
+(MIPS-I / current CPUMIPS; the `lb-sign` quirk defaults **off** = current HW).
+Case `lb_sext` encodes that. Undefined / uninit / branch-in-delay are not oracles.
+
+Prefer `CS150_ROOT` / `--cs150-root` pointing at the user's current tree
+(e.g. UBU24 `/home/ejr/shared/cs150` or the reviewer extract
+`…/cs150-auth-0ff61b6`). Unset discovery prefers `$HOME/shared/cs150` and
+auth extracts before older snapshots like `cs150-1245`; always check the printed
+`RTL_REVISION`.
 
 ## Self-tests
 
 - Injected signature mismatch must FAIL
 - Infinite-loop program must TIMEOUT
+- Discovery order prefers live/auth trees before older snapshots
+- `--dump-be32` on an unmapped address reports `ok=0` (no fake pass)

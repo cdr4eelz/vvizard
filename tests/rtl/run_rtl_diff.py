@@ -38,35 +38,59 @@ def _looks_like_cs150(p: Path) -> bool:
     ).is_file()
 
 
+def discovery_candidates(root: Path | None = None) -> list[Path]:
+    """Ordered discovery paths when CS150_ROOT/--cs150-root unset.
+
+    Prefer live user trees ($HOME/shared/cs150) and named auth extracts before
+    unrelated older snapshots such as cs150-1245. Print rtl_revision(path);
+    do not infer freshness from directory names alone.
+    """
+    root = root or ROOT
+    cands: list[Path] = []
+    home = os.environ.get("HOME")
+    if home:
+        cands.append(Path(home) / "shared/cs150")
+    for rel in (
+        "../cs150-auth-0ff61b6",
+        "../../cs150-auth-0ff61b6",
+        "cs150-auth-0ff61b6",
+        "../cs150",
+        "../../cs150",
+        "../../../cs150",
+        "cs150",
+        "../cs150-1245",
+        "../../cs150-1245",
+        "cs150-1245",
+    ):
+        cands.append(root / rel)
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for pth in cands:
+        try:
+            rp = pth.expanduser().resolve()
+        except Exception:
+            continue
+        if rp in seen:
+            continue
+        seen.add(rp)
+        out.append(rp)
+    return out
+
+
 def resolve_cs150(explicit: str | None) -> Path:
     # Explicit flag or CS150_ROOT env: require that path (no silent fallback).
     forced = explicit or os.environ.get("CS150_ROOT")
     if forced:
-        p = Path(forced).expanduser().resolve()
-        if not _looks_like_cs150(p):
+        pth = Path(forced).expanduser().resolve()
+        if not _looks_like_cs150(pth):
             die(
-                f"CS150_ROOT={p} is not a usable cs150 tree "
+                f"CS150_ROOT={pth} is not a usable cs150 tree "
                 "(need hardware/sim-icarus/tb/CoreHarness.v and hardware/src/cpu/CPUMIPS.v)"
             )
-        return p
-    # Discovery only when neither flag nor env set (portable layouts; not a single hard-coded host path).
-    cands = []
-    for rel in ("../../cs150-1245", "../cs150", "../../cs150", "../../../cs150",
-                "../cs150-1245", "cs150"):
-        cands.append((ROOT / rel).resolve())
-    if os.environ.get("HOME"):
-        cands.append(Path(os.environ["HOME"]) / "shared/cs150")
-    seen = set()
-    for p in cands:
-        try:
-            p = p.resolve()
-        except Exception:
-            continue
-        if p in seen:
-            continue
-        seen.add(p)
-        if _looks_like_cs150(p):
-            return p
+        return pth
+    for pth in discovery_candidates():
+        if _looks_like_cs150(pth):
+            return pth
     die(
         "CS150_ROOT not found. Set --cs150-root or env CS150_ROOT to a cs150 tree containing "
         "hardware/sim-icarus/tb/CoreHarness.v and hardware/src/cpu/CPUMIPS.v"
@@ -92,13 +116,17 @@ def tool_versions() -> dict:
 
 
 def rtl_revision(cs150: Path) -> str:
+    auth = cs150 / ".AUTH_REV"
+    if auth.is_file():
+        rev = auth.read_text().strip().splitlines()[0].strip()
+        if rev:
+            return rev
     try:
         r = subprocess.run(["git", "-C", str(cs150), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
         if r.returncode == 0:
             return r.stdout.strip()
     except Exception:
         pass
-    # content hash of key files
     h = hashlib.sha256()
     for rel in ("hardware/src/cpu/CPUMIPS.v", "hardware/sim-icarus/tb/CoreHarness.v"):
         h.update((cs150 / rel).read_bytes())
@@ -206,16 +234,31 @@ def run_emu(cpu: str, bil: Path, n_pairs: int, timeout_s: float) -> tuple[list[t
         m = DUMP.match(line.strip())
         if m:
             words[int(m.group(1), 16)] = (int(m.group(2), 16), int(m.group(3)))
-    magic = words.get(0x50000000, (0, 0))[0]
-    count = words.get(0x50000004, (0, 0))[0]
+
+    def need(addr: int) -> int:
+        if addr not in words:
+            raise ValueError(f"missing dump-be32 for a=0x{addr:08x}")
+        v, okflag = words[addr]
+        if not okflag:
+            raise ValueError(f"dump-be32 read failure a=0x{addr:08x} (ok=0)")
+        return v
+
+    try:
+        magic = need(0x50000000)
+        count = need(0x50000004)
+    except ValueError as e:
+        return [], err + f"\n({e})", r.returncode or 1
     pairs = []
     if magic != 0x600DC0DE:
         return [], err + f"\n(missing DONE_MAGIC got 0x{magic:08x})", r.returncode or 1
     base = 0x50000400
-    for i in range(count):
-        act = words.get(base + 8 * i, (0, 0))[0]
-        exp = words.get(base + 8 * i + 4, (0, 0))[0]
-        pairs.append((act, exp))
+    try:
+        for i in range(count):
+            act = need(base + 8 * i)
+            exp = need(base + 8 * i + 4)
+            pairs.append((act, exp))
+    except ValueError as e:
+        return [], err + f"\n({e})", r.returncode or 1
     return pairs, err, r.returncode
 
 
@@ -252,6 +295,60 @@ def selftest_compare_unit() -> bool:
         return False
     print("  selftest_compare_detects_mismatch: PASS")
     return True
+
+
+
+def selftest_discovery_order() -> bool:
+    """HOME/shared and auth extracts are ordered before older cs150-1245 snapshots."""
+    cands = discovery_candidates(ROOT)
+    texts = [str(p) for p in cands]
+    def idx(substr: str):
+        for i, s in enumerate(texts):
+            if substr in s:
+                return i
+        return None
+    home_i = idx("/shared/cs150")
+    auth_i = idx("cs150-auth-0ff61b6")
+    old_i = idx("cs150-1245")
+    ok = True
+    if home_i is not None and old_i is not None and home_i > old_i:
+        ok = False
+    if auth_i is not None and old_i is not None and auth_i > old_i:
+        ok = False
+    if ok:
+        print("  selftest_discovery_order: PASS")
+    else:
+        print(f"  selftest_discovery_order: FAIL order={texts[:8]}")
+    return ok
+
+
+def selftest_dump_be32_read_fail() -> bool:
+    """Invalid guest address must report ok=0; harness must not treat that as data."""
+    if not VV.is_file():
+        print("  selftest_dump_be32_read_fail: FAIL missing vvizard")
+        return False
+    with tempfile.TemporaryDirectory(prefix="vv_dumpfail_") as td:
+        bil = Path(td) / "b.bin"
+        bil.write_bytes((0x0000000D).to_bytes(4, "big"))
+        args = [
+            str(VV), "--sync", "--no-window", "--frame-clock=emulated", "--quiet-mmio",
+            "--no-random-ddr", "--no-bios", "--no-halt-on-quirk", "--max-insns", "20",
+            "--cpu=unicorn", "--load", f"{bil}@0x60000000", "--entry", "0x60000000",
+            "--dump-be32=0x90000000:1",
+        ]
+        r = subprocess.run(args, capture_output=True, env=ENV, timeout=15)
+        err = r.stderr.decode(errors="replace")
+        lines = [l for l in err.splitlines() if l.startswith("[dump-be32]")]
+        if not lines or "ok=0" not in lines[0]:
+            print(f"  selftest_dump_be32_read_fail: FAIL lines={lines!r}")
+            return False
+        fake = "[dump-be32] a=0x50000000 v=0x00000000 ok=0"
+        m = DUMP.match(fake.strip())
+        if not m or int(m.group(3)) != 0:
+            print("  selftest_dump_be32_read_fail: FAIL regex")
+            return False
+        print("  selftest_dump_be32_read_fail: PASS")
+        return True
 
 
 def selftest_timeout(cs150: Path, work: Path) -> bool:
@@ -297,13 +394,18 @@ def main(argv=None) -> int:
     if vers.get("mips-as") == "MISSING":
         die("mips-linux-gnu-as required to build case programs", 2)
 
+    forced = bool(args.cs150_root or os.environ.get("CS150_ROOT"))
     cs150 = resolve_cs150(args.cs150_root)
     rev = rtl_revision(cs150)
-    print(f"CS150_ROOT={cs150}")
+    print(f"CS150_ROOT={cs150} ({'explicit' if forced else 'discovered'})")
     print(f"RTL_REVISION={rev}")
 
     fails = 0
     if not selftest_compare_unit():
+        fails += 1
+    if not selftest_discovery_order():
+        fails += 1
+    if not selftest_dump_be32_read_fail():
         fails += 1
 
     with tempfile.TemporaryDirectory(prefix="vv_rtl_") as td:
