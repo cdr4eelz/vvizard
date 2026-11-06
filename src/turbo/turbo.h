@@ -16,7 +16,7 @@ typedef struct turbo {
     int gp_pending;
     uint64_t insns, max_insns, max_ns, t0, event_at, pf_at, pf_frames, cnt_base;
     uint64_t tx_at, rx_at, rx_next, host_at, irqs;
-    int tx_pending, rx_busy, rx_has; uint8_t rx_byte;
+    int tx_pending, rx_busy, rx_has; uint8_t rx_byte, rx_incoming;
     uint32_t pf_cur, pf_next, gp_frame, gp_code, gp_rframe, halt, halt_pc, random;
     uint64_t halt_stores, launches, drops;
     uint8_t lcd[32];
@@ -37,7 +37,7 @@ typedef struct {
     uint32_t entry, sp;
     uint64_t max_insns, max_ns;
     int window, exit_on_halt, dump_sm, dump_lcd;
-    const char *dump_frame, *screenshot;
+    const char *dump_frame;
 } turbo_opts;
 
 int turbo_init(turbo *t);
@@ -82,9 +82,22 @@ static inline void turbo_invalidate(turbo *t, uint32_t a) {
     if (__builtin_expect(atomic_load_explicit(&t->code_pages[p >> 6], memory_order_relaxed) & (1ull << (p & 63)), 0))
         atomic_fetch_add_explicit(&t->epoch, 1, memory_order_release);
 }
-static inline uint32_t turbo_load_mem(turbo *t, uint32_t a, unsigned size, int sign) {
+/* Spin-loop registers stay in the dispatcher's RAM/MMIO nibble fast path. */
+static inline __attribute__((always_inline)) uint32_t turbo_read_io(turbo *t, uint32_t a) {
+    switch (a & VV_MMIO_DECODE) {
+    case VV_OW_CNT_CYCLE: case VV_OW_CNT_INST: return (uint32_t)(t->insns - t->cnt_base);
+    case VV_OW_PF_FRAME: return VV_FRAME0 | (t->pf_cur << VV_FSHIFT);
+    case VV_OW_GP_STATE: {
+        int busy = atomic_load_explicit(&t->gpu_job, memory_order_acquire);
+        int fault = atomic_load_explicit(&t->gpu_fault, memory_order_relaxed);
+        return (t->pf_cur << 24) | (fault ? 0x8000u : 0) | (t->gp_rframe << 8) | (busy ? 0 : 31);
+    }
+    default: return turbo_mmio_read(t, a);
+    }
+}
+static inline __attribute__((always_inline)) uint32_t turbo_load_mem(turbo *t, uint32_t a, unsigned size, int sign) {
     uint32_t v = 0;
-    if ((a >> 28) == 8) { v = turbo_mmio_read(t, a); if (a & (size - 1)) return 0; }
+    if ((a >> 28) == 8) { v = turbo_read_io(t, a); if (a & (size - 1)) return 0; }
     else if (!(a & (size - 1))) {
         const uint8_t *p = turbo_ptr(t, a & ~3u, 4);
         if (p) v = turbo_word(p);
@@ -96,7 +109,7 @@ static inline uint32_t turbo_load_mem(turbo *t, uint32_t a, unsigned size, int s
     }
     return v;
 }
-static inline void turbo_store_mem(turbo *t, uint32_t a, unsigned size, uint32_t v) {
+static inline __attribute__((always_inline)) void turbo_store_mem(turbo *t, uint32_t a, unsigned size, uint32_t v) {
     unsigned k = a >> 28;
     if (k == 8) {
         if (a & (size - 1)) { (void)turbo_mmio_read(t, a); return; }

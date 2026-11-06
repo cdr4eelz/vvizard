@@ -14,12 +14,12 @@ void turbo_events(turbo *t) {
     t->event_count = t->count; t->event_insns = t->insns;
     if (t->tx_pending && t->insns >= t->tx_at) { t->tx_pending = 0; t->cause |= VV_IP_UATX; }
     if (t->rx_busy && t->insns >= t->rx_at) {
-        t->rx_busy = 0; t->rx_has = 1; t->rx_next = t->rx_at + VV_UART_RX_FRAME; t->cause |= VV_IP_UARX;
+        t->rx_busy = 0; t->rx_has = 1; t->rx_byte = t->rx_incoming; t->rx_next = t->rx_at + VV_UART_RX_FRAME; t->cause |= VV_IP_UARX;
     }
     if (t->insns >= t->host_at) {
         t->host_at = t->insns + 4096;
         if (!t->rx_busy && t->insns >= t->rx_next && !(t->rx_has && vv_host_rx_paced()) && vv_host_rx_avail(1)) {
-            t->rx_byte = vv_host_rx_take(); t->rx_busy = 1; t->rx_at = t->insns + VV_UART_RX_FRAME;
+            t->rx_incoming = vv_host_rx_take(); t->rx_busy = 1; t->rx_at = t->insns + VV_UART_RX_FRAME;
         }
         if (t->max_ns && vv_mono_ns() - t->t0 >= t->max_ns) t->stopped = 1;
         vv_term_tick();
@@ -57,8 +57,11 @@ uint32_t turbo_mmio_read(turbo *t, uint32_t a) {
     case VV_OW_UARX_DATA: t->rx_has = 0; t->rx_next = t->insns + VV_UART_RX_FRAME; return t->rx_byte;
     case VV_OW_CNT_CYCLE: case VV_OW_CNT_INST: return (uint32_t)(t->insns - t->cnt_base);
     case VV_OW_PF_FRAME: return VV_FRAME0 | (t->pf_cur << VV_FSHIFT);
-    case VV_OW_GP_STATE: return (t->pf_cur << 24) | (atomic_load_explicit(&t->gpu_fault, memory_order_relaxed) ? 0x8000u : 0) |
-        (t->gp_rframe << 8) | (atomic_load_explicit(&t->gpu_job, memory_order_acquire) ? 0 : 31);
+    case VV_OW_GP_STATE: {
+        int busy = atomic_load_explicit(&t->gpu_job, memory_order_acquire);
+        int fault = atomic_load_explicit(&t->gpu_fault, memory_order_relaxed);
+        return (t->pf_cur << 24) | (fault ? 0x8000u : 0) | (t->gp_rframe << 8) | (busy ? 0 : 31);
+    }
     case VV_OW_HALTVAL: return t->halt;
     case VV_OW_RANDOM32: return random_at(t, t->insns ? t->insns - 1 : 0);
     default: return 0;

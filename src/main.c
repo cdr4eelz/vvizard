@@ -866,8 +866,8 @@ int main(int argc, char **argv) {
         {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
-    uint32_t emul = vv_quirk_default(), qdflt = vv_quirk_default();
-    const char *qenv = getenv("VVIZARD_QUIRKS"), *qdet = NULL, *qquiet = NULL;
+    uint32_t emul = is_turbo ? 0 : vv_quirk_default(), qdflt = is_turbo ? 0 : vv_quirk_default();
+    const char *qenv = is_turbo ? NULL : getenv("VVIZARD_QUIRKS"), *qdet = NULL, *qquiet = NULL;
     /* default: no quirk detection (no per-insn decode cost on --cpu=fast); only the device-side guest-bug
      * detectors (tx-busy, rx-overrun, irq-storm, gp-busy: no decode) warn.  --halt-on-quirk / --warn-on-quirk
      * turn detection on; --no-halt-on-quirk keeps all guest-bug detectors warning (no halt). */
@@ -935,7 +935,10 @@ int main(int argc, char **argv) {
         case O_CPU:
             if (!strcmp(optarg, "unicorn")) opt_cpu = VV_CPU_UNICORN;
             else if (!strcmp(optarg, "fast")) opt_cpu = VV_CPU_FAST;
-            else if (!strcmp(optarg, "turbo")) opt_cpu = 2;
+            else if (!strcmp(optarg, "turbo")) {
+                if (!is_turbo) { vv_eprintf("turbo requires the full --cpu=turbo option\n"); return 2; }
+                opt_cpu = 2;
+            }
             else { vv_eprintf("--cpu: expected unicorn, fast or turbo, not '%s'\n", optarg); return 2; } break;
         case O_DDR_STALLS: {
             unsigned rd = VV_MS_READ_STALLS_DFLT, wr = VV_MS_WRITE_STALLS_DFLT;

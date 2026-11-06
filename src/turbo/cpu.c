@@ -7,7 +7,7 @@
 #include <limits.h>
 #define BB_SIZE 32
 #define BB_COUNT 4096
-enum { O_NOP, O_ZERO, O_BREAK, O_ADDI, O_ADD, O_SUB, O_ANDI, O_ORI, O_XORI, O_LUI, O_AND, O_OR, O_XOR, O_NOR, O_SLL, O_SRL, O_SRA, O_SLLV, O_SRLV, O_SRAV, O_SLT, O_SLTU, O_SLTI, O_SLTIU, O_LW, O_LB, O_LBU, O_LH, O_LHU, O_SW, O_SB, O_SH, O_LOADZERO, O_ADDRZERO, O_BEQ, O_BNE, O_BLEZ, O_BGTZ, O_BLTZ, O_BGEZ, O_BLTZAL, O_BGEZAL, O_J, O_JAL, O_JR, O_JALR, O_MFC0, O_MTC0 };
+enum { O_NOP, O_ZERO, O_BREAK, O_ADDI, O_ADD, O_SUB, O_ANDI, O_ORI, O_XORI, O_LUI, O_AND, O_OR, O_XOR, O_NOR, O_SLL, O_SRL, O_SRA, O_SLLV, O_SRLV, O_SRAV, O_SLT, O_SLTU, O_SLTI, O_SLTIU, O_LW, O_LB, O_LBU, O_LH, O_LHU, O_SW, O_SB, O_SH, O_LOADZERO, O_ADDRZERO, O_BEQ, O_BNE, O_BLEZ, O_BGTZ, O_BLTZ, O_BGEZ, O_BLTZAL, O_BGEZAL, O_J, O_JAL, O_JR, O_JALR, O_MFC0, O_MTC0, O_BEQ_NOP, O_BNE_NOP, O_BLEZ_NOP, O_BGTZ_NOP, O_BLTZ_NOP, O_BGEZ_NOP, O_BLTZAL_NOP, O_BGEZAL_NOP, O_J_NOP, O_JAL_NOP, O_JR_NOP, O_JALR_NOP };
 typedef struct {
     void *handler;
     uint32_t pc, target, uimm;
@@ -28,6 +28,7 @@ static void decode(ir *o, uint32_t pc, uint32_t w, void **labels) {
     o->pc = pc; o->imm = (int16_t)w; o->uimm = w & 65535;
     o->target = pc + 4 + (uint32_t)((int32_t)o->imm * 4);
     o->op = O_NOP;
+    if (!w) { o->handler = labels[O_NOP]; return; }
     switch (op) {
     case 0:
         switch (fn) {
@@ -89,6 +90,8 @@ static void decode(ir *o, uint32_t pc, uint32_t w, void **labels) {
     case 40: o->op = O_SB; break;
     case 41: o->op = O_SH; break;
     case 43: o->op = O_SW; break;
+    case 42: case 46: /* ByteAccess4 mask=0: no store; MMIO sees a read. */
+        o->op = O_LOADZERO; o->rt = 0; break;
     case 16:
         if ((o->rs == 0 || o->rs == 4) && !(w & 0x7f8)) o->op = o->rs == 0 ? O_MFC0 : O_MTC0;
         break;
@@ -107,7 +110,12 @@ static block *lookup(turbo *t, uint32_t pc, unsigned gen, void **labels) {
         if (p) turbo_mark(t, pc);
         decode(&b->code[i], pc, p ? turbo_word(p) : 0, labels);
         b->n = i + 1;
-        if (slot || b->code[i].op == O_BREAK) break;
+        if (slot) {
+            if (b->code[i].op == O_NOP)
+                b->code[i - 1].handler = labels[O_BEQ_NOP + b->code[i - 1].op - O_BEQ];
+            break;
+        }
+        if (b->code[i].op == O_BREAK) break;
         if (branch(b->code[i].op)) {
             /* Never split branch+slot across blocks. */
             if (i == BB_SIZE - 1) { b->n--; break; }
@@ -119,8 +127,13 @@ static block *lookup(turbo *t, uint32_t pc, unsigned gen, void **labels) {
     return b;
 }
 
+/* Preserve distinct dispatch sites: GCC otherwise cross-jumps the handler
+ * tails back into one central indirect branch. No generated host code. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, noclone, optimize("no-crossjumping", "no-gcse")))
+#endif
 void turbo_cpu(turbo *t) {
-    void *labels[] = {&&L_NOP, &&L_ZERO, &&L_BREAK, &&L_ADDI, &&L_ADD, &&L_SUB, &&L_ANDI, &&L_ORI, &&L_XORI, &&L_LUI, &&L_AND, &&L_OR, &&L_XOR, &&L_NOR, &&L_SLL, &&L_SRL, &&L_SRA, &&L_SLLV, &&L_SRLV, &&L_SRAV, &&L_SLT, &&L_SLTU, &&L_SLTI, &&L_SLTIU, &&L_LW, &&L_LB, &&L_LBU, &&L_LH, &&L_LHU, &&L_SW, &&L_SB, &&L_SH, &&L_LOADZERO, &&L_ADDRZERO, &&L_BEQ, &&L_BNE, &&L_BLEZ, &&L_BGTZ, &&L_BLTZ, &&L_BGEZ, &&L_BLTZAL, &&L_BGEZAL, &&L_J, &&L_JAL, &&L_JR, &&L_JALR, &&L_MFC0, &&L_MTC0};
+    void *labels[] = {&&L_NOP, &&L_ZERO, &&L_BREAK, &&L_ADDI, &&L_ADD, &&L_SUB, &&L_ANDI, &&L_ORI, &&L_XORI, &&L_LUI, &&L_AND, &&L_OR, &&L_XOR, &&L_NOR, &&L_SLL, &&L_SRL, &&L_SRA, &&L_SLLV, &&L_SRLV, &&L_SRAV, &&L_SLT, &&L_SLTU, &&L_SLTI, &&L_SLTIU, &&L_LW, &&L_LB, &&L_LBU, &&L_LH, &&L_LHU, &&L_SW, &&L_SB, &&L_SH, &&L_LOADZERO, &&L_ADDRZERO, &&L_BEQ, &&L_BNE, &&L_BLEZ, &&L_BGTZ, &&L_BLTZ, &&L_BGEZ, &&L_BLTZAL, &&L_BGEZAL, &&L_J, &&L_JAL, &&L_JR, &&L_JALR, &&L_MFC0, &&L_MTC0, &&L_BEQ_NOP, &&L_BNE_NOP, &&L_BLEZ_NOP, &&L_BGTZ_NOP, &&L_BLTZ_NOP, &&L_BGEZ_NOP, &&L_BLTZAL_NOP, &&L_BGEZAL_NOP, &&L_J_NOP, &&L_JAL_NOP, &&L_JR_NOP, &&L_JALR_NOP};
     t->cache = calloc(BB_COUNT, sizeof(block));
     if (!t->cache) { vv_eprintf("[turbo] cannot allocate decode cache\n"); t->error = t->stopped = 1; return; }
     block *b = NULL, *prev = NULL;
@@ -261,7 +274,7 @@ L_SLTIU: {
     }
 L_LW: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         uint32_t old = t->gpr[o->rt];
         uint32_t v = turbo_load_mem(t, a, 4, 0);
         if (o->rt) { t->load_rt = o->rt; t->load_old = old; t->gpr[o->rt] = v; }
@@ -269,7 +282,7 @@ L_LW: {
     }
 L_LB: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         uint32_t old = t->gpr[o->rt];
         uint32_t v = turbo_load_mem(t, a, 1, 1);
         if (o->rt) { t->load_rt = o->rt; t->load_old = old; t->gpr[o->rt] = v; }
@@ -277,7 +290,7 @@ L_LB: {
     }
 L_LBU: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         uint32_t old = t->gpr[o->rt];
         uint32_t v = turbo_load_mem(t, a, 1, 0);
         if (o->rt) { t->load_rt = o->rt; t->load_old = old; t->gpr[o->rt] = v; }
@@ -285,7 +298,7 @@ L_LBU: {
     }
 L_LH: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         uint32_t old = t->gpr[o->rt];
         uint32_t v = turbo_load_mem(t, a, 2, 1);
         if (o->rt) { t->load_rt = o->rt; t->load_old = old; t->gpr[o->rt] = v; }
@@ -293,7 +306,7 @@ L_LH: {
     }
 L_LHU: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         uint32_t old = t->gpr[o->rt];
         uint32_t v = turbo_load_mem(t, a, 2, 0);
         if (o->rt) { t->load_rt = o->rt; t->load_old = old; t->gpr[o->rt] = v; }
@@ -301,28 +314,28 @@ L_LHU: {
     }
 L_SW: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         turbo_store_mem(t, a, 4, rt);
         if (atomic_load_explicit(&t->epoch, memory_order_acquire) != gen) force_exit = 1;
         NEXT();
     }
 L_SB: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         turbo_store_mem(t, a, 1, rt);
         if (atomic_load_explicit(&t->epoch, memory_order_acquire) != gen) force_exit = 1;
         NEXT();
     }
 L_SH: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); }
         turbo_store_mem(t, a, 2, rt);
         if (atomic_load_explicit(&t->epoch, memory_order_acquire) != gen) force_exit = 1;
         NEXT();
     }
 L_LOADZERO: {
         uint32_t a = rs + (uint32_t)(int32_t)o->imm;
-        if ((a >> 28) == 8) { CLOCK(); turbo_events(t); (void)turbo_mmio_read(t, a); }
+        if ((a >> 28) == 8) { CLOCK(); if (t->insns >= t->event_at) turbo_events(t); (void)turbo_mmio_read(t, a); }
         if (o->rt) { t->load_rt = o->rt; t->load_old = t->gpr[o->rt]; t->gpr[o->rt] = 0; }
         NEXT();
     }
@@ -391,7 +404,7 @@ L_JALR: {
         NEXT();
     }
 L_MFC0: {
-        CLOCK(); turbo_events(t);
+        CLOCK(); if (t->insns >= t->event_at) turbo_events(t);
         uint32_t v = o->rd == 9 ? t->count : o->rd == 11 ? t->compare : o->rd == 12 ? t->status : o->rd == 13 ? t->cause : o->rd == 14 ? t->epc : 0;
         WRITE(o->rt, v);
         NEXT();
@@ -406,6 +419,90 @@ L_MTC0: {
         }
         t->event_at = t->insns + 1;
         NEXT();
+    }
+L_BEQ_NOP: {
+        has_target = 1;
+        int taken = rs == rt; target = taken ? o->target : o->pc + 8; edge = taken;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_BNE_NOP: {
+        has_target = 1;
+        int taken = rs != rt; target = taken ? o->target : o->pc + 8; edge = taken;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_BLEZ_NOP: {
+        has_target = 1;
+        int taken = (int32_t)rs <= 0; target = taken ? o->target : o->pc + 8; edge = taken;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_BGTZ_NOP: {
+        has_target = 1;
+        int taken = (int32_t)rs > 0; target = taken ? o->target : o->pc + 8; edge = taken;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_BLTZ_NOP: {
+        has_target = 1;
+        int taken = (int32_t)rs < 0; target = taken ? o->target : o->pc + 8; edge = taken;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_BGEZ_NOP: {
+        has_target = 1;
+        int taken = (int32_t)rs >= 0; target = taken ? o->target : o->pc + 8; edge = taken;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_BLTZAL_NOP: {
+        has_target = 1;
+        int taken = (int32_t)rs < 0; target = taken ? o->target : o->pc + 8; edge = taken; if (taken) WRITE(31, o->pc + 8);
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_BGEZAL_NOP: {
+        has_target = 1;
+        int taken = (int32_t)rs >= 0; target = taken ? o->target : o->pc + 8; edge = taken; if (taken) WRITE(31, o->pc + 8);
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_J_NOP: {
+        has_target = 1;
+        target = o->target; edge = 1;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_JAL_NOP: {
+        has_target = 1;
+        WRITE(31, o->pc + 8); target = o->target; edge = 1;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_JR_NOP: {
+        has_target = 1;
+        target = rs; edge = 2;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
+    }
+L_JALR_NOP: {
+        has_target = 1;
+        WRITE(o->rd, o->pc + 8); target = rs; edge = 2;
+        /* Fold the decoded nop; a max-insns cut may stop before it. */
+        if (!budget) { t->pc = o->pc + 4; goto stop; }
+        ++n; ++o; goto block_end;
     }
 block_end:
     CLOCK();
