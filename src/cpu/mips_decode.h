@@ -1,4 +1,4 @@
-/* mips_decode.h - instruction-field helpers shared by the Unicorn quirk path and the fast backend.
+/* mips_decode.h - instruction-field helpers shared by the Unicorn quirk path and the fast2 backend.
  * These match the historical copies in quirk.c / main.c.  IRQ deferral uses vv_is_branch (every
  * REGIMM, including traps).  Load-use / delay-slot detection uses vv_is_cti (real control transfers
  * only: REGIMM rt with bits [3:2] clear, i.e. bltz/bgez/likely and the al forms). */

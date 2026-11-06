@@ -24,8 +24,8 @@
  * is untouched and is not these tags.
  */
 #include "rtl.h"
-#include "cpu/fast/fast.h"
-#include "cpu/fast/decode.h"
+#include "cpu/fast2/fast2.h"
+#include "cpu/fast2/decode.h"
 #include "cpu/service.h"
 #include "cpu/irq.h"
 #include "cpu/backend.h"
@@ -86,7 +86,7 @@ static int dc_stall(uint32_t pc) {
     vv_decode_at(pc, &d);
     if (d.op != OP_MEM) return 0;
     int store = (d.flags & FL_STORE) != 0;
-    uint32_t addr = (d.rs ? vv_fast_gpr(d.rs) : 0) + (uint32_t)d.imm;
+    uint32_t addr = (d.rs ? vv_fast2_gpr(d.rs) : 0) + (uint32_t)d.imm;
     if ((d.flags & FL_ADDR0) && vv_quirk_on(VV_Q_RESERVED)) addr = 0;
     if (mem_dropped(&d, addr)) return 0;
     unsigned nb = addr >> 28;
@@ -118,7 +118,7 @@ static void rtl_inval(uint32_t lo, uint32_t hi) {
 uc_err vv_rtl_run(uc_engine *uc, uint32_t entry, uint32_t until, int has_until) {
     memset(icache, 0, sizeof icache);
     memset(dcache_t, 0, sizeof dcache_t);
-    vv_fast_init(uc, entry);
+    vv_fast2_init(uc, entry);
     bb_inval = vv_code_invalidate;
     vv_code_invalidate = rtl_inval;
     uint32_t pc = entry;
@@ -126,11 +126,11 @@ uc_err vv_rtl_run(uc_engine *uc, uint32_t entry, uint32_t until, int has_until) 
         if (has_until && pc == until) break;
         stall_cycles(uc, ic_stall(pc) + dc_stall(pc));
         if (vv_guest_stopping() || vv_quirk_halted) break;
-        if (vv_fast_fetch_aborts(pc)) return UC_ERR_EXCEPTION;
+        if (vv_fast2_fetch_aborts(pc)) return UC_ERR_EXCEPTION;
         if (vv_svc_enter_at(uc, pc, vv_hw_now() + 1)) break;
         uint32_t npc = pc;
         if (vv_irqs_on() && vv_irq_step(NULL, pc, &npc)) {
-            vv_fast_cancel_lu();
+            vv_fast2_cancel_lu();
             vv_quirk_cancel();
             if (!vv_quirk_halted && vv_svc_leave(uc, pc)) break;
             if (vv_quirk_halted) break;
@@ -139,9 +139,9 @@ uc_err vv_rtl_run(uc_engine *uc, uint32_t entry, uint32_t until, int has_until) 
         }
         if (vv_quirk_halted) break;
         if (vv_svc_leave(uc, pc)) break;
-        if (vv_fast_step(uc, &pc)) break;
+        if (vv_fast2_step(uc, &pc)) break;
     }
-    /* Same as vv_fast_run: a printed CPU exception returns OK; a refused fetch does not. */
-    if (vv_fast_unhandled()) return UC_ERR_EXCEPTION;
+    /* Same as vv_fast2_run: a printed CPU exception returns OK; a refused fetch does not. */
+    if (vv_fast2_unhandled()) return UC_ERR_EXCEPTION;
     return UC_ERR_OK;
 }

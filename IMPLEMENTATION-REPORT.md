@@ -1,6 +1,6 @@
 # Implementation report
 
-Branch `feat/custom-mips-backend`. Implementation commit `c0329201f114b0aea72cbceb927b4c60eff41d21` (base `731faab48f947bfc3f122294812791e06fc0deed`). Unicorn stays the default CPU. `--cpu=fast` is optional. `--cpu=rtl` exists only in a `make FIDELITY=rtl` build.
+Branch `feat/custom-mips-backend`. Implementation commit `c0329201f114b0aea72cbceb927b4c60eff41d21` (base `731faab48f947bfc3f122294812791e06fc0deed`). Unicorn stays the default CPU. `--cpu=fast2` is optional. `--cpu=rtl` exists only in a `make FIDELITY=rtl` build.
 
 This host is Debian 13, x86_64, Unicorn 2.1.1, raylib. `LD_LIBRARY_PATH=$HOME/.local/lib`. Numbers below are MEASURED on this machine unless marked ESTIMATE. No other host was available, so the plan's two-of-three-hosts bar was not run.
 
@@ -8,7 +8,7 @@ This host is Debian 13, x86_64, Unicorn 2.1.1, raylib. `LD_LIBRARY_PATH=$HOME/.l
 
 Do not flip the default.
 
-`--cpu=fast` is faster than Unicorn on the corpora that could be run here. The straight ALU loop is 1.509× on guest instructions/s. The two-instruction branch loop is 1.343×. Headless wall-clock instructions/frame are 1.438×. Windowed instructions/frame are 1.277×. Both CPUs still finish a wall-clock run at about 60.2 frames/s, because the frame period is 16.5792 ms. The frames/s ratio is 0.999×.
+`--cpu=fast2` is faster than Unicorn on the corpora that could be run here. The straight ALU loop is 1.509× on guest instructions/s. The two-instruction branch loop is 1.343×. Headless wall-clock instructions/frame are 1.438×. Windowed instructions/frame are 1.277×. Both CPUs still finish a wall-clock run at about 60.2 frames/s, because the frame period is 16.5792 ms. The frames/s ratio is 0.999×.
 
 The plan keeps the fast engine optional when a guest result is between 1.15× and 1.5×, and it refuses a default flip when end-to-end throughput is under 1.10×. The frames/s ratio is under that line. The 1.5× guest bar was also specified for at least two of three hosts. Only this host was measured, and the branch loop is under 1.5×. The proj7 player images are not in this tree, so that suite did not byte-match.
 
@@ -18,7 +18,7 @@ An earlier fast build, before quiet spans were allowed while IE was clear and be
 
 | Path | Role |
 |---|---|
-| `src/cpu/fast/` | Predecoded basic-block interpreter (`--cpu=fast`) |
+| `src/cpu/fast2/` | Predecoded basic-block interpreter (`--cpu=fast2`) |
 | `src/cpu/irq.c` | Shared interrupt entry for Unicorn and fast |
 | `src/cpu/rtl/rtl.c` | Approximate I-cache and D-cache stalls (`--cpu=rtl`) |
 | `src/cpu/service.h`, `src/cpu/backend.h` | Service and backend hooks |
@@ -41,21 +41,21 @@ make -j4 PROFILE=1               # counters; run with --profile
 ```
 
 ```
-./vvizard --cpu=fast --no-window --sync ...
+./vvizard --cpu=fast2 --no-window --sync ...
 ./vvizard --cpu=rtl --rtl-cache=on|off ...    # only after FIDELITY=rtl
 ```
 
-`--cpu` defaults to `unicorn`. `VVIZARD_CPU` is used when `--cpu` is absent. `--cpu=fast` and `--cpu=rtl` reject `--little` (exit 2). `--cpu=rtl` on a default build exits 2 with `make FIDELITY=rtl`. Do not export `VVIZARD_CPU` for `make test`. `tests/compare_runs.py` clears `VVIZARD_QUIRKS` and leaves `VVIZARD_CPU` in the environment.
+`--cpu` defaults to `unicorn`. `VVIZARD_CPU` is used when `--cpu` is absent. `--cpu=fast2` and `--cpu=rtl` reject `--little` (exit 2). `--cpu=rtl` on a default build exits 2 with `make FIDELITY=rtl`. Do not export `VVIZARD_CPU` for `make test`. `tests/compare_runs.py` clears `VVIZARD_QUIRKS` and leaves `VVIZARD_CPU` in the environment.
 
-`make test` does not include `make test-fast`. `test-fast` is `compare_runs.py` of `--cpu=unicorn --sync` against `--cpu=fast --sync`.
+`make test` does not include `make test-fast2`. `test-fast2` is `compare_runs.py` of `--cpu=unicorn --sync` against `--cpu=fast2 --sync`.
 
 ## Correctness
 
 MEASURED on the L0 binary:
 
 - Unicorn, after the quiet-budget change: `python3 tests/test_hex.py` 8/8, `tests/test_hw.py` 23/23, `tests/test_quirks.py` 55/55. Exit 0.
-- `--cpu=fast` (`VVIZARD_CPU=fast`), same three commands, after block chaining: 8/8, 23/23, 55/55. Exit 0.
-- After the fast path publishes the cycle count before `vv_irq_step`: `python3 tests/compare_runs.py "./vvizard --cpu=unicorn --sync" "./vvizard --cpu=fast --sync" --insns 2000000` exited 1 with 31/33 SAME. DIFF only `proj7 headless` (`f.ppm`) and `proj7 keys` (`s40.ppm`, `s60.ppm`), 0 UART bytes. Both sides miss the guest images.
+- `--cpu=fast2` (`VVIZARD_CPU=fast2`), same three commands, after block chaining: 8/8, 23/23, 55/55. Exit 0. The flag was named `--cpu=fast` when those runs were taken.
+- After the fast path publishes the cycle count before `vv_irq_step`: `python3 tests/compare_runs.py "./vvizard --cpu=unicorn --sync" "./vvizard --cpu=fast2 --sync" --insns 2000000` exited 1 with 31/33 SAME. DIFF only `proj7 headless` (`f.ppm`) and `proj7 keys` (`s40.ppm`, `s60.ppm`), 0 UART bytes. Both sides miss the guest images.
 
 `../../software/gios/gios.inst.bin` is present. These are not:
 
@@ -102,7 +102,7 @@ A discarded first attempt wrote the spin image with shell `printf '\x..'`, which
 `make PROFILE=1` and `--profile`, one 5M ALU run, not the gate binary (frame pointers are on). Counts:
 
 - Unicorn: `hook_code` 5000001, `quirk_pre` / `quirk_post` / `hw_tick` / `irq` 5000000, `tlb_fill` 2. Emu wall 165.848 ms. Hook shares print about 99% because the timers nest.
-- Fast: `hook_code` 1366, `hw_tick` 1365, `irq` 5000000, `fast_insn` 5000000, quirk counts 0. Emu wall 109.593 ms. The printed irq share of `hook_code` is far above 100% because `vv_irq_step` runs on quiet instructions that are not hook calls. The counts are the reading. `vv_hw_tick` is no longer per instruction. `vv_irq_step` still is.
+- Fast2: `hook_code` 1366, `hw_tick` 1365, `irq` 5000000, `fast2_insn` 5000000, quirk counts 0. Emu wall 109.593 ms. The sample log printed the slot as `fast_insn` before the rename. The printed irq share of `hook_code` is far above 100% because `vv_irq_step` runs on quiet instructions that are not hook calls. The counts are the reading. `vv_hw_tick` is no longer per instruction. `vv_irq_step` still is.
 
 Profile percentages were not used to accept or reject the prototype. The throughput table was.
 
@@ -123,7 +123,7 @@ MEASURED with `make -j4 FIDELITY=rtl`, then the L0 binary was restored:
 | BIOS spin, 44 insns | `--cpu=rtl` cache on | 44 | 44 |
 | Same image at `0x10000000` | cache on | 48 | 44 |
 | Same DDR image | `--rtl-cache=off` | 44 | 44 |
-| Same DDR image | `--cpu=fast` on the RTL binary | 44 | 44, no `rtl cycles` suffix |
+| Same DDR image | `--cpu=fast2` on the RTL binary | 44 | 44, no `rtl cycles` suffix |
 | `lui $t0,0x1000; lw $t1,0($t0); lw $t2,4($t0); break` | cache on | 8 | 4 |
 | `lui; lw $t1,0; lw $t2,32($t0); break` | cache on | 12 | 4 |
 | `lui; sw $t0,0($t0); break` | cache on | 7 | 3 |

@@ -1,12 +1,12 @@
 /* decode.c - classify one instruction.  Runtime register values are not consulted; branches,
  * overflow and memory quirks are resolved when the instruction runs. */
 #include "decode.h"
-#include "fast.h"
+#include "fast2.h"
 #include "memmap.h"
 #include "quirk.h"
 #include "cpu/mips_decode.h"
 
-uint32_t vv_fast_fetch_raw(uint32_t pc, int *dead) {
+uint32_t vv_fast2_fetch_raw(uint32_t pc, int *dead) {
     uint32_t c = vv_canon_inl(pc);
     int hole = c == 0xFFFFFFFFu || (c >> 28) == 0x8 || (pc & 3);
     if (dead) *dead = hole;
@@ -15,15 +15,15 @@ uint32_t vv_fast_fetch_raw(uint32_t pc, int *dead) {
     return vv_ram_be32(c, &ok);
 }
 
-int vv_fast_peek_mem(uint32_t pc, uint32_t *addr, int *store) {
+int vv_fast2_peek_mem(uint32_t pc, uint32_t *addr, int *store) {
     int dead = 0;
-    uint32_t i = vv_fast_fetch_raw(pc, &dead);
+    uint32_t i = vv_fast2_fetch_raw(pc, &dead);
     if (dead) return 0;
     unsigned op = i >> 26;
     if (op < 0x20 || op > 0x2F) return 0;
     unsigned rs = (i >> 21) & 31;
     int32_t imm = (int16_t)(i & 0xFFFF);
-    if (addr) *addr = vv_fast_gpr(rs) + (uint32_t)imm;
+    if (addr) *addr = vv_fast2_gpr(rs) + (uint32_t)imm;
     if (store) *store = op >= 0x28;
     return 1;
 }
@@ -32,7 +32,7 @@ static int q(int id) { return vv_quirk_on(id); }
 
 void vv_decode_at(uint32_t pc, Dec *d) {
     int dead = 0;
-    uint32_t i = vv_fast_fetch_raw(pc, &dead);
+    uint32_t i = vv_fast2_fetch_raw(pc, &dead);
     unsigned op = i >> 26, rs = (i >> 21) & 31, rt = (i >> 16) & 31, rd = (i >> 11) & 31;
     unsigned sa = (i >> 6) & 31, fn = i & 63;
     int32_t imm = (int16_t)(i & 0xFFFF);

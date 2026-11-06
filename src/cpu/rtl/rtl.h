@@ -1,5 +1,5 @@
 /* rtl.h - optional approximate cache-stall runner.  Compiled only with -DVV_FIDELITY_RTL
- * (make FIDELITY=rtl).  The default and --cpu=fast binaries do not include this file. */
+ * (make FIDELITY=rtl).  The default and --cpu=fast2 binaries do not include this file. */
 #ifndef VV_RTL_H
 #define VV_RTL_H
 #include <stdint.h>

@@ -1,7 +1,7 @@
-/* exec.c - fast L0 interpreter.  Quirks match quirk.c; device time matches hook_code by ticking
+/* exec.c - fast2 L0 interpreter.  Quirks match quirk.c; device time matches hook_code by ticking
  * only at vv_hw_next_event() and running the instructions in between with vv_hw_set_now.
  * There is no I-cache or D-cache timing here (that lives in cpu/rtl, and only in a FIDELITY=rtl build). */
-#include "fast.h"
+#include "fast2.h"
 #include "decode.h"
 #include "cpu/backend.h"
 #include "cpu/service.h"
@@ -35,16 +35,16 @@ static uint32_t br_tgt;
 static int span_dead;
 static uint32_t span_lo, span_hi;
 
-uint32_t vv_fast_gpr(unsigned r) { return r < 32 && r ? gpr[r] : 0; }
-void vv_fast_set_gpr(unsigned r, uint32_t v) { if (r && r < 32) gpr[r] = v; }
-uint32_t vv_fast_c0(void) { return c0_status; }
-void vv_fast_set_c0(uint32_t v) { c0_status = v; }
-uint32_t vv_fast_pc(void) { return pc; }
-void vv_fast_cancel_lu(void) { lu_on = lu_hold_sub = 0; br_pend = nullify = 0; }
+uint32_t vv_fast2_gpr(unsigned r) { return r < 32 && r ? gpr[r] : 0; }
+void vv_fast2_set_gpr(unsigned r, uint32_t v) { if (r && r < 32) gpr[r] = v; }
+uint32_t vv_fast2_c0(void) { return c0_status; }
+void vv_fast2_set_c0(uint32_t v) { c0_status = v; }
+uint32_t vv_fast2_pc(void) { return pc; }
+void vv_fast2_cancel_lu(void) { lu_on = lu_hold_sub = 0; br_pend = nullify = 0; }
 
 uint32_t vv_view_gpr(uc_engine *uc, int r) {
     if (vv_cpu_kind == VV_CPU_UNICORN) { uint32_t v = 0; if (r > 0) uc_reg_read(uc, UC_MIPS_REG_0 + r, &v); return v; }
-    return vv_fast_gpr((unsigned)r);
+    return vv_fast2_gpr((unsigned)r);
 }
 uint32_t vv_view_pc(uc_engine *uc) {
     if (vv_cpu_kind == VV_CPU_UNICORN) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_PC, &v); return v; }
@@ -82,13 +82,13 @@ static int mem_fault(void) {
     stop_exc = 2;
     return 1;
 }
-int vv_fast_fetch_aborts(uint32_t at) {
+int vv_fast2_fetch_aborts(uint32_t at) {
     if (q_fetch || (at & 3)) return 0;
     int dead = 0;
-    vv_fast_fetch_raw(at, &dead);
+    vv_fast2_fetch_raw(at, &dead);
     return dead;
 }
-int vv_fast_unhandled(void) { return stop_exc == 2; }
+int vv_fast2_unhandled(void) { return stop_exc == 2; }
 
 static int prep(const Dec *d) {
     uint32_t und = vv_value_reads(d->insn) & ~vv_reg_defined;
@@ -146,7 +146,7 @@ static void bump_range(uint32_t lo, uint32_t hi) {
         a = n;
     }
 }
-static void fast_inval(uint32_t lo, uint32_t hi) { bump_range(lo, hi); }
+static void fast2_inval(uint32_t lo, uint32_t hi) { bump_range(lo, hi); }
 
 static int overlap(uint32_t a, unsigned n, uint32_t lo, uint32_t hi) {
     return n && a < hi && a + n > lo;
@@ -653,7 +653,7 @@ static int do_trap(const Dec *d) {
 
 /* Execute d.  Returns 0 continue (pc set to the next fetch), 1 stop. */
 static int exec_dec(uc_engine *uc, const Dec *d) {
-    VV_PROF_COUNT(VV_PS_FAST);
+    VV_PROF_COUNT(VV_PS_FAST2);
     int was_delay = br_pend;
     int in_ds = was_delay && br_in_ds;
     int pend_taken = br_taken;
@@ -730,7 +730,7 @@ static int exec_dec(uc_engine *uc, const Dec *d) {
     return 0;
 }
 
-int vv_fast_step(uc_engine *uc, uint32_t *pc_io) {
+int vv_fast2_step(uc_engine *uc, uint32_t *pc_io) {
     pc = *pc_io;
     Dec d; vv_decode_at(pc, &d);
     int stop = exec_dec(uc, &d);
@@ -786,7 +786,7 @@ static int span(uc_engine *uc, uint64_t budget) {
                 vv_hw_set_now(vv_insns());
                 return 0;
             }
-            if (vv_fast_fetch_aborts(b->d[i].pc)) { stop_exc = 2; return 1; }
+            if (vv_fast2_fetch_aborts(b->d[i].pc)) { stop_exc = 2; return 1; }
             if (vv_svc_quiet(b->d[i].pc)) return 1;
             used++;
             /* irq_step and the event trace read the cycle clock.  Quiet instructions have
@@ -795,7 +795,7 @@ static int span(uc_engine *uc, uint64_t budget) {
             if (vv_irqs_on()) {
                 uint32_t npc;
                 if (vv_irq_step(NULL, b->d[i].pc, &npc)) {
-                    vv_fast_cancel_lu();
+                    vv_fast2_cancel_lu();
                     vv_quirk_cancel();
                     pc = npc;
                     vv_hw_set_now(vv_insns());
@@ -814,7 +814,7 @@ static int span(uc_engine *uc, uint64_t budget) {
     }
 }
 
-void vv_fast_init(uc_engine *uc, uint32_t entry) {
+void vv_fast2_init(uc_engine *uc, uint32_t entry) {
     memset(gpr, 0, sizeof gpr);
     for (int i = 1; i < 32; i++) { uint32_t v = 0; uc_reg_read(uc, UC_MIPS_REG_0 + i, &v); gpr[i] = v; }
     uc_reg_read(uc, UC_MIPS_REG_HI, &hi);
@@ -842,21 +842,21 @@ void vv_fast_init(uc_engine *uc, uint32_t entry) {
     q_dc = vv_quirk_on(VV_Q_DCACHE_STALE);
     memset(bbs, 0, sizeof bbs);
     memset(fetch_fill, 0, sizeof fetch_fill);
-    vv_code_invalidate = fast_inval;
+    vv_code_invalidate = fast2_inval;
 
 }
 
-uc_err vv_fast_run(uc_engine *uc, uint32_t entry, uint32_t until, int has_until) {
-    vv_fast_init(uc, entry);
+uc_err vv_fast2_run(uc_engine *uc, uint32_t entry, uint32_t until, int has_until) {
+    vv_fast2_init(uc, entry);
     while (!vv_quirk_halted && !stop_exc) {
         if (has_until && pc == until) break;
         uint64_t tick_at = vv_insns() + 1;
-        if (vv_cpu_kind == VV_CPU_RTL) break;   /* rtl runner calls vv_fast_step itself */
-        if (vv_fast_fetch_aborts(pc)) { stop_exc = 2; break; }
+        if (vv_cpu_kind == VV_CPU_RTL) break;   /* rtl runner calls vv_fast2_step itself */
+        if (vv_fast2_fetch_aborts(pc)) { stop_exc = 2; break; }
         if (vv_svc_enter_at(uc, pc, tick_at)) break;
         uint32_t npc = pc;
         if (vv_irqs_on() && vv_irq_step(NULL, pc, &npc)) {
-            vv_fast_cancel_lu();
+            vv_fast2_cancel_lu();
             vv_quirk_cancel();
             if (!vv_quirk_halted && vv_svc_leave(uc, pc)) break;
             if (vv_quirk_halted) break;
@@ -878,5 +878,5 @@ uc_err vv_cpu_run(uc_engine *uc, uint32_t entry, uint32_t until, int has_until) 
 #ifdef VV_FIDELITY_RTL
     if (vv_cpu_kind == VV_CPU_RTL) return vv_rtl_run(uc, entry, until, has_until);
 #endif
-    return vv_fast_run(uc, entry, until, has_until);
+    return vv_fast2_run(uc, entry, until, has_until);
 }

@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 enum {
-    VV_PS_EMU = 0,       /* wall around the CPU run (uc_emu_start or the fast/rtl runner) */
+    VV_PS_EMU = 0,       /* wall around the CPU run (uc_emu_start or the fast2/rtl runner) */
     VV_PS_HOOK,          /* hook_code calls */
     VV_PS_QUIRK_PRE,
     VV_PS_QUIRK_POST,
@@ -20,7 +20,7 @@ enum {
     VV_PS_BIOS_W,
     VV_PS_DC_LOAD,
     VV_PS_DC_STORE,
-    VV_PS_FAST,          /* instructions the fast/rtl backend actually executed */
+    VV_PS_FAST2,         /* instructions the fast2/rtl backend actually executed */
     VV_PS_N
 };
 

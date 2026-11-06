@@ -44,10 +44,10 @@ RAYLIB_CFLAGS  := $(shell pkg-config --cflags raylib)
 RAYLIB_LIBS    := $(shell pkg-config --libs raylib)
 
 SRCS := $(wildcard $(SRC_DIR)/*.c)
-HDRS := $(wildcard $(SRC_DIR)/*.h $(SRC_DIR)/cpu/*.h $(SRC_DIR)/cpu/fast/*.h $(SRC_DIR)/cpu/rtl/*.h)
+HDRS := $(wildcard $(SRC_DIR)/*.h $(SRC_DIR)/cpu/*.h $(SRC_DIR)/cpu/fast2/*.h $(SRC_DIR)/cpu/rtl/*.h)
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 # Sources under src/cpu are not picked up by the wildcard above.
-CPU_OBJS := $(BUILD_DIR)/cpu/irq.o $(BUILD_DIR)/cpu/fast/decode.o $(BUILD_DIR)/cpu/fast/exec.o
+CPU_OBJS := $(BUILD_DIR)/cpu/irq.o $(BUILD_DIR)/cpu/fast2/decode.o $(BUILD_DIR)/cpu/fast2/exec.o
 ifeq ($(FIDELITY),rtl)
 CPU_OBJS += $(BUILD_DIR)/cpu/rtl/rtl.o
 endif
@@ -59,7 +59,7 @@ EXTRA ?=
 VV_RUN = LD_LIBRARY_PATH=$(HOME)/.local/lib ./$(TARGET)
 
 .PHONY: vendor-cmp check-vendor vendor-update test-vendor
-.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-fast tests check-hex refresh-hex
+.PHONY: all clean fresh run run-std run-legacy-hw run-debug run-warn run-noirq run-gios FORCE test test-hex test-hw test-player test-quirks test-threads test-sm test-fast2 tests check-hex refresh-hex
 
 all: $(TARGET)
 
@@ -227,11 +227,11 @@ test-threads: $(TARGET) tests
 
 # All tests (vendored cs150 headers vs the originals, hex programs + hwprobe, hardware model + guest-bug detectors, quirk detection/emulation,
 # proj7 player via GIOS, proj7 shared memory / isr7 / HALT; all --sync), then the threaded-mode tests.
-# test-fast is not part of this: the default binary stays on Unicorn.
+# test-fast2 is not part of this: the default binary stays on Unicorn.
 test: check-vendor test-vendor check-hex test-hex test-hw test-quirks test-player test-sm test-threads
 
-test-fast: $(TARGET) tests
-	python3 tests/compare_runs.py "./vvizard --cpu=unicorn --sync" "./vvizard --cpu=fast --sync" --insns 2000000
+test-fast2: $(TARGET) tests
+	python3 tests/compare_runs.py "./vvizard --cpu=unicorn --sync" "./vvizard --cpu=fast2 --sync" --insns 2000000
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)

@@ -1,4 +1,4 @@
-/* service.h - main.c services the fast/rtl backends call.  The Unicorn hook uses the same
+/* service.h - main.c services the fast2/rtl backends call.  The Unicorn hook uses the same
  * enter/leave split, so device time, max-insns and tracing stay on one path. */
 #ifndef VV_SERVICE_H
 #define VV_SERVICE_H

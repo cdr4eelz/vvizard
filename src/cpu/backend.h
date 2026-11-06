@@ -4,17 +4,17 @@
 #include <stdint.h>
 #include <unicorn/unicorn.h>
 
-typedef enum { VV_CPU_UNICORN = 0, VV_CPU_FAST = 1, VV_CPU_RTL = 2 } vv_cpu_kind_t;
+typedef enum { VV_CPU_UNICORN = 0, VV_CPU_FAST2 = 1, VV_CPU_RTL = 2 } vv_cpu_kind_t;
 extern vv_cpu_kind_t vv_cpu_kind;
 
-/* Optional code-cache drop for the fast backend.  NULL on the Unicorn path.
+/* Optional code-cache drop for the fast2 backend.  NULL on the Unicorn path.
  * hw.c calls this next to uc_ctl_remove_cache when the GPU wrote DDR the guest has fetched. */
 extern void (*vv_code_invalidate)(uint32_t lo, uint32_t hi);
 
-/* Dispatch --cpu=fast or --cpu=rtl.  `until` is used only when has_until is set. */
+/* Dispatch --cpu=fast2 or --cpu=rtl.  `until` is used only when has_until is set. */
 uc_err vv_cpu_run(uc_engine *uc, uint32_t entry, uint32_t until, int has_until);
 
-/* Register view for dump / --expect / --trace-regs.  Unicorn reads the engine; fast/rtl read theirs. */
+/* Register view for dump / --expect / --trace-regs.  Unicorn reads the engine; fast2/rtl read theirs. */
 uint32_t vv_view_gpr(uc_engine *uc, int r);
 uint32_t vv_view_pc(uc_engine *uc);
 uint32_t vv_view_hi(uc_engine *uc);

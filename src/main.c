@@ -201,7 +201,7 @@ static int load_script(const char *path) {
     fclose(f); (void)ev_next_f; (void)ev_next_i; return 0;
 }
 
-/* Interrupt entry lives in src/cpu/irq.c (vv_irq_step) so Unicorn and --cpu=fast share it. */
+/* Interrupt entry lives in src/cpu/irq.c (vv_irq_step) so Unicorn and --cpu=fast2 share it. */
 /* The word at a as the hardware fetches it: 0 for undecoded / MMIO (and no MMIO side effects). */
 static uint32_t read_insn(uc_engine *uc, uint32_t a) { (void)uc; int ok; return vv_ram_be32(vv_canon_inl(a), &ok); }
 void vv_mmio_side_read(uint32_t canon) {         /* a HW read of UARX_DATA pops the RX holding register */
@@ -223,7 +223,7 @@ static uint64_t mmio_read(uc_engine *uc, uint64_t off, unsigned size, void *u) {
     case VV_OW_UATX_READY: v = vv_uart_tx_ready(); break;   /* low while a byte shifts out (hw.c) */
     case VV_OW_UARX_VALID: v = vv_uart_rx_valid(); break;
     case VV_OW_UARX_DATA:  v = vv_uart_rx_read(); break;
-    case VV_OW_CNT_CYCLE: /* default and --cpu=fast: cycles == instructions.  FIDELITY=rtl: real cycles. */
+    case VV_OW_CNT_CYCLE: /* default and --cpu=fast2: cycles == instructions.  FIDELITY=rtl: real cycles. */
 #ifdef VV_FIDELITY_RTL
         v = (uint32_t)(vv_hw_now() - cnt_base_cycle); break;
 #endif
@@ -747,11 +747,11 @@ static void usage(FILE *f, const char *p) {   /* --help: stdout; a bad option: s
 "                     or shared6.h) decoded, at exit; its consistency warnings (magic/majorvers\n"
 "                     stamp vs shared7.h, magic2, buffer) are printed at exit even without it\n"
 "  --screenshot F.png save the whole window (frame + status strip) as PNG at exit\n"
-"  --cpu=KIND         unicorn (default), fast (predecoded block interpreter, same 1 CPI results)\n"
+"  --cpu=KIND         unicorn (default), fast2 (predecoded block interpreter, same 1 CPI results)\n"
 "                     or rtl (approximate I-cache and D-cache stalls; needs `make FIDELITY=rtl`).\n"
 "                     Env VVIZARD_CPU is used when --cpu is absent.  Unicorn stays the default.\n"
 "  --rtl-cache=on|off with --cpu=rtl, model cache-miss stalls (default on).  off keeps cycles\n"
-"                     equal to the instruction count.  Ignored by unicorn and fast.\n"
+"                     equal to the instruction count.  Ignored by unicorn and fast2.\n"
 "  --profile          print per-slot counts (needs `make PROFILE=1`).  Timers stay off without this.\n"
 "  --profile-bare-hook  PROFILE build: the code hook only counts (emulation is wrong; for probes)\n"
 "  --profile-no-mem-unmapped  PROFILE build: do not install the unmapped-memory hook\n"
@@ -890,9 +890,9 @@ int main(int argc, char **argv) {
         case O_CPU:
             cpu_set = 1;
             if (!strcmp(optarg, "unicorn")) vv_cpu_kind = VV_CPU_UNICORN;
-            else if (!strcmp(optarg, "fast")) vv_cpu_kind = VV_CPU_FAST;
+            else if (!strcmp(optarg, "fast2")) vv_cpu_kind = VV_CPU_FAST2;
             else if (!strcmp(optarg, "rtl")) vv_cpu_kind = VV_CPU_RTL;
-            else { vv_eprintf("--cpu: expected unicorn, fast or rtl, not '%s'\n", optarg); return 2; }
+            else { vv_eprintf("--cpu: expected unicorn, fast2 or rtl, not '%s'\n", optarg); return 2; }
             break;
         case O_RTL_CACHE:
             if (!strcmp(optarg, "on")) vv_rtl_cache = 1;
@@ -925,9 +925,9 @@ int main(int argc, char **argv) {
         const char *cenv = getenv("VVIZARD_CPU");
         if (cenv && *cenv) {
             if (!strcmp(cenv, "unicorn")) vv_cpu_kind = VV_CPU_UNICORN;
-            else if (!strcmp(cenv, "fast")) vv_cpu_kind = VV_CPU_FAST;
+            else if (!strcmp(cenv, "fast2")) vv_cpu_kind = VV_CPU_FAST2;
             else if (!strcmp(cenv, "rtl")) vv_cpu_kind = VV_CPU_RTL;
-            else { vv_eprintf("bad VVIZARD_CPU '%s' (expected unicorn, fast or rtl)\n", cenv); return 2; }
+            else { vv_eprintf("bad VVIZARD_CPU '%s' (expected unicorn, fast2 or rtl)\n", cenv); return 2; }
         }
     }
 #ifndef VV_FIDELITY_RTL
@@ -937,7 +937,7 @@ int main(int argc, char **argv) {
     }
 #endif
     if (!big && vv_cpu_kind != VV_CPU_UNICORN) {
-        vv_eprintf("--cpu=%s does not support --little\n", vv_cpu_kind == VV_CPU_FAST ? "fast" : "rtl");
+        vv_eprintf("--cpu=%s does not support --little\n", vv_cpu_kind == VV_CPU_FAST2 ? "fast2" : "rtl");
         return 2;
     }
     if (opt_profile || opt_prof_bare || opt_prof_no_unmapped) {
@@ -1062,7 +1062,7 @@ int main(int argc, char **argv) {
             vv_legacy_io || !vv_pf_period ? "none (PF_FRAME immediate)" : vv_frame_clock == VV_FRAME_CLOCK_WALL ? "wall" : "emulated",
             !opt_threads ? "off (--sync)" : vv_legacy_io ? (vv_disp_has_window() ? "on (emulator + display; GPU synchronous: --legacy-io)" : "on (no window, --legacy-io: one thread)")
             : vv_disp_has_window() ? "on (emulator + display + GPU worker)" : "on (no window: emulator + GPU worker)",
-            vv_cpu_kind == VV_CPU_FAST ? "fast" : vv_cpu_kind == VV_CPU_RTL ? "rtl" : "unicorn",
+            vv_cpu_kind == VV_CPU_FAST2 ? "fast2" : vv_cpu_kind == VV_CPU_RTL ? "rtl" : "unicorn",
             vv_cpu_kind == VV_CPU_RTL ? " rtl-cache=" : "",
             vv_cpu_kind == VV_CPU_RTL ? (vv_rtl_cache ? "on" : "off") : "");
     vv_quirk_decode = vv_quirk_needs_decode();

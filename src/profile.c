@@ -12,7 +12,7 @@ static uint64_t nanos[VV_PS_N];
 static uint64_t emu_t0, emu_ns;
 static const char *const name[VV_PS_N] = {
     "emu", "hook_code", "quirk_pre", "quirk_post", "hw_tick", "irq",
-    "mmio_r", "mmio_w", "tlb_fill", "unmapped", "bios_w", "dc_load", "dc_store", "fast_insn"
+    "mmio_r", "mmio_w", "tlb_fill", "unmapped", "bios_w", "dc_load", "dc_store", "fast2_insn"
 };
 
 static uint64_t mono_ns(void) {

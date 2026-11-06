@@ -1,8 +1,8 @@
-/* irq.c - the DO_ISR decision that used to live in main.c irq_step.  Unicorn and the fast
+/* irq.c - the DO_ISR decision that used to live in main.c irq_step.  Unicorn and the fast2
  * backend both come through here so EPC, the IE clear and the deferral rules stay one piece of code. */
 #include "irq.h"
 #include "cpu/mips_decode.h"
-#include "cpu/fast/fast.h"
+#include "cpu/fast2/fast2.h"
 #include "hw.h"
 #include "quirk.h"
 #include "memmap.h"
@@ -18,26 +18,26 @@ static uint32_t fix_val;
 
 static uint32_t R(uc_engine *uc, unsigned r) {
     if (!r) return 0;
-    if (!uc) return vv_fast_gpr(r);
+    if (!uc) return vv_fast2_gpr(r);
     uint32_t v = 0;
     uc_reg_read(uc, UC_MIPS_REG_0 + r, &v);
     return v;
 }
 static void W(uc_engine *uc, unsigned r, uint32_t v) {
     if (!r) return;
-    if (!uc) { vv_fast_set_gpr(r, v); return; }
+    if (!uc) { vv_fast2_set_gpr(r, v); return; }
     uc_reg_write(uc, UC_MIPS_REG_0 + r, &v);
 }
 static uint32_t ST(uc_engine *uc) {
     if (vv_quirk_on(VV_Q_COP0)) return vv_hw_status();
-    if (!uc) return vv_fast_c0();
+    if (!uc) return vv_fast2_c0();
     uint32_t s = 0;
     uc_reg_read(uc, UC_MIPS_REG_CP0_STATUS, &s);
     return s;
 }
 static void set_st(uc_engine *uc, uint32_t s) {
     if (vv_quirk_on(VV_Q_COP0)) return;          /* shadow Status is already updated by vv_hw_isr_enter */
-    if (!uc) { vv_fast_set_c0(s); return; }
+    if (!uc) { vv_fast2_set_c0(s); return; }
     uc_reg_write(uc, UC_MIPS_REG_CP0_STATUS, &s);
 }
 static uint32_t read_insn(uint32_t a) {
