@@ -62,7 +62,7 @@ Fast remains the default.
   timer IRQ return, Count writes, alias self-modifying code, jump to address 0,
   instruction limits at delay slots, MMIO lanes and mask-zero read side effects,
   GPU fill/fault and CPU visibility, flag rejection, GIOS/proj7 and window smoke.
-- Default program prints the GIOS banner and `PROJ-7.0`, with `MAGIC: fedbeef3`;
+- Default program prints the GIOS banner and `PROJ-7.0`, with `MAGIC: fedbeef4`;
   shared memory decodes the player at `(400,300)` and active GPU launches.
   Auto-typing `jal 60000000\rq` with `--exit-on-halt` reaches HaltVal 1 and QUIT.
 - Xvfb windowed GIOS/proj7 smoke completes and dumps a framebuffer. This is not

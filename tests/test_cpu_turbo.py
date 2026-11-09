@@ -143,7 +143,7 @@ class Turbo(unittest.TestCase):
         r = run('--sw-dir', sw, '--max-insns', '10000000', '--dump-sm')
         self.check(r)
         self.assertIn(b'PROJ-7', r.stdout)
-        self.assertIn(b'fedbeef3', r.stdout.lower())
+        self.assertIn(b'fedbeef4', r.stdout.lower())
         self.assertRegex(r.stderr, rb'GPU [1-9]')
         self.assertIn(b'player x 400 y 300', r.stderr)
         r = run('--sw-dir', sw, '--max-insns', '10000000', '--exit-on-halt',
