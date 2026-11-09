@@ -69,7 +69,7 @@ def t_magic2():
     r = hwprog("sm_magic2", "--dump-sm")
     q = hwprog("sm_magic2")                      # warnings also without --dump-sm, only those
     s = "\n".join(sm_lines(r))
-    return r.returncode == 0 and "[sm] proj7 shared memory" in s and "magic1 0xfedbeef3  majorvers 7  magic2 0x00000000" in s \
+    return r.returncode == 0 and "[sm] proj7 shared memory" in s and "magic1 0xfedbeef4  majorvers 7  magic2 0x00000000" in s \
         and "player x 12 y 34  bouncers 5/9" in s and re.search(r"WARNING .*magic2 \(\+0x13c\) 0x00000000 != magic1", s) \
         and "stamp" not in s and q.returncode == 0 and [l for l in sm_lines(q)] == [l for l in sm_lines(r) if "WARNING" in l]
 def t_none():
