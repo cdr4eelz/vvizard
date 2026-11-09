@@ -19,7 +19,8 @@
 
 #define VV_SM_MAGIC_BASE   0xFEDBEEF0u   /* K_MAGIC_VERSION = 0xFEDBEEF0 | n */
 #define VV_SM6_MAGIC       0xFEDBEEF2u   /* shared6.h K_MAGIC_VERSION */
-#define VV_SM7_MAGIC       0xFEDBEEF4u   /* shared7.h K_MAGIC_VERSION */
+#define VV_SM7_LAYOUT_MIN  0xFEDBEEF3u   /* first proj7 stamp; layout detection floor */
+#define VV_SM7_MAGIC       0xFEDBEEF4u   /* shared7.h K_MAGIC_VERSION (current) */
 #define VV_SM7_MAJOR       7u            /* shared7.h K_MAJOR_VERSION */
 #define VV_SM_BUFSZ        0x0100u       /* K_SHBUF_SIZEB (both) */
 

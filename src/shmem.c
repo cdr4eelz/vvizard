@@ -18,7 +18,7 @@ int vv_sm_read(vv_sm_reader rd, void *ctx, uint32_t base, vv_sm *s) {
     s->magic1 = rd(ctx, base, 4);
     if ((s->magic1 & ~0xFu) != VV_SM_MAGIC_BASE || (s->magic1 & 0xFu) < 2) return s->layout = 0;
     uint32_t m2 = rd(ctx, base + VV_SM7_magic2, 4);
-    if (s->magic1 >= VV_SM7_MAGIC || m2 == s->magic1) {
+    if (s->magic1 >= VV_SM7_LAYOUT_MIN || m2 == s->magic1) {
         s->layout = 7;
         s->majorvers = rd(ctx, base + VV_SM7_majorvers, 4);
         s->magic2 = m2;
@@ -45,7 +45,7 @@ int vv_sm_read(vv_sm_reader rd, void *ctx, uint32_t base, vv_sm *s) {
         if (s->magic2 != s->magic1)
             warn(s, "magic2 (+0x%03x) 0x%08x != magic1 0x%08x: structure size/offsets disagree", VV_SM7_magic2,
                  s->magic2, s->magic1);
-        if ((s->magic1 & 0xFu) > 3)
+        if ((s->magic1 & 0xFu) > (VV_SM7_MAGIC & 0xFu))
             warn(s, "magic 0x%08x is newer than proj7 (decoded with the shared7.h layout)", s->magic1);
     } else {
         s->layout = 6;

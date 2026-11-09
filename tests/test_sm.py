@@ -109,7 +109,7 @@ def t_player_sm():          # d: notimer, i x2: player_y 300 -> 288, space: paus
     s = "\n".join(sm_lines(r))
     return r.returncode == 0 and "[sm] proj7 shared memory at 0x50000000 (shared7.h layout, 0x140 bytes)" in s \
         and f"magic1 0x{H7[0]:08x}  majorvers {H7[1]}  magic2 0x{H7[0]:08x}" in s \
-        and "flags 0x0003 (pause 1 notimer 1 quit 0)" in s and "player x 400 y 288  bouncers 1/127" in s \
+        and "flags 0x0003 (pause 1 notimer 1 quit 0)" in s and "player x 400 y 288  bouncers 1/511" in s \
         and "buff size 256" in s and "WARNING" not in r.err
 def gios_prints_haltval():
     return b"HALTVAL: " in open(os.path.join(SW, "gios", "gios.inst.bin"), "rb").read() + \
