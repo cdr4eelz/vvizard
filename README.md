@@ -78,9 +78,9 @@ The `Makefile` finds Unicorn and raylib through pkg-config:
     or missing file and the commands below. No cs150 tree: one line, nothing else.
   - `VENDOR_CHECK=warn` (default: warn and keep building), `fail` (a difference stops `make` and `make test`), `off`.
   - `make check-vendor` (first step of `make test`, `scripts/check_vendor.py`): the unified diff (with a note whether
-    cs150 HEAD or only its working tree differs), the PROVENANCE checksums, the `.h` vs `.s.inc` values (the known,
-    intentional `shared7.s.inc` stamp difference in `vendor/cs150/known-drift` is reported, not counted), and the
-    `tests/hw/hw.inc` MMIO literals.
+    cs150 HEAD or only its working tree differs), the PROVENANCE checksums, the `.h` vs `.s.inc` values (any pair
+    listed in `vendor/cs150/known-drift` is reported, not counted; that file is empty of pairs while C and ASM agree),
+    and the `tests/hw/hw.inc` MMIO literals.
   - `make vendor-update` recopies the five files from `CS150_SW` and rewrites `PROVENANCE` (refuses if one is
     missing); then run `make test`, fix any `VV_*` the build complains about, and commit `vendor/`.
 - A Unicorn in `~/.local` takes priority automatically (PKG_CONFIG_PATH and rpath are set in the Makefile, and
@@ -514,18 +514,17 @@ proj6 and proj7 keep app/ISR state in a `struct SM_DATA` at `SM_BASE_ADDR` = 0x5
 (never writes it) for the status strip and `--dump-sm`, with both layouts in `src/shmem.h`:
 | | proj7 (`shared7.h`, vendored: `vendor/cs150/software/proj_app7/shared7.h`) | proj6 (`shared6.h`, offsets copied by hand) |
 |---|---|---|
-| stamp | `magic1` 0x00 = 0xFEDBEEF3, `majorvers` 0x04 = 7, `magic2` 0x13C = 0xFEDBEEF3 | `magic` 0x00 = 0xFEDBEEF2 |
+| stamp | `magic1` 0x00 = 0xFEDBEEF4, `majorvers` 0x04 = 7, `magic2` 0x13C = 0xFEDBEEF4 | `magic` 0x00 = 0xFEDBEEF2 |
 | fields | stash0-3 0x08-0x14, state/flags u16 0x18/0x1A, RTC_count 0x1C, seconds 0x20, clock 0x24, player_y/x i16 0x28/0x2A, max/num_opponents u16 0x2C/0x2E, buff_size/head/tail 0x30/0x34/0x38, buff_data[256] 0x3C | stash0-3 0x04-0x10, state/flags 0x14/0x16, RTC_count 0x18, seconds 0x1C, clock 0x20, player_y/x 0x24/0x26, buff_size/head/tail 0x28/0x2C/0x30, buff_data 0x34 |
-| flags | pause 0, notimer 1, quit 2 | pause 0, notimer 1 |
+| flags | pause 0, notimer 1, quit 2, gravity 3, sweeper 4 | pause 0, notimer 1 |
 
 The layout is chosen from the stamp: `magic1` 0xFEDBEEF3 (or newer), or `magic2` at 0x13C equal to `magic1`, is the
-proj7 layout; otherwise 0xFEDBEEF2 is proj6. So a proj7 structure stamped with proj6 values still decodes as proj7 and
-the stamp is reported: today `shared7.s.inc` deliberately still says `K_MAGIC_VERSION` 0xFEDBEEF2 / `K_MAJOR_VERSION` 6
-(the C side, shared7.h, says 0xFEDBEEF3 / 7), so isr7.s `DO_INIT_VERSION` (jump-table slot 0 at 0xC0000000) stamps
-0xFEDBEEF2 / 6. proj7 itself stamps through `SM_INIT7` (C), so a normal run shows 0xFEDBEEF3 / 7.
-The stale `shared7.s.inc` pair is recorded in `vendor/cs150/known-drift`, so `make check-vendor` reports it without
-failing. vvizard reads guest memory with explicit big-endian loads at the `VV_SM7_*` offsets (checked against the
-vendored header at compile time); it never overlays `struct SM_DATA` on the D-scratch buffer.
+proj7 layout; otherwise 0xFEDBEEF2 is proj6. `shared7.h` and `shared7.s.inc` both use `K_MAGIC_VERSION` 0xFEDBEEF4 /
+`K_MAJOR_VERSION` 7, so isr7.s `DO_INIT_VERSION` (jump-table slot 0 at 0xC0000000) and `SM_INIT7` (C) stamp the same
+values. `vendor/cs150/known-drift` has no allowlisted pairs while they agree; a future C vs ASM mismatch is a real
+`check-vendor` failure unless re-listed there on purpose. vvizard reads guest memory with explicit big-endian loads at
+the `VV_SM7_*` offsets (checked against the vendored header at compile time); it never overlays `struct SM_DATA` on
+the D-scratch buffer.
 `--dump-sm` prints the decoded structure at exit (`[sm] ...` lines on stderr); consistency problems (stamp vs shared7.h,
 `magic2` != `magic1`, `buff_size` != 256, head/tail out of range) are printed as `[sm] WARNING ...` at exit even without
 it, and shown as `STAMP?` in the strip. vvizard never changes the run because of them.

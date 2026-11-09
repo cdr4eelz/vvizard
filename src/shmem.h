@@ -3,13 +3,12 @@
  * window status strip and --dump-sm; the guest owns it.
  *
  * Layouts (offsets in bytes; u16/i16 fields are big-endian halfwords like everything else):
- *   proj7  software/proj_app7/shared7.h (and shared7.s.inc): K_MAGIC_VERSION 0xFEDBEEF3, K_MAJOR_VERSION 7
+ *   proj7  software/proj_app7/shared7.h (and shared7.s.inc): K_MAGIC_VERSION 0xFEDBEEF4, K_MAJOR_VERSION 7
  *   proj6  software/proj_app6/shared6.h (and shared6.s.inc): K_MAGIC_VERSION 0xFEDBEEF2 (no majorvers field)
  * Detection: magic1 (offset 0) must be 0xFEDBEEFn.  The proj7 layout is chosen when magic1 is
  * 0xFEDBEEF3 or higher, or when magic2 (proj7 offset 0x13C) equals magic1; otherwise 0xFEDBEEF2 is
- * the proj6 layout.  So a proj7-layout structure stamped with the proj6 constants (as isr7.s
- * DO_INIT_VERSION does while shared7.s.inc still says 0xFEDBEEF2 / 6) still decodes as proj7, and the
- * stamp mismatch is reported instead of mis-reading every field.
+ * the proj6 layout.  Older proj7 stamps (0xFEDBEEF3, or a proj6-valued stamp on a proj7 layout) still
+ * decode as proj7; a stamp that disagrees with shared7.h is reported instead of mis-reading fields.
  * VV_SM7_* (and the flags) are checked against the vendored vendor/cs150/software/proj_app7/shared7.h at
  * compile time (src/cs150_host/cs150_check.c); VV_SM6_* are not (shared6.h is not vendored).  Guest memory is
  * big-endian: read through the vv_sm_reader callback, never by overlaying struct SM_DATA. */
@@ -20,7 +19,7 @@
 
 #define VV_SM_MAGIC_BASE   0xFEDBEEF0u   /* K_MAGIC_VERSION = 0xFEDBEEF0 | n */
 #define VV_SM6_MAGIC       0xFEDBEEF2u   /* shared6.h K_MAGIC_VERSION */
-#define VV_SM7_MAGIC       0xFEDBEEF3u   /* shared7.h K_MAGIC_VERSION */
+#define VV_SM7_MAGIC       0xFEDBEEF4u   /* shared7.h K_MAGIC_VERSION */
 #define VV_SM7_MAJOR       7u            /* shared7.h K_MAJOR_VERSION */
 #define VV_SM_BUFSZ        0x0100u       /* K_SHBUF_SIZEB (both) */
 

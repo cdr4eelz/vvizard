@@ -10,8 +10,8 @@
 .equiv  K_TIMER_CYC,        K_TIMER_HZ * K_CPU_HZ
 
 ## Shared memory constants:
-.equiv  K_MAJOR_VERSION,    6
-.equiv  K_MAGIC_VERSION,    0xFEDBEEF2
+.equiv  K_MAJOR_VERSION,    7
+.equiv  K_MAGIC_VERSION,    0xFEDBEEF4
 .equiv  K_SHBUF_SIZEB,      0x0100
 .equiv  K_SHBUF_ROLLOVERB,  0x00FF
 
@@ -69,12 +69,18 @@
 .equiv  SMB_flags_pause,    0
 .equiv  SMB_flags_notimer,  1
 .equiv  SMB_flags_quit,     2
+.equiv  SMB_flags_gravity,  3
+.equiv  SMB_flags_sweeper,  4
 # Flag masks for testing or setting flags
 .equiv  SMM_flags_pause,    (1 << SMB_flags_pause) & 0xFFFF
 .equiv  SMM_flags_notimer,  (1 << SMB_flags_notimer) & 0xFFFF
 .equiv  SMM_flags_quit,     (1 << SMB_flags_quit) & 0xFFFF
+.equiv  SMM_flags_gravity,  (1 << SMB_flags_gravity) & 0xFFFF
+.equiv  SMM_flags_sweeper,  (1 << SMB_flags_sweeper) & 0xFFFF
 # Inverted flag masks, kept at 16-bits, for clearing flags
 .equiv  SMI_flags_pause,    ~SMM_flags_pause & 0xFFFF
 .equiv  SMI_flags_notimer,  ~SMM_flags_notimer & 0xFFFF
 .equiv  SMI_flags_quit,     ~SMM_flags_quit & 0xFFFF
+.equiv  SMI_flags_gravity,  ~SMM_flags_gravity & 0xFFFF
+.equiv  SMI_flags_sweeper,  ~SMM_flags_sweeper & 0xFFFF
 #NOTE: Above masks (0xFFFF) help ensure unsigned 16-bit result

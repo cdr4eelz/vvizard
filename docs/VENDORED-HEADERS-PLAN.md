@@ -291,19 +291,18 @@ When bytes differ and `git -C ../../software` works, add one annotation line: if
 | `RANDOM32` | `OW_RANDOM32` |
 | `HALTVAL` | `OW_HALTVAL` |
 
-**Known intentional divergence.** Today `shared7.h` has `K_MAGIC_VERSION (0xFEDBEEF3u)` and `K_MAJOR_VERSION 7`. `shared7.s.inc` has `0xFEDBEEF2` and `6`. Offsets match. isr7 `DO_INIT_VERSION` stamps the asm constants; `src/shmem.c` already decodes that as proj7 and warns. `vendor/cs150/known-drift`:
+**Known intentional divergence (resolved).** `shared7.h` and `shared7.s.inc` both use `K_MAGIC_VERSION (0xFEDBEEF4u)` and `K_MAJOR_VERSION 7`. Offsets match. `vendor/cs150/known-drift` currently lists no pairs; a C vs ASM mismatch is a real failure. The allowlist mechanism remains:
 
 ```
 # macro  header  asm
 # Report this pair. Do not fail the build while the values stay exactly these.
 # If they become equal, or change to any other pair, the exception does not apply.
-K_MAGIC_VERSION  software/proj_app7/shared7.h=0xFEDBEEF3  software/proj_app7/shared7.s.inc=0xFEDBEEF2
-K_MAJOR_VERSION  software/proj_app7/shared7.h=7          software/proj_app7/shared7.s.inc=6
+# (empty while C and ASM agree)
 ```
 
-- Exact recorded pair: print `check-vendor: known drift K_MAGIC_VERSION shared7.h=0xFEDBEEF3 shared7.s.inc=0xFEDBEEF2 (intentional; isr7 stamp)` and do not count it as a failure in either mode.
+- Exact recorded pair: print `check-vendor: known drift K_MAGIC_VERSION shared7.h=... shared7.s.inc=... (intentional, vendor/cs150/known-drift)` and do not count it as a failure in either mode.
 - Any other pair: the exception does not apply. Print `does not match known-drift`, and follow `VENDOR_CHECK`.
-- Both sides equal: print `known-drift K_MAGIC_VERSION no longer differs; update vendor/cs150/known-drift, README "Shared memory", and the src/shmem.c warning text`, and follow `VENDOR_CHECK`. The emulator is still consistent; the allowlist and the docs are stale.
+- Both sides equal while a pair is still listed: print `known-drift K_MAGIC_VERSION no longer differs; update vendor/cs150/known-drift, README "Shared memory", and the src/shmem.c warning text`, and follow `VENDOR_CHECK`. The emulator is still consistent; the allowlist and the docs are stale.
 
 Any other macro that differs between a `.h` and its `.s.inc` (a `SMO_*` offset, an `OW_*`, an `IM_*`) follows `VENDOR_CHECK` with no exception. That is the case that would make `src/shmem.c` mis-read a field.
 
@@ -313,12 +312,12 @@ Any other macro that differs between a `.h` and its `.s.inc` (a `SMO_*` offset, 
 
 `tests/test_vendor.py` is hermetic. It copies `vendor/cs150` into a temp directory and points the script at temp upstream trees. It does not read `../../software`. Cases:
 
-- Identical trees, `warn` and `fail`: exit 0, and the known-drift line for `0xFEDBEEF3` / `0xFEDBEEF2` is present.
+- Identical trees, `warn` and `fail`: exit 0, and no known-drift line (production known-drift has no pairs).
 - Flip one byte of upstream `mmio_intr_cop0.h`: `warn` exits 0 and the diff names `OW_` or the flipped text; `fail` exits 1.
 - Delete one upstream file while leaving `software/` in place: `warn` exits 0, `fail` exits 1, output contains `partial`.
 - No `software/` directory: `warn` and `fail` both exit 0 and say `skipped`.
-- Upstream `shared7.s.inc` magic changed to `0xFEDBEEF0`: not the recorded pair; `fail` exits 1.
-- Upstream `shared7.s.inc` magic changed to `0xFEDBEEF3` and major to `7`: output says the known-drift entry is stale; `fail` exits 1; `warn` exits 0.
+- With a synthetic known-drift pair installed in the temp vendor, asm magic `0xFEDBEEF0`: not the recorded pair; `fail` exits 1.
+- With a synthetic known-drift pair while both sides agree (or upstream both bumped together): output says the known-drift entry is stale; `fail` exits 1; `warn` exits 0.
 - A temp `hw.inc` with `HALTVAL, 0x88`: `fail` exits 1.
 - CRLF-only upstream copy: diff output says line endings differ, and the mode’s exit code applies. The script does not strip `\r`.
 - Printer values on the real vendored pair: `SMO_magic2 == 0x13C`, `IM_UARX == 0x400`, `IM_POSSIBLE == 0xFC00`, `K_TIMER_CYC == 50000000`, `SM_BASE == SM_BASE_ADDR == 0x50000000`.

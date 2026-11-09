@@ -1,13 +1,13 @@
 # Written by make vendor-update (scripts/check_vendor.py --update); do not edit by hand.
 source_root: ../../software
-source_commit: 0ff61b6079a236cc339a0d15abc28526eb649994
-source_commit_date: 2026-11-05T13:40:57-08:00
-source_dirty: no
-source_tree_dirty: no
-vendor_date: 2026-11-05T21:46:23Z
+source_commit: 5e61bdbe2aa63aa0de63155056b0df4627679e9c
+source_commit_date: 2026-11-09T09:26:39-08:00
+source_dirty: yes
+source_tree_dirty: yes (4 paths)
+vendor_date: 2026-11-09T22:42:21Z
 files:
   software/common/types.h sha256:0cc227ce870b40319c5cf0e6f351e39b2ba67fca622c268535b97f8626ac2e54
   software/common/mmio_intr_cop0.h sha256:d97c075571fe5b3ba382eb866640ba03acbf0aa5f71c902178d5768d4e310893
   software/common/mmio_intr_cop0.s.inc sha256:f80927536da8081dff22ade2eabb4d32bd7de14be019625730517faeaf794d8f
-  software/proj_app7/shared7.h sha256:ba5f4b676af825d0a0b7fe95eb533cd59d182ea5ec5cb5f683985501e414bdab
-  software/proj_app7/shared7.s.inc sha256:77da4885f5bd6177ef309763fc620e5b4b6ad8b8ff351ca60b36432e801e1d5e
+  software/proj_app7/shared7.h sha256:1b5b1c5db822db770105da967bad092a171600db81f92034cf19787fb0500b63
+  software/proj_app7/shared7.s.inc sha256:90bce166e68b6cee4e79dd01dcf2db9d9649fa3e855dea6f971a2c45050144cd

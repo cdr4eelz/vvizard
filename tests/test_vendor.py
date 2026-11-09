@@ -60,8 +60,22 @@ def cv(sw, mode="warn", vendor=VENDOR, hw_inc=os.path.join(HERE, "hw", "hw.inc")
     return r
 
 
+
 def sub(old, new):
     return lambda b: b.replace(old.encode(), new.encode(), 1)
+
+
+# Synthetic known-drift used only by the drift unit tests (production known-drift has no pairs).
+SYN_KD = (
+    "# macro  header  asm\n"
+    "K_MAGIC_VERSION  software/proj_app7/shared7.h=0xFEDBEEF4  software/proj_app7/shared7.s.inc=0xFEDBEEF2\n"
+    "K_MAJOR_VERSION  software/proj_app7/shared7.h=7           software/proj_app7/shared7.s.inc=6\n"
+)
+
+
+def write_known_drift(vendor, text=SYN_KD):
+    with open(os.path.join(vendor, "known-drift"), "w") as f:
+        f.write(text)
 
 
 # ---- A: check_vendor.py ----
@@ -69,8 +83,7 @@ def t_identical():
     sw = tree("same")
     w, f = cv(sw), cv(sw, "fail")
     return w.returncode == 0 and f.returncode == 0 and "all 5 vendored files match" in w.all \
-        and "known drift K_MAGIC_VERSION shared7.h=0xFEDBEEF3 shared7.s.inc=0xFEDBEEF2" in w.all \
-        and "known drift K_MAJOR_VERSION" in w.all and "check-vendor: OK" in w.all and "WARNING" not in w.stderr
+        and "known drift" not in w.all and "check-vendor: OK" in w.all and "WARNING" not in w.stderr
 def t_byte_flip():
     sw = tree("flip", {FILES[1]: sub("(0x0084u)", "(0x0088u)")})
     w, f = cv(sw), cv(sw, "fail")
@@ -84,20 +97,26 @@ def t_partial():
 def t_absent():
     sw = tree("absent", software=False)
     w, f = cv(sw), cv(sw, "fail")
-    return w.returncode == 0 and f.returncode == 0 and "skipped upstream compare" in w.stdout and "known drift" in w.stdout
+    return w.returncode == 0 and f.returncode == 0 and "skipped upstream compare" in w.stdout \
+        and "check-vendor: OK" in w.all and "known drift" not in w.all
 def t_off():
     r = cv(tree("off", {FILES[1]: sub("(0x0084u)", "(0x0088u)")}), "off")
     return r.returncode == 0 and r.stdout.strip() == "check-vendor: skipped (VENDOR_CHECK=off)"
-def t_drift_other_pair():   # asm magic changed to something not recorded: the exception does not apply
-    v = vendor_copy("v_f0", {FILES[4]: sub("0xFEDBEEF2", "0xFEDBEEF0")})
+def t_drift_other_pair():   # synthetic known-drift (F4/F2); asm magic is F0 instead: exception does not apply
+    v = vendor_copy("v_f0", {FILES[4]: sub("0xFEDBEEF4", "0xFEDBEEF0")})
+    write_known_drift(v)
     sw = tree("none_f0", software=False)
     r = cv(sw, "fail", v, None, )
     return r.returncode == 1 and "does not match known-drift" in r.stdout
-def t_drift_fixed():        # shared7.s.inc fixed upstream (F3 / 7): the known-drift entry is stale
-    edit = {FILES[4]: lambda b: b.replace(b"0xFEDBEEF2", b"0xFEDBEEF3").replace(b"K_MAJOR_VERSION,    6", b"K_MAJOR_VERSION,    7")}
+def t_drift_fixed():        # synthetic known-drift still lists F4/F2 while both sides agree: entry is stale
+    v = vendor_copy("v_stale_kd")
+    write_known_drift(v)
+    # Upstream bytes differ from the vendored snapshot but .h and .s.inc still agree with each other.
+    edit = {FILES[3]: sub("0xFEDBEEF4u", "0xFEDBEEF5u"), FILES[4]: sub("0xFEDBEEF4", "0xFEDBEEF5")}
     sw = tree("fixed", edit)
-    w, f = cv(sw), cv(sw, "fail")
-    return w.returncode == 0 and f.returncode == 1 and "no longer differs" in w.stdout and "DIFFERS  software/proj_app7/shared7.s.inc" in w.stderr
+    w, f = cv(sw, "warn", v), cv(sw, "fail", v)
+    return w.returncode == 0 and f.returncode == 1 and "no longer differs" in w.stdout \
+        and "DIFFERS  software/proj_app7/shared7.s.inc" in w.stderr
 def t_hw_inc():
     p = os.path.join(TMP, "hw.inc")
     with open(os.path.join(HERE, "hw", "hw.inc")) as h:

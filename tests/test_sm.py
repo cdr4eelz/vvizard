@@ -5,7 +5,7 @@ A. --dump-sm decode (src/shmem.c) of synthetic structures: proj6 layout (tests/h
    structure whose magic2 was never written (tests/hw/sm_magic2.s), and none at all.
 B. The real software/proj_app7/isr7.bin at 0xC0000000: tests/hw/sm_entry.s calls jump-table slots 0-3
    (16 bytes apart).  Slot 0 (DO_INIT_VERSION) stamps the structure with shared7.s.inc's constants;
-   while they differ from shared7.h (today on purpose: 0xFEDBEEF2 / 6) vvizard must still decode the
+   when they differ from shared7.h (historically on purpose: 0xFEDBEEF2 / 6) vvizard must still decode the
    proj7 layout and warn about the stamp, also without --dump-sm.
 C. The proj7 player (default program: GIOS + bench + isr7 + proj7) after keys: shared7.h stamp and
    fields; 'q' sets the quit flag and proj7 calls HALT(1): HaltVal 1, GIOS restarts and (if this
@@ -33,7 +33,7 @@ def h7_stamp():
     return g("K_MAGIC_VERSION"), g("K_MAJOR_VERSION")
 
 
-H7 = h7_stamp()             # (0xFEDBEEF3, 7) today
+H7 = h7_stamp()             # (0xFEDBEEF4, 7) today
 
 
 def run(args, script=None):

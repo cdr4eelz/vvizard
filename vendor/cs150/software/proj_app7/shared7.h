@@ -29,7 +29,7 @@
 
 // Shared memory constants:
 #define K_MAJOR_VERSION     7
-#define K_MAGIC_VERSION     (0xFEDBEEF3u)
+#define K_MAGIC_VERSION     (0xFEDBEEF4u)
 #define K_SHBUF_SIZEB       (0x0100u)
 #define K_SHBUF_ROLLOVERB   (K_SHBUF_SIZEB - 1)
 
@@ -85,18 +85,32 @@ struct SM_DATA {
 #define SMB_flags_pause     (0)
 #define SMB_flags_notimer   (1)
 #define SMB_flags_quit      (2)
+#define SMB_flags_gravity   (3)
+#define SMB_flags_sweeper   (4)
 // Flag masks for testing or setting flags
 #define SMM_flags_pause     ((uint16_t)(1u << SMB_flags_pause))
 #define SMM_flags_notimer   ((uint16_t)(1u << SMB_flags_notimer))
 #define SMM_flags_quit      ((uint16_t)(1u << SMB_flags_quit))
+#define SMM_flags_gravity   ((uint16_t)(1u << SMB_flags_gravity))
+#define SMM_flags_sweeper   ((uint16_t)(1u << SMB_flags_sweeper))
 // Inverted flag masks, kept at 16-bits, for clearing flags
 #define SMI_flags_pause     ((uint16_t)(~SMM_flags_pause))
 #define SMI_flags_notimer   ((uint16_t)(~SMM_flags_notimer))
 #define SMI_flags_quit      ((uint16_t)(~SMM_flags_quit))
+#define SMI_flags_gravity   ((uint16_t)(~SMM_flags_gravity))
+#define SMI_flags_sweeper   ((uint16_t)(~SMM_flags_sweeper))
 
 
-//TODO: Define in traditional C style or __asm__ snippet?
+// Fixed addresses shared between ISRs and main program
 #define SM_BASE ((struct SM_DATA *)SM_BASE_ADDR)
+
+//TODO: Define these ISR "entry points" during link (like GIOS)?
+//NOTE: I believe long jumps are always used for fn-ptrs like this...
+typedef void (*ISR_ENTRY_POINT)(void);
+#define ISR_DO_INIT_VERSION     ((ISR_ENTRY_POINT)(0xC0000000))
+#define ISR_DO_DISABLE_GLOBAL   ((ISR_ENTRY_POINT)(0xC0000010))
+#define ISR_DO_DISABLE_ALL      ((ISR_ENTRY_POINT)(0xC0000020))
+
 
 void SM_INIT7(struct SM_DATA *sm);
 
