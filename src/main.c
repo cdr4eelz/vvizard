@@ -811,7 +811,7 @@ enum { O_LOAD = 256, O_ENTRY, O_SP, O_MAX, O_UNTIL, O_TRACE, O_LITTLE, O_BIG, O_
        O_NO_KEYS, O_DUMP_FRAME, O_HOLD, O_BIOS, O_NO_BIOS, O_TRACE_REGS, O_RANDOM_DDR, O_NO_RANDOM_DDR,
        O_UART_IN, O_NO_AUTORUN, O_HALT, O_WARN, O_NO_HALT, O_QUIRKS, O_NO_QUIRKS, O_LIST_QUIRKS,
        O_DUMP_LCD, O_DUMP_SM, O_DUMP_BE32, O_SCREENSHOT, O_LEGACY_IO, O_RX_GAP, O_PF_PERIOD, O_QUIET_QUIRK, O_COLOR,
-       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC, O_CPU, O_DDR_STALLS, O_MHZ };
+       O_BARE, O_SW_DIR, O_EXIT_ON_HALT, O_NO_EXIT_ON_HALT, O_FRAME_CLOCK, O_MMIO_DECODE, O_MAX_SECONDS, O_EVENT_TRACE, O_THREADS, O_SYNC_OPT, O_CPU, O_DDR_STALLS, O_MHZ };
 
 /* Validate turbo before getopt can act on --list-quirks, open trace files, or
  * consult the quirk environment. Closed-world options are order independent. */
@@ -867,7 +867,7 @@ int main(int argc, char **argv) {
         {"quiet-quirk",1,0,O_QUIET_QUIRK},{"color",2,0,O_COLOR},{"bare",0,0,O_BARE},{"sw-dir",1,0,O_SW_DIR},
         {"exit-on-halt",0,0,O_EXIT_ON_HALT},{"no-exit-on-halt",0,0,O_NO_EXIT_ON_HALT},
         {"frame-clock",1,0,O_FRAME_CLOCK},{"mmio-decode",1,0,O_MMIO_DECODE},{"max-seconds",1,0,O_MAX_SECONDS},{"event-trace",1,0,O_EVENT_TRACE},
-        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},{"mhz",1,0,O_MHZ},
+        {"threads",1,0,O_THREADS},{"sync",0,0,O_SYNC_OPT},{"cpu",1,0,O_CPU},{"ddr-stalls",2,0,O_DDR_STALLS},{"mhz",1,0,O_MHZ},
         {0,0,0,0}};
     int c, color = VV_COLOR_AUTO;
     uint32_t emul = is_turbo ? 0 : vv_quirk_default(), qdflt = is_turbo ? 0 : vv_quirk_default();
@@ -935,7 +935,7 @@ int main(int argc, char **argv) {
             else if (!strcmp(optarg, "off")) opt_threads = 0;
             else if (is_uint(optarg) && strtoul(optarg, 0, 0) >= 1) opt_threads = strtoul(optarg, 0, 0) > 1;
             else { vv_eprintf("--threads: expected on, off or a count (1 = off), not '%s'\n", optarg); return 2; } break;
-        case O_SYNC: opt_threads = 0; break;
+        case O_SYNC_OPT: opt_threads = 0; break;
         case O_CPU:
             if (!strcmp(optarg, "unicorn")) opt_cpu = VV_CPU_UNICORN;
             else if (!strcmp(optarg, "fast")) opt_cpu = VV_CPU_FAST;

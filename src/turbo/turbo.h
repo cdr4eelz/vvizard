@@ -5,7 +5,13 @@
 #include <stddef.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+typedef dispatch_semaphore_t turbo_sem; /* macOS lacks unnamed POSIX semaphores */
+#else
 #include <semaphore.h>
+typedef sem_t turbo_sem;
+#endif
 #include <string.h>
 #include "memmap.h"
 
@@ -27,7 +33,7 @@ typedef struct turbo {
      * This makes CPU/DMA/display overlap defined without a per-pixel mutex. */
     _Atomic uint64_t code_pages[1025];
     _Atomic unsigned epoch;
-    pthread_t gpu_tid; sem_t gpu_wake;
+    pthread_t gpu_tid; turbo_sem gpu_wake;
     _Atomic int gpu_job, gpu_quit, gpu_fault;
     uint32_t job_frame, job_code;
     _Atomic int stop;

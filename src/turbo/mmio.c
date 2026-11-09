@@ -5,6 +5,27 @@
 #include "prng.h"
 #include <limits.h>
 #include <time.h>
+#include <errno.h>
+
+/* Absolute monotonic sleep where available (Linux); relative nanosleep
+ * re-armed against the monotonic clock elsewhere (macOS has no
+ * clock_nanosleep). Only used on the --mhz path. */
+static void sleep_until_ns(uint64_t due, uint64_t now) {
+#if defined(TIMER_ABSTIME) && !defined(__APPLE__)
+    (void)now;
+    struct timespec ts = { .tv_sec = (time_t)(due / 1000000000ull),
+                           .tv_nsec = (long)(due % 1000000000ull) };
+    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
+#else
+    while (due > now) {
+        uint64_t d = due - now;
+        struct timespec ts = { .tv_sec = (time_t)(d / 1000000000ull),
+                               .tv_nsec = (long)(d % 1000000000ull) };
+        nanosleep(&ts, NULL);
+        now = vv_mono_ns();
+    }
+#endif
+}
 
 /* Cold devices are out of the dispatch graph. Events are deadline-based;
  * Count is advanced in bulk by the CPU, not by a per-cycle callback. */
@@ -27,9 +48,7 @@ void turbo_events(turbo *t) {
             uint64_t due = t->t0 + (uint64_t)(t->insns * (1000.0 / t->mhz));
             uint64_t now = vv_mono_ns();
             if (due > now) {
-                struct timespec ts = { .tv_sec = (time_t)(due / 1000000000ull),
-                                      .tv_nsec = (long)(due % 1000000000ull) };
-                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+                sleep_until_ns(due, now);
                 now = due;
             }
             if (t->max_ns && now - t->t0 >= t->max_ns) t->stopped = 1;

@@ -4,6 +4,18 @@
 #include "display.h"
 #include "gpu.h"
 #include <errno.h>
+
+#ifdef __APPLE__
+static int wake_init(turbo_sem *s) { *s = dispatch_semaphore_create(0); return *s ? 0 : -1; }
+static void wake_wait(turbo_sem *s) { dispatch_semaphore_wait(*s, DISPATCH_TIME_FOREVER); }
+static void wake_post(turbo_sem *s) { dispatch_semaphore_signal(*s); }
+static void wake_destroy(turbo_sem *s) { dispatch_release(*s); }
+#else
+static int wake_init(turbo_sem *s) { return sem_init(s, 0, 0); }
+static void wake_wait(turbo_sem *s) { while (sem_wait(s) && errno == EINTR) {} }
+static void wake_post(turbo_sem *s) { sem_post(s); }
+static void wake_destroy(turbo_sem *s) { sem_destroy(s); }
+#endif
 #define W VV_SCREEN_W
 #define H VV_SCREEN_H
 typedef struct { turbo *t; uint32_t fbase; } gctx;
@@ -149,7 +161,7 @@ static int walk(turbo *t, uint32_t frame, uint32_t code) {
 static void *worker(void *arg) {
     turbo *t = arg;
     for (;;) {
-        while (sem_wait(&t->gpu_wake) && errno == EINTR) {}
+        wake_wait(&t->gpu_wake);
         if (atomic_load_explicit(&t->gpu_job, memory_order_acquire)) {
             int rc = walk(t, t->job_frame, t->job_code);
             atomic_store_explicit(&t->gpu_fault, rc != 0, memory_order_relaxed);
@@ -160,8 +172,8 @@ static void *worker(void *arg) {
     return NULL;
 }
 int turbo_gpu_start(turbo *t) {
-    if (sem_init(&t->gpu_wake, 0, 0)) return -1;
-    if (pthread_create(&t->gpu_tid, NULL, worker, t)) { sem_destroy(&t->gpu_wake); return -1; }
+    if (wake_init(&t->gpu_wake)) return -1;
+    if (pthread_create(&t->gpu_tid, NULL, worker, t)) { wake_destroy(&t->gpu_wake); return -1; }
     return 0;
 }
 void turbo_gpu_kick(turbo *t) {
@@ -170,9 +182,9 @@ void turbo_gpu_kick(turbo *t) {
     t->gp_rframe = turbo_frame(t->gp_frame); t->launches++; t->gp_pending = 1;
     atomic_store_explicit(&t->gpu_fault, 0, memory_order_relaxed);
     atomic_store_explicit(&t->gpu_job, 1, memory_order_release);
-    sem_post(&t->gpu_wake);
+    wake_post(&t->gpu_wake);
 }
 void turbo_gpu_stop(turbo *t) {
     atomic_store_explicit(&t->gpu_quit, 1, memory_order_release);
-    sem_post(&t->gpu_wake); pthread_join(t->gpu_tid, NULL); sem_destroy(&t->gpu_wake);
+    wake_post(&t->gpu_wake); pthread_join(t->gpu_tid, NULL); wake_destroy(&t->gpu_wake);
 }
