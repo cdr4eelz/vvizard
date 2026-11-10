@@ -6,23 +6,30 @@
 #include <stdio.h>
 #include <unistd.h>
 
-void turbo_publish(turbo *t) {
+static void publish(turbo *t, int final) {
     static uint64_t last;
     if (vv_disp_turbo_stop()) atomic_store_explicit(&t->stop, 1, memory_order_relaxed);
     uint64_t now = vv_mono_ns();
-    if (now - last < 16579200) return;
+    if (!final && now - last < 16579200) return;
     last = now;
-    char l1[160], l2[160], smtext[96]; vv_sm sm;
-    vv_sm_read(turbo_sm_read, t, VV_SM_BASE_ADDR, &sm);
-    vv_sm_status(&sm, VV_SM_BASE_ADDR, smtext, sizeof smtext);
-    double secs = (now - t->t0) * 1e-9;
-    snprintf(l1, sizeof l1, "turbo C %.2fM/s I - F %.1f/s", secs > 0 ? t->insns / secs * 1e-6 : 0, secs > 0 ? t->pf_frames / secs : 0);
-    snprintf(l2, sizeof l2, "%s pc %08x", smtext, t->pc);
-    vv_disp_turbo_publish(t->ram[1] + (t->pf_cur << VV_FSHIFT), t->pf_cur, t->lcd, l1, l2);
+    /* Status text 4 times a second like the other CPUs (display.c STATUS_HZ): re-formatting it at
+     * every publish made the numbers flicker unreadably. */
+    static char l1[160], l2[160]; static uint64_t st_at;
+    if (final || !st_at || now - st_at >= 250000000u) {
+        char smtext[96]; vv_sm sm;
+        vv_sm_read(turbo_sm_read, t, VV_SM_BASE_ADDR, &sm);
+        vv_sm_status(&sm, VV_SM_BASE_ADDR, smtext, sizeof smtext);
+        double secs = (now - t->t0) * 1e-9;
+        snprintf(l1, sizeof l1, "turbo C %.2fM/s I - F %.1f/s", secs > 0 ? t->insns / secs * 1e-6 : 0, secs > 0 ? t->pf_frames / secs : 0);
+        snprintf(l2, sizeof l2, "%s pc %08x", smtext, t->pc);
+        st_at = now;
+    }
+    vv_disp_turbo_publish(t->ram[1], &t->scan, t->lcd, l1, l2);
 }
+void turbo_publish(turbo *t) { publish(t, 0); }
 static void *cpu_worker(void *arg) {
     turbo *t = arg; turbo_cpu(t);
-    if (t->window) { turbo_publish(t); vv_disp_turbo_done(); }
+    if (t->window) { publish(t, 1); vv_disp_turbo_done(); }   /* final frame + status */
     return NULL;
 }
 static int dump_frame(turbo *t, const char *path) {

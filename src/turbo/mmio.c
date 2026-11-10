@@ -58,6 +58,10 @@ void turbo_events(turbo *t) {
     }
     if (t->insns >= t->pf_at) {
         do { t->pf_at += VV_PF_PERIOD; t->pf_frames++; } while (t->pf_at <= t->insns);
+        if (t->pf_next != t->pf_cur) {   /* once per guest flip: tell the display (seqlock, see turbo.h) */
+            uint32_t s = atomic_load_explicit(&t->scan, memory_order_relaxed);
+            atomic_store_explicit(&t->scan, (((s >> 6) + 1) << 6) | t->pf_next, memory_order_release);
+        }
         t->pf_cur = t->pf_next; t->cause |= VV_IP_PF;
     }
     if (t->gp_pending && !atomic_load_explicit(&t->gpu_job, memory_order_acquire)) {

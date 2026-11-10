@@ -1,6 +1,7 @@
 #ifndef VV_DISPLAY_H
 #define VV_DISPLAY_H
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <unicorn/unicorn.h>
 /* PixelFeeder model: 800x600, XRGB32 (R=23:16 G=15:8 B=7:0) big-endian words,
@@ -32,8 +33,9 @@ void vv_disp_main_loop(void);
 void vv_disp_emu_done(uc_engine *uc);          /* emulator thread at the end: last publish */
 /* Provided by main.c: the two status lines shown in the strip. */
 void vv_status_lines(uc_engine *uc, char *l1, size_t n1, char *l2, size_t n2);
-/* Turbo publishes host RAM and status, never a Unicorn register snapshot. */
-void vv_disp_turbo_publish(const uint8_t *frame, uint32_t fn, const uint8_t *lcd, const char *l1, const char *l2);
+/* Turbo publishes host RAM and status, never a Unicorn register snapshot: ddr is the DDR buffer
+ * (frame N at ddr + (N << VV_FSHIFT)), scan the turbo scanout word (turbo.h). */
+void vv_disp_turbo_publish(const uint8_t *ddr, const _Atomic uint32_t *scan, const uint8_t *lcd, const char *l1, const char *l2);
 void vv_disp_turbo_done(void);
 int vv_disp_turbo_stop(void);
 #endif

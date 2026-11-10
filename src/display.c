@@ -92,7 +92,8 @@ static void collect_keys(void) {
 int vv_disp_threaded;
 typedef struct {
     uint8_t px[VV_SCREEN_H][VV_SCREEN_W * 4];
-    const uint8_t *host; /* turbo: atomic guest words; NULL for legacy copied slots */
+    const uint8_t *host; /* turbo: DDR buffer of atomic guest words (frames copied by main); NULL: px is the copy */
+    const _Atomic uint32_t *scan;   /* turbo: scanout word (turbo.h) */
     char l1[160], l2[160];
     uint8_t lcd[VV_LCD_CHARS];
     uint32_t frame;
@@ -307,22 +308,34 @@ void vv_disp_emu_done(uc_engine *uc) {
     if (vv_disp_threaded) publish(uc);
     atomic_store(&emu_done, 1); wake_main();
 }
+/* Turbo (main thread): copy the frame being scanned out into sl->px, seqlock style.  The guest
+ * double-buffers (draws the other frame, flips at a frame end, then redraws the old one), so the
+ * scanned-out frame is stable until the next flip; when scan changed during the copy, the copied
+ * frame may already be partly cleared/redrawn (seen as flicker), so copy the new one instead.  Costs
+ * the CPU thread nothing beyond one store per flip; after a few tries (a guest flipping faster than
+ * the copy) the last copy is kept. */
+static void turbo_copy(disp_slot *sl) {
+    uint32_t s = atomic_load_explicit(sl->scan, memory_order_acquire);
+    for (int tries = 0; ; tries++) {
+        const uint8_t *f = sl->host + ((size_t)(s & VV_FNMASK) << VV_FSHIFT);
+        for (int y = 0; y < VV_SCREEN_H; y++) {
+            const uint32_t *src = (const uint32_t *)(f + (size_t)y * VV_ROW_PITCH);
+            uint32_t *dst = (uint32_t *)sl->px[y];
+            for (int x = 0; x < VV_SCREEN_W; x++) dst[x] = __atomic_load_n(&src[x], __ATOMIC_RELAXED);
+        }
+        atomic_thread_fence(memory_order_acquire);
+        uint32_t s2 = atomic_load_explicit(sl->scan, memory_order_relaxed);
+        if (s2 == s || tries == 3) { sl->frame = s & VV_FNMASK; return; }
+        s = atomic_load_explicit(sl->scan, memory_order_acquire);
+    }
+}
 static int draw_fresh(void) {               /* main: draw the middle slot if it is new */
     if (!(atomic_load_explicit(&tb_mid, memory_order_acquire) & SLOT_FRESH)) return 0;
     uint64_t t0 = vv_mono_ns();
     tb_front = atomic_exchange_explicit(&tb_mid, tb_front, memory_order_acq_rel) & 3u;
-    const disp_slot *sl = &slots[tb_front];
-    for (int y = 0; y < VV_SCREEN_H; y++) {
-        if (!sl->host) swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, sl->px[y]);
-        else {
-            uint8_t row[VV_SCREEN_W * 4];
-            for (int x = 0; x < VV_SCREEN_W; x++) {
-                uint32_t v = __atomic_load_n((const uint32_t *)(sl->host + y * VV_ROW_PITCH + x * 4), __ATOMIC_RELAXED);
-                memcpy(row + x * 4, &v, 4);
-            }
-            swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, row);
-        }
-    }
+    disp_slot *sl = &slots[tb_front];
+    if (sl->host) turbo_copy(sl);
+    for (int y = 0; y < VV_SCREEN_H; y++) swizzle_row(rgba + (size_t)y * VV_SCREEN_W * 4, sl->px[y]);
     klq_drain();
     UpdateTexture(tex, rgba);
     BeginDrawing(); ClearBackground(BLACK); DrawTexture(tex, 0, 0, WHITE); draw_strip(sl->l1, sl->l2, sl->lcd); EndDrawing();
@@ -385,12 +398,12 @@ int vv_disp_screenshot(uc_engine *uc, const char *path) {
 }
 void vv_disp_close(void) { if (have_window) { UnloadTexture(tex); CloseWindow(); have_window = 0; } }
 
-/* Emulator-side snapshot contains only a frame reference, LCD and text. Guest
- * pixels are atomic words, so a later DMA cannot cause a C data race. Turbo
- * intentionally permits scanout tearing rather than blocking the guest. */
-void vv_disp_turbo_publish(const uint8_t *frame, uint32_t fn, const uint8_t *lcd, const char *l1, const char *l2) {
+/* Emulator-side snapshot contains only the DDR/scanout references, LCD and text: the main thread
+ * copies the pixels (turbo_copy), so the CPU thread never copies a frame and never waits.  Guest
+ * pixels are atomic words, so a concurrent DMA cannot cause a C data race. */
+void vv_disp_turbo_publish(const uint8_t *ddr, const _Atomic uint32_t *scan, const uint8_t *lcd, const char *l1, const char *l2) {
     disp_slot *sl = &slots[tb_back];
-    sl->host = frame; sl->frame = fn; memcpy(sl->lcd, lcd, VV_LCD_CHARS);
+    sl->host = ddr; sl->scan = scan; memcpy(sl->lcd, lcd, VV_LCD_CHARS);
     snprintf(sl->l1, sizeof sl->l1, "%s", l1); snprintf(sl->l2, sizeof sl->l2, "%s", l2);
     tb_back = atomic_exchange_explicit(&tb_mid, tb_back | SLOT_FRESH, memory_order_acq_rel) & 3u;
     wake_main();

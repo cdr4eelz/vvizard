@@ -37,6 +37,10 @@ typedef struct turbo {
     _Atomic int gpu_job, gpu_quit, gpu_fault;
     uint32_t job_frame, job_code;
     _Atomic int stop;
+    /* Scanout for the display thread: (number of frame switches << 6) | pf_cur, release-stored when
+     * pf_cur changes.  The display copies frame (scan & 63) and keeps the copy only when scan did
+     * not change meanwhile, so it never shows a frame the guest has started to redraw. */
+    _Atomic uint32_t scan;
     void *cache;
 } turbo;
 
